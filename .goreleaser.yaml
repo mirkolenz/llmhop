@@ -1,0 +1,6 @@
+release:
+  prerelease: auto
+builds:
+  - main: ./cmd/llmhop
+    binary: llmhop
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json

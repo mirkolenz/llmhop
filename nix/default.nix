@@ -56,7 +56,7 @@
           token = "$GH_TOKEN";
         };
         version = builtins.getEnv "VERSION";
-        images = with self.packages; [
+        imageStreams = with self.packages; [
           x86_64-linux.docker
           aarch64-linux.docker
         ];

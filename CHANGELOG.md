@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.0](https://github.com/mirkolenz/llmhop/compare/v1.0.1...v1.1.0) (2026-04-14)
+
+### Features
+
+* add support for auth tokens and model headers ([c302742](https://github.com/mirkolenz/llmhop/commit/c30274258dab54228f1b071ca8e6cf0c7f8c936d))
+
 ## [1.0.1](https://github.com/mirkolenz/llmhop/compare/v1.0.0...v1.0.1) (2026-04-14)
 
 ### Bug Fixes

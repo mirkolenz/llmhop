@@ -22,9 +22,11 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 
 ## Authentication
 
-LLMhop is deliberately auth-agnostic: headers (including `Authorization`, `api-key`, etc.) are forwarded verbatim, and the router never inspects, injects or rewrites API tokens.
-This makes it compatible with protected endpoints, but it also means your client is responsible for supplying the correct credentials per model — either by sending the right token for each request or by sharing a single token across all configured backends.
-Per-backend credential injection may be added to LLMhop in the future.
+LLMhop can optionally gate incoming requests with a list of bearer tokens and inject per-model `Authorization` (or any other) headers when forwarding to the backend.
+Both sides are opt-in: leave `authTokens` and `models.*.headers` unset and headers are forwarded verbatim.
+
+When `authTokens` is set, the router validates the incoming `Authorization: Bearer <token>` header (constant-time compare) and then strips it before forwarding, so the client-facing token never leaks upstream.
+Per-model headers are applied last, so a configured `Authorization` always wins over whatever the client sent.
 
 ## Configuration
 
@@ -33,11 +35,39 @@ Create a `config.json`:
 ```json
 {
   "listen": ":8080",
+  "authTokens": ["${file:client_token}"],
   "models": {
-    "llama-3-8b": { "url": "http://localhost:30000" },
-    "qwen-2.5-7b": { "url": "http://localhost:30001" }
+    "llama-3-8b": {
+      "url": "http://localhost:30000"
+    },
+    "openai-gpt-4o": {
+      "url": "https://api.openai.com",
+      "headers": {
+        "Authorization": "Bearer ${env:OPENAI_KEY}"
+      }
+    }
   }
 }
+```
+
+### Secret references
+
+String values inside `authTokens` and `models.*.headers` are expanded at startup, so no plaintext secret ever has to live in the config file:
+
+- `${env:NAME}` — read from the `NAME` environment variable.
+- `${file:path}` — read from a file. Relative paths are resolved against `$CREDENTIALS_DIRECTORY` when set (e.g. when launched by systemd with `LoadCredential=`), otherwise against the current working directory. A single trailing newline is trimmed.
+- `$NAME` — shorthand for `${env:NAME}`.
+
+Unresolved references are a hard startup error.
+
+### Request size limit
+
+LLMhop buffers each request body in memory so it can peek at the `model` field before forwarding.
+To keep a single request from exhausting memory, the body is capped at 100 MiB by default; bodies beyond the cap are rejected with `413 Request Entity Too Large`.
+Override it when vision or other multimodal payloads need more:
+
+```json
+{ "maxBodyBytes": 524288000 }
 ```
 
 ## Running
@@ -93,3 +123,34 @@ Add LLMhop to your flake inputs and import the module into your system configura
 ```
 
 The unit runs under `DynamicUser` with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
+
+### Secrets
+
+The generated config file lives in the world-readable Nix store, so secrets should never be placed in `services.llmhop.settings` directly.
+Instead, reference them via `${file:...}` and hand the files to the service with systemd's `LoadCredential=`.
+The right-hand side of each `LoadCredential` entry is just a file path, so anything that produces a file works: [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs, a manually-managed file under `/etc/llmhop/`, or a path emitted by your own secret-provisioning tool.
+
+```nix
+services.llmhop.settings = {
+  authTokens = [ "\${file:client_token}" ];
+  models."openai-gpt-4o" = {
+    url = "https://api.openai.com";
+    headers.Authorization = "Bearer \${env:OPENAI_KEY}";
+  };
+};
+
+systemd.services.llmhop.serviceConfig = {
+  LoadCredential = [ "client_token:/etc/llmhop/client-token" ];
+  EnvironmentFile = [ "/etc/llmhop/openai.env" ];
+};
+```
+
+`/etc/llmhop/openai.env` is a plain `KEY=VALUE` file:
+
+```env
+OPENAI_KEY=sk-...
+```
+
+`${file:...}` references are resolved against `$CREDENTIALS_DIRECTORY`, which systemd exposes as a per-unit tmpfs accessible only to this service, compatible with `DynamicUser` and the rest of the sandbox.
+`${env:...}` picks up anything the unit inherits, typically via `EnvironmentFile=`.
+Pick whichever matches how your secret tooling hands you the data; mixing both in one config is fine.

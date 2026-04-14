@@ -56,20 +56,39 @@ docker run --rm -p 8080:8080 -v ./config.json:/config.json ghcr.io/mirkolenz/llm
 ## NixOS module
 
 A hardened systemd service is provided out of the box.
-Import the flake's NixOS module and enable the service:
+Add LLMhop to your flake inputs and import the module into your system configuration:
 
 ```nix
 {
-  services.llmhop = {
-    enable = true;
-    settings = {
-      listen = ":8080";
-      models = {
-        "llama-3-8b".url = "http://localhost:30000";
-        "qwen-2.5-7b".url = "http://localhost:30001";
-      };
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    llmhop = {
+      url = "github:mirkolenz/llmhop";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
+  outputs =
+    { nixpkgs, llmhop, ... }:
+    {
+      nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          llmhop.nixosModules.default
+          {
+            services.llmhop = {
+              enable = true;
+              settings = {
+                listen = ":8080";
+                models = {
+                  "llama-3-8b".url = "http://localhost:30000";
+                  "qwen-2.5-7b".url = "http://localhost:30001";
+                };
+              };
+            };
+          }
+        ];
+      };
+    };
 }
 ```
 

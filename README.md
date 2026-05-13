@@ -1,17 +1,17 @@
 # LLMhop
 
-One port, many models — a tiny, stateless HTTP router for OpenAI-compatible LLM inference backends.
+One port, many models: A tiny, stateless HTTP router for OpenAI-compatible LLM inference backends.
 
 LLMhop peeks at the `model` field of an incoming OpenAI-compatible request and reverse-proxies it to the matching backend.
-It is primarily designed for single-model inference servers like [vLLM](https://github.com/vllm-project/vllm) and [sglang](https://github.com/sgl-project/sglang) that serve one model per process and need a thin model-aware gateway in front of them, but it works with any OpenAI-compatible backend — including multi-model servers and hosted providers — whenever you want to consolidate several upstreams behind a single endpoint.
+It is primarily designed for single-model inference servers like [vLLM](https://github.com/vllm-project/vllm) and [sglang](https://github.com/sgl-project/sglang) that serve one model per process and need a thin model-aware gateway in front of them, but it works with any OpenAI-compatible backend (including multi-model servers and hosted providers) whenever you want to consolidate several upstreams behind a single endpoint.
 
 ## Features
 
 - OpenAI-compatible reverse proxy, model router and request dispatcher for self-hosted LLM inference.
-- Stateless single-binary HTTP service — no database, no cache, no background workers, safe behind any load balancer.
+- Stateless single-binary HTTP service: no database, no cache, no background workers, safe behind any load balancer.
 - Zero external dependencies: pure Go, no third-party packages, no CGO.
 - Works with any OpenAI API-compatible backend, self-hosted or remote: vLLM, sglang, TabbyAPI, Aphrodite, Ollama, LocalAI, OpenRouter, together.ai, DeepInfra, etc.
-- Ships as a static binary, a minimal Docker image and a hardened NixOS module.
+- Ships as a static binary, a minimal Docker image and a hardened NixOS module that can optionally spin up llama.cpp, sglang or vLLM workers alongside the router.
 
 ## How it works
 
@@ -54,9 +54,9 @@ Create a `config.json`:
 
 String values inside `authTokens` and `models.*.headers` are expanded at startup, so no plaintext secret ever has to live in the config file:
 
-- `${env:NAME}` — read from the `NAME` environment variable.
-- `${file:path}` — read from a file. Relative paths are resolved against `$CREDENTIALS_DIRECTORY` when set (e.g. when launched by systemd with `LoadCredential=`), otherwise against the current working directory. A single trailing newline is trimmed.
-- `$NAME` — shorthand for `${env:NAME}`.
+- `${env:NAME}`: read from the `NAME` environment variable.
+- `${file:path}`: read from a file. Relative paths are resolved against `$CREDENTIALS_DIRECTORY` when set (e.g. when launched by systemd with `LoadCredential=`), otherwise against the current working directory. A single trailing newline is trimmed.
+- `$NAME`: shorthand for `${env:NAME}`.
 
 Unresolved references are a hard startup error.
 
@@ -123,6 +123,56 @@ Add LLMhop to your flake inputs and import the module into your system configura
 ```
 
 The unit runs under `DynamicUser` with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
+
+### Inference backends
+
+The module can also run the inference servers themselves, so you don't have to wire up llama.cpp, sglang or vLLM by hand.
+Each backend exposes a `models` attrset under `services.llmhop.<backend>` and every entry becomes one isolated worker bound to a loopback port, with the matching route registered automatically with llmhop.
+All three backends can be enabled side by side and mixed freely in the same configuration.
+
+llama.cpp runs as a native, hardened systemd system unit under `DynamicUser`.
+sglang and vLLM are launched as rootless Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix).
+Each Quadlet backend gets a dedicated, lingering system user (`sglang`, `vllm`) that owns its cache directory, sub-UID range and rootless container store.
+The container units are installed under that user's per-UID search path and therefore run as **systemd user units**, not system units.
+This is a deliberate workaround for [NVIDIA/nvidia-container-toolkit#648](https://github.com/NVIDIA/nvidia-container-toolkit/issues/648):
+`nvidia-cdi-hook` runs as an OCI `createContainer` hook inside the container's user namespace and fails to read the OCI bundle's `config.json` whenever Podman uses a UID-mapped namespace (e.g., `--userns auto` or `--userns nomap`), which is the mode you end up in when systemd's system manager launches a rootless container.
+Running each Quadlet unit under a real, lingering system user's systemd instance keeps Podman in the `keep-id`-style mapping where the CDI hook can read the bundle and the GPU is correctly exposed.
+No worker ever runs as root.
+
+For convenience, the module injects a tiny per-backend helper into `environment.systemPackages` whenever the backend's default user is used:
+
+- `llama-cpp` workers are plain system units, so they are managed with the usual `systemctl status llama-cpp-<model>` and `journalctl -u llama-cpp-<model>`.
+- `sglang-shell` and `vllm-shell` are `writeShellApplication` wrappers around `machinectl shell` that drop you into the backend user's session, where `systemctl --user`, `journalctl --user` and `podman ps` see the worker units directly. Run them with no arguments for an interactive shell, or pass a command to execute it inside the session.
+
+```nix
+services.llmhop = {
+  enable = true;
+  llama-cpp = {
+    enable = true;
+    models."qwen3-8b" = {
+      port = 18001;
+      settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
+    };
+  };
+  sglang = {
+    enable = true;
+    models."qwen3-coder" = {
+      port = 19001;
+      model = "Qwen/Qwen3-8B";
+      settings.reasoning-parser = "qwen3";
+    };
+  };
+  vllm = {
+    enable = true;
+    models."llama-3-8b" = {
+      port = 20001;
+      model = "meta-llama/Meta-Llama-3-8B-Instruct";
+    };
+  };
+};
+```
+
+See the [options reference](https://mirkolenz.github.io/llmhop/) for the full list of per-backend options.
 
 ### Secrets
 

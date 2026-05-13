@@ -8,6 +8,7 @@
   systems = import inputs.systems;
   imports = [
     inputs.treefmt-nix.flakeModule
+    ./docs
   ];
   flake = {
     nixosModules.default = {

@@ -1,0 +1,13 @@
+[book]
+title = "llmhop"
+description = "One port, many models — a tiny HTTP router for OpenAI-compatible LLM inference backends"
+authors = ["Mirko Lenz"]
+language = "en"
+
+[output.html]
+default-theme = "light"
+git-repository-icon = "fab-github"
+git-repository-url = "https://github.com/mirkolenz/llmhop"
+no-section-label = true
+preferred-dark-theme = "ayu"
+smart-punctuation = true

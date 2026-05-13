@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.0](https://github.com/mirkolenz/llmhop/compare/v1.1.0...v1.2.0) (2026-05-13)
+
+### Features
+
+* **nixos:** add options for serving llama-cpp, sglang, vllm ([67c07d4](https://github.com/mirkolenz/llmhop/commit/67c07d44b398fec73600b4323657c83311d1cb78))
+
 ## [1.1.0](https://github.com/mirkolenz/llmhop/compare/v1.0.1...v1.1.0) (2026-04-14)
 
 ### Features

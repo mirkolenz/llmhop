@@ -74,7 +74,7 @@ in
   options.services.llmhop.vllm =
     mkOptions {
       backend = "vllm";
-      inherit cfg;
+      inherit cfg config;
       defaultImage = "docker.io/vllm/vllm-openai";
       defaultCacheDir = "/var/cache/vllm";
       tagExample = "v0.11.0";
@@ -85,7 +85,12 @@ in
       models = lib.mkOption {
         type = lib.types.attrsOf (
           lib.types.submodule {
-            imports = [ (mkModelSubmodule { backend = "vllm"; }) ];
+            imports = [
+              (mkModelSubmodule {
+                backend = "vllm";
+                inherit cfg;
+              })
+            ];
             options.port = lib.mkOption {
               type = lib.types.port;
               description = ''

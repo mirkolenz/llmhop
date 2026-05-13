@@ -143,7 +143,7 @@ in
   options.services.llmhop.sglang =
     mkOptions {
       backend = "sglang";
-      inherit cfg;
+      inherit cfg config;
       defaultImage = "docker.io/lmsysorg/sglang";
       defaultCacheDir = "/var/cache/sglang";
     }
@@ -153,7 +153,12 @@ in
       models = lib.mkOption {
         type = lib.types.attrsOf (
           lib.types.submodule {
-            imports = [ (mkModelSubmodule { backend = "sglang"; }) ];
+            imports = [
+              (mkModelSubmodule {
+                backend = "sglang";
+                inherit cfg;
+              })
+            ];
             options.port = lib.mkOption {
               type = lib.types.port;
               description = ''

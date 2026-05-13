@@ -277,11 +277,14 @@ in
     # `options.services.llmhop.<backend>` via `//`; the caller adds `enable`,
     # `models`, and any backend-specific extras (gateway sub-options, etc.).
     # `cfg` (the corresponding `config.services.llmhop.<backend>`) is passed
-    # in so the GID-side options can lazily default to their UID counterparts.
+    # in so the GID-side options can lazily default to their UID counterparts;
+    # `config` (the top-level NixOS config) is read so `devices` can derive
+    # its default from `hardware.nvidia-container-toolkit.enable`.
     mkOptions =
       {
         backend,
         cfg,
+        config,
         defaultImage,
         defaultCacheDir,
         tagExample ? "latest",
@@ -400,16 +403,41 @@ in
             Whether to chain enabled model services by ascending `port` during startup.
             GPU-memory profiling races otherwise: two workers booting on the same device
             each see it as fully free and race to claim their share, leading to OOM.
-            Disable only when each model has its own dedicated GPU (`gpus = [ N ]`).
+            Disable only when each model pins itself to a dedicated device via
+            its own `devices`.
+          '';
+        };
+        devices = mkOption {
+          type = with types; listOf str;
+          default =
+            if config.hardware.nvidia-container-toolkit.enable or false then [ "nvidia.com/gpu=all" ] else [ ];
+          defaultText = lib.literalExpression ''
+            if config.hardware.nvidia-container-toolkit.enable then
+              [ "nvidia.com/gpu=all" ]
+            else
+              [ ]
+          '';
+          example = [ "amd.com/gpu=all" ];
+          description = ''
+            Devices exposed to every model container — passed verbatim as Quadlet
+            `AddDevice=` lines. Accepts both CDI references (recommended:
+            `nvidia.com/gpu=…`, `amd.com/gpu=…`, `intel.com/gpu=…`, ...) and raw
+            host device paths (e.g. `/dev/dri/renderD128`). For CDI, the
+            corresponding spec must be generated on the host (e.g.
+            `nvidia-ctk cdi generate`).
+            Defaults to `[ "nvidia.com/gpu=all" ]` when
+            `hardware.nvidia-container-toolkit.enable` is set, otherwise empty
+            (CPU-only). Per-model `devices` overrides this.
           '';
         };
       };
 
     # Per-model submodule for a quadlet-based backend (without `port`, since
     # its description varies per backend). Use as one entry of `imports` inside
-    # `lib.types.submodule`.
+    # `lib.types.submodule`. `cfg` (the top-level backend config) is passed so
+    # `devices` can lazily default to the backend-wide value.
     mkModelSubmodule =
-      { backend }:
+      { backend, cfg }:
       { name, ... }:
       {
         options = (baseModelOptions { inherit backend name; }) // {
@@ -435,10 +463,18 @@ in
               Mutually exclusive with `tag`.
             '';
           };
-          gpus = mkOption {
-            type = with types; either (enum [ "all" ]) (listOf int);
-            default = "all";
-            description = "GPU device(s) exposed to the container via the NVIDIA CDI provider.";
+          devices = mkOption {
+            type = with types; listOf str;
+            default = cfg.devices;
+            defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
+            example = [ "nvidia.com/gpu=0" ];
+            description = ''
+              Devices exposed to this model's container — passed verbatim as
+              Quadlet `AddDevice=` lines. Replaces (does not extend)
+              `services.llmhop.${backend}.devices` for this model.
+              Use to pin a model to specific device indices
+              (e.g. `[ "nvidia.com/gpu=0" ]`).
+            '';
           };
           shmSize = mkOption {
             type = types.str;
@@ -524,11 +560,7 @@ in
           label = "services.llmhop.${backend}.models.${model.name}";
         };
         Pull = if model.digest != null then "missing" else "newer";
-        AddDevice =
-          if model.gpus == "all" then
-            [ "nvidia.com/gpu=all" ]
-          else
-            map (i: "nvidia.com/gpu=${toString i}") model.gpus;
+        AddDevice = model.devices;
         Volume = [ "${cfg.cacheDir}:/root/.cache/huggingface" ];
         EnvironmentFile =
           lib.optional (cfg.environmentFile != null) cfg.environmentFile

@@ -83,8 +83,9 @@ let
             )
           );
 
-          # GPU acceleration needs raw device access (NVIDIA `/dev/nvidia*`); the upstream
-          # NixOS module disables PrivateDevices for the same reason.
+          # GPU acceleration needs raw device access (e.g. `/dev/nvidia*`,
+          # `/dev/kfd` + `/dev/dri/*`, `/dev/dri/renderD*`); the upstream NixOS
+          # module disables PrivateDevices for the same reason.
           PrivateDevices = false;
 
           # llama-server listens on its own port; bind() to anything else is denied
@@ -124,6 +125,11 @@ in
               temperature = 1.0;
               top-k = 20;
             };
+            # Pin this model to a specific GPU. The right variable depends on
+            # the llama.cpp build: CUDA_VISIBLE_DEVICES for CUDA,
+            # HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES for ROCm,
+            # GGML_VK_VISIBLE_DEVICES for Vulkan, ZE_AFFINITY_MASK for SYCL.
+            environment.CUDA_VISIBLE_DEVICES = "0";
           };
         }
       '';
@@ -132,6 +138,12 @@ in
         Each entry produces one systemd service running `llama-server`; the
         attribute name is the routing key surfaced through llmhop and the OpenAI
         `model` field.
+
+        GPU selection is done via build-specific environment variables on
+        `environment` (top-level or per-model), since llama.cpp runs as a host
+        process — no CDI involved. Common variables: `CUDA_VISIBLE_DEVICES`
+        (CUDA), `HIP_VISIBLE_DEVICES` / `ROCR_VISIBLE_DEVICES` (ROCm),
+        `GGML_VK_VISIBLE_DEVICES` (Vulkan), `ZE_AFFINITY_MASK` (SYCL).
       '';
     };
   };

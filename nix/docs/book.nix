@@ -4,7 +4,7 @@
   mdbook,
   writeShellApplication,
   python3,
-  options,
+  sections,
 }:
 stdenvNoCC.mkDerivation (finalAttrs: {
   name = "book";
@@ -20,7 +20,17 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preBuild
 
     ln -s ${../../README.md} src/README.md
-    ln -s ${options} src/nixos-options.md
+
+    ${lib.concatMapStringsSep "\n" (section: ''
+      echo "" >> src/SUMMARY.md
+      echo "# ${section.title}" >> src/SUMMARY.md
+      echo "" >> src/SUMMARY.md
+      mkdir -p src/${section.prefix}
+      ${lib.concatMapStringsSep "\n" (page: ''
+        echo "- [${page.title}](${section.prefix}/${page.name}.md)" >> src/SUMMARY.md
+        ln -s ${page.value} src/${section.prefix}/${page.name}.md
+      '') section.pages}
+    '') sections}
 
     mdbook build
 

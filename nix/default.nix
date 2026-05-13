@@ -10,7 +10,13 @@
     inputs.treefmt-nix.flakeModule
   ];
   flake = {
-    nixosModules.default = ./module.nix;
+    nixosModules.default = {
+      imports = [
+        inputs.quadlet-nix.nixosModules.default
+        ./module
+      ];
+    };
+    lib = import ./module/lib.nix lib;
   };
   perSystem =
     {
@@ -32,7 +38,7 @@
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
         inherit (config.packages) docker;
-        module = pkgs.callPackage ./test.nix { };
+        module = pkgs.callPackage ./test.nix { inherit self; };
       };
       packages = {
         default = config.packages.llmhop;

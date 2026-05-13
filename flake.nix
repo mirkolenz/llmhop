@@ -11,6 +11,13 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    quadlet-nix = {
+      url = "github:mirkolenz/quadlet-nix/v1";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        flake-parts.follows = "flake-parts";
+      };
+    };
   };
   nixConfig = {
     extra-substituters = [

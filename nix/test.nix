@@ -1,4 +1,9 @@
-{ pkgs, testers, ... }:
+{
+  pkgs,
+  testers,
+  self,
+  ...
+}:
 let
   clientToken = pkgs.writeText "client-token" "client-secret";
   upstreamKey = pkgs.writeText "upstream-key" "upstream-secret";
@@ -9,7 +14,7 @@ testers.nixosTest {
   nodes.machine =
     { ... }:
     {
-      imports = [ ./module.nix ];
+      imports = [ self.nixosModules.default ];
 
       services.llmhop = {
         enable = true;

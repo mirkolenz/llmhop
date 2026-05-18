@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1](https://github.com/mirkolenz/llmhop/compare/v1.2.0...v1.2.1) (2026-05-18)
+
+### Bug Fixes
+
+* **nixos:** allow arbitrary devices to be added to quadlet, not just nvidia gpus ([e4d5f8c](https://github.com/mirkolenz/llmhop/commit/e4d5f8c9986bf114f8d6c1b44904a4993b118759))
+
 ## [1.2.0](https://github.com/mirkolenz/llmhop/compare/v1.1.0...v1.2.0) (2026-05-13)
 
 ### Features

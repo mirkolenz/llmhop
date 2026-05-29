@@ -516,18 +516,14 @@ in
           // serviceConfig;
         unitConfig = sharedUnitConfig // unitConfig;
         # `[Container]` defaults: minimal hardening (podman handles the rest)
-        # plus an HTTP `/health` probe. `ReadOnly = true` keeps the rootfs
-        # immutable; the `/root/.cache` tmpfs covers HF / Torch / Triton /
-        # SGLang kernel-lock caches (the HF bind-mount from `mkContainerArgs`
-        # layers over it without conflict).
+        # plus an HTTP `/health` probe. The rootfs stays writable — ML runtimes
+        # scatter JIT/compile caches across version-dependent HOME paths, so an
+        # immutable rootfs would need an ever-growing tmpfs allow-list. `/tmp` is
+        # a tmpfs for fast scratch (torch inductor's `/tmp/torchinductor_root`).
         containerConfig = {
           NoNewPrivileges = true;
           DropCapability = "all";
-          ReadOnly = true;
-          Tmpfs = [
-            "/tmp"
-            "/root/.cache"
-          ];
+          Tmpfs = [ "/tmp" ];
           Notify = "healthy";
           HealthCmd = "curl --fail --silent --show-error http://localhost:${toString healthPort}${healthPath}";
           HealthStartPeriod = healthStartPeriod;

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.2](https://github.com/mirkolenz/llmhop/compare/v1.2.1...v1.2.2) (2026-05-29)
+
+### Bug Fixes
+
+* **nixos:** remove read-only config from container-based services ([689cb34](https://github.com/mirkolenz/llmhop/commit/689cb345009973a21510ff4b2aaae724a58ab11f))
+
 ## [1.2.1](https://github.com/mirkolenz/llmhop/compare/v1.2.0...v1.2.1) (2026-05-18)
 
 ### Bug Fixes

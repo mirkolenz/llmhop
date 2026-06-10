@@ -56,6 +56,12 @@ let
           TasksMax = 4096;
           UMask = "0077";
 
+          # `--mlock` locks model weights into RAM, and on CUDA the host side
+          # of device buffers is page-locked too. Both draw from RLIMIT_MEMLOCK,
+          # which a DynamicUser unit otherwise inherits as systemd's 8 MiB
+          # default — too small, so `cudaMalloc` reports OOM despite free VRAM.
+          LimitMEMLOCK = "infinity";
+
           # DynamicUser + per-unit StateDirectory/CacheDirectory pin the
           # ephemeral UID across restarts and own writable paths under
           # `ProtectSystem = "strict"`. The `parent/leaf` form shares

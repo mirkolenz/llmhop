@@ -507,9 +507,14 @@ in
       }:
       {
         uid = cfg.uid;
+        # `Restart = "always"` overrides quadlet-nix's `on-failure` default:
+        # vLLM/sglang catch an EngineCore death, shut the API server down
+        # gracefully, and exit 0, so `on-failure` would leave a crashed worker
+        # dead. `StartLimitBurst` (shared unit config) still breaks crash loops.
         serviceConfig =
           sharedServiceConfig
           // {
+            Restart = "always";
             LimitNOFILE = cfg.openFilesLimit;
           }
           // serviceConfig;

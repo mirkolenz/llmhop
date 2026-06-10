@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.3](https://github.com/mirkolenz/llmhop/compare/v1.2.2...v1.2.3) (2026-06-10)
+
+### Bug Fixes
+
+* **llama-cpp:** set memlock limit to infinity ([d7082b0](https://github.com/mirkolenz/llmhop/commit/d7082b07e9b9ccc4327b9797ff1b56cda82d96fa))
+* **systemd:** drop unsupported hardening flag ([7adf7df](https://github.com/mirkolenz/llmhop/commit/7adf7df214b6e7bce2e8afac5038212e9319fb1e))
+* **vllm:** always restart services, not just on failure ([4fba157](https://github.com/mirkolenz/llmhop/commit/4fba15741e01d6ce34250aef958709114df968bb))
+
 ## [1.2.2](https://github.com/mirkolenz/llmhop/compare/v1.2.1...v1.2.2) (2026-05-29)
 
 ### Bug Fixes

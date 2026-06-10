@@ -153,7 +153,6 @@ let
     ProtectClock = true;
     ProtectControlGroups = true;
     ProtectHome = true;
-    ProtectKernelImage = true;
     ProtectKernelLogs = true;
     ProtectKernelModules = true;
     ProtectKernelTunables = true;

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.4](https://github.com/mirkolenz/llmhop/compare/v1.2.3...v1.2.4) (2026-06-28)
+
+### Bug Fixes
+
+* **nixos:** split up module into core and quadlet parts ([410a053](https://github.com/mirkolenz/llmhop/commit/410a053e0e5e969500390a6d658673ec08a24863))
+
 ## [1.2.3](https://github.com/mirkolenz/llmhop/compare/v1.2.2...v1.2.3) (2026-06-10)
 
 ### Bug Fixes

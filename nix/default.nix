@@ -11,10 +11,15 @@
     ./docs
   ];
   flake = {
-    nixosModules.default = {
-      imports = [
+    nixosModules = {
+      core = ./module/core.nix;
+      quadlet.imports = [
         inputs.quadlet-nix.nixosModules.default
-        ./module
+        ./module/quadlet.nix
+      ];
+      default.imports = [
+        self.nixosModules.core
+        self.nixosModules.quadlet
       ];
     };
     lib = import ./module/lib.nix lib;

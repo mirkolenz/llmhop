@@ -124,6 +124,11 @@ Add LLMhop to your flake inputs and import the module into your system configura
 
 The unit runs under `DynamicUser` with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
 
+The NixOS module is split into three exports.
+`nixosModules.core` ships the reverse proxy and the systemd-based llama.cpp backend only, with no dependency on quadlet-nix, so it stays compatible with non-NixOS deployers such as [system-manager](https://github.com/numtide/system-manager).
+`nixosModules.quadlet` adds the container backends (vLLM, SGLang) and pulls in the quadlet-nix dependency they require.
+`nixosModules.default` imports both and is the right choice for a regular NixOS host.
+
 ### Inference backends
 
 The module can also run the inference servers themselves, so you don't have to wire up llama.cpp, sglang or vLLM by hand.

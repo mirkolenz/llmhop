@@ -20,8 +20,6 @@ in
 {
   imports = [
     ./llama-cpp.nix
-    ./sglang.nix
-    ./vllm.nix
   ];
 
   options.services.llmhop = {

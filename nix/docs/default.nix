@@ -6,7 +6,7 @@
       moduleOptions =
         (lib.evalModules {
           modules = [
-            ../module/quadlet.nix
+            ../modules/quadlet.nix
             {
               _module.args = {
                 inherit pkgs;

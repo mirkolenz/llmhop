@@ -12,17 +12,17 @@
   ];
   flake = {
     nixosModules = {
-      core = ./module/core.nix;
+      core = ./modules/core.nix;
       quadlet.imports = [
         inputs.quadlet-nix.nixosModules.default
-        ./module/quadlet.nix
+        ./modules/quadlet.nix
       ];
       default.imports = [
         self.nixosModules.core
         self.nixosModules.quadlet
       ];
     };
-    lib = import ./module/lib.nix lib;
+    lib = import ./modules/lib.nix lib;
   };
   perSystem =
     {

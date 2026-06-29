@@ -8,6 +8,7 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 ## Features
 
 - OpenAI-compatible reverse proxy, model router and request dispatcher for self-hosted LLM inference.
+- Native `GET /v1/models` and `GET /v1/models/{model}` endpoints served directly from the config, so clients can discover every backend behind the single endpoint.
 - Stateless single-binary HTTP service: no database, no cache, no background workers, safe behind any load balancer.
 - Zero external dependencies: pure Go, no third-party packages, no CGO.
 - Works with any OpenAI API-compatible backend, self-hosted or remote: vLLM, sglang, TabbyAPI, Aphrodite, Ollama, LocalAI, OpenRouter, together.ai, DeepInfra, etc.
@@ -19,6 +20,10 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 2. LLMhop reads the `model` field and looks it up in its config.
 3. The request is forwarded verbatim to the configured backend URL.
 4. Unknown models return `404`.
+
+`GET /v1/models` and `GET /v1/models/{model}` are answered by LLMhop itself from the configured models, never proxied, so the catalog reflects exactly what is routable.
+Everything else is dispatched by its `model` field as above.
+When `authTokens` is set, all routes (the models API included) require a valid bearer token.
 
 ## Authentication
 

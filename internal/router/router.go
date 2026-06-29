@@ -1,6 +1,7 @@
 // Package router builds the HTTP handler that authenticates incoming
-// requests, picks a backend based on the JSON "model" field and forwards
-// the request through a per-model reverse proxy with injected headers.
+// requests, serves the OpenAI models API from the configured models and
+// forwards every other request through a per-model reverse proxy with
+// injected headers.
 package router
 
 import (
@@ -17,21 +18,22 @@ import (
 	"github.com/mirkolenz/llmhop/internal/config"
 )
 
-// New returns an http.Handler that proxies each request to the backend
-// matching its JSON "model" field, guarded by the configured auth tokens.
+// New returns an http.Handler that serves the OpenAI models API from the
+// configured models and proxies every other request to the backend matching
+// its JSON "model" field, all guarded by the configured auth tokens.
 func New(cfg *config.Config) (http.Handler, error) {
 	proxies := make(map[string]*httputil.ReverseProxy, len(cfg.Models))
-	for name, model := range cfg.Models {
-		u, err := url.Parse(model.URL)
+	for name, m := range cfg.Models {
+		u, err := url.Parse(m.URL)
 		if err != nil {
-			return nil, fmt.Errorf("model %q: invalid url %q: %w", name, model.URL, err)
+			return nil, fmt.Errorf("model %q: invalid url %q: %w", name, m.URL, err)
 		}
 		proxy := httputil.NewSingleHostReverseProxy(u)
-		if len(model.Headers) > 0 {
+		if len(m.Headers) > 0 {
 			orig := proxy.Director
 			proxy.Director = func(r *http.Request) {
 				orig(r)
-				for k, v := range model.Headers {
+				for k, v := range m.Headers {
 					r.Header.Set(k, v)
 				}
 			}
@@ -44,21 +46,21 @@ func New(cfg *config.Config) (http.Handler, error) {
 		tokens[i] = []byte(t)
 	}
 
-	maxBytes := cfg.MaxBodyBytes
+	mux := http.NewServeMux()
+	registerModels(mux, cfg)
+	mux.HandleFunc("/", proxyHandler(proxies, cfg.MaxBodyBytes))
 
-	// The request body is fully buffered so we can peek at the "model"
-	// field. A streaming json.Decoder that stops at that field would let
-	// us forward very large bodies (e.g. base64 images) without copying
-	// them into memory first; see the roadmap in README.md.
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if len(tokens) > 0 {
-			if !authz.CheckBearer(req.Header.Get("Authorization"), tokens) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			req.Header.Del("Authorization")
-		}
+	return authMiddleware(tokens, mux), nil
+}
 
+// proxyHandler buffers each request body so it can peek at the JSON "model"
+// field, then forwards the request verbatim to the matching backend.
+//
+// The body is fully buffered. A streaming json.Decoder that stops at the
+// "model" field would let us forward very large bodies (e.g. base64 images)
+// without copying them into memory first; see the roadmap in README.md.
+func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 {
 			req.Body = http.MaxBytesReader(w, req.Body, maxBytes)
 		}
@@ -86,5 +88,23 @@ func New(cfg *config.Config) (http.Handler, error) {
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		req.ContentLength = int64(len(body))
 		proxy.ServeHTTP(w, req)
-	}), nil
+	}
+}
+
+// authMiddleware gates next with the configured bearer tokens and strips the
+// client Authorization header before it reaches any backend. With no tokens
+// configured it is a no-op and the header is forwarded verbatim.
+func authMiddleware(tokens [][]byte, next http.Handler) http.Handler {
+	if len(tokens) == 0 {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !authz.CheckBearer(req.Header.Get("Authorization"), tokens) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		req.Header.Del("Authorization")
+		next.ServeHTTP(w, req)
+	})
 }

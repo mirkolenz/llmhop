@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -43,12 +44,91 @@ func post(t *testing.T, handler http.Handler, body, authHeader string) *httptest
 	return rec
 }
 
+func get(t *testing.T, handler http.Handler, path, authHeader string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func newHandler(t *testing.T, auth []string, models ...string) http.Handler {
+	t.Helper()
+	backend, _ := newBackend(t)
+	m := make(map[string]config.Model, len(models))
+	for _, name := range models {
+		m[name] = config.Model{URL: backend.URL}
+	}
+	h, err := New(&config.Config{AuthTokens: auth, Models: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
 func TestInvalidModelURL(t *testing.T) {
 	cfg := &config.Config{Models: map[string]config.Model{
 		"bad": {URL: "://not a url"},
 	}}
 	if _, err := New(cfg); err == nil {
 		t.Fatal("expected error for malformed URL")
+	}
+}
+
+func TestModelsAPI(t *testing.T) {
+	h := newHandler(t, nil, "b", "a")
+
+	t.Run("list returns sorted models", func(t *testing.T) {
+		rec := get(t, h, "/v1/models", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d", rec.Code)
+		}
+		var got modelList
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Object != "list" {
+			t.Fatalf("got object %q", got.Object)
+		}
+		if len(got.Data) != 2 || got.Data[0].ID != "a" || got.Data[1].ID != "b" {
+			t.Fatalf("got models %+v", got.Data)
+		}
+		if got.Data[0].Object != "model" || got.Data[0].OwnedBy != "llmhop" {
+			t.Fatalf("got model %+v", got.Data[0])
+		}
+	})
+
+	t.Run("individual model", func(t *testing.T) {
+		rec := get(t, h, "/v1/models/a", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d", rec.Code)
+		}
+		var m model
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.ID != "a" || m.Object != "model" {
+			t.Fatalf("got model %+v", m)
+		}
+	})
+
+	t.Run("unknown model returns 404", func(t *testing.T) {
+		if rec := get(t, h, "/v1/models/nope", ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("got status %d", rec.Code)
+		}
+	})
+}
+
+func TestModelsAPIAuth(t *testing.T) {
+	h := newHandler(t, []string{"secret"}, "m")
+	if rec := get(t, h, "/v1/models", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: got status %d", rec.Code)
+	}
+	if rec := get(t, h, "/v1/models", "Bearer secret"); rec.Code != http.StatusOK {
+		t.Fatalf("valid token: got status %d", rec.Code)
 	}
 }
 

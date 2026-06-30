@@ -15,6 +15,8 @@ let
     mkModelSubmodule
     mkOptions
     mkWorker
+    ncclServiceConfig
+    ncclEnvironment
     ;
 
   # llama-server's parser only accepts space-separated `--key value` (no
@@ -44,6 +46,7 @@ let
         environment = {
           LLAMA_CACHE = "/var/cache/${subdir}";
         }
+        // ncclEnvironment
         // cfg.environment
         // model.environment;
       }
@@ -93,11 +96,14 @@ let
           # `/dev/kfd` + `/dev/dri/*`, `/dev/dri/renderD*`); the upstream NixOS
           # module disables PrivateDevices for the same reason.
           PrivateDevices = false;
-
-          # llama-server listens on its own port; bind() to anything else is denied
-          # by `SocketBindDeny = "any"` from the baked-in systemd hardening.
-          SocketBindAllow = "tcp:${toString model.port}";
-        };
+        }
+        # llama.cpp drives multi-GPU inference through NCCL, so the worker always
+        # gets the netlink family and all-TCP bind it needs (a harmless widening
+        # for single-GPU models, and it covers llama-server's own listener that
+        # `SocketBindDeny = "any"` would otherwise deny), then any per-model
+        # `serviceConfig` overrides last.
+        // ncclServiceConfig
+        // model.serviceConfig;
       }
     );
 in

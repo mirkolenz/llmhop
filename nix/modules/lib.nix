@@ -173,6 +173,26 @@ let
     ProcSubset = "pid";
   };
 
+  # Relaxations NCCL needs to initialise for multi-GPU / tensor-parallel
+  # inference, layered on top of the hardened baseline. `getifaddrs()` opens an
+  # AF_NETLINK socket during its interface scan, so that family is re-added.
+  # The bootstrap/proxy/RAS listeners bind ephemeral (port 0) TCP sockets, which
+  # `SocketBindDeny = "any"` refuses. The bind hook only ever sees port 0, never
+  # the assigned port, so allow-all-TCP is the tightest workable rule, and it
+  # already covers the worker's own listener. UDP stays denied.
+  ncclServiceConfig = {
+    RestrictAddressFamilies = hardenedServiceConfig.RestrictAddressFamilies ++ [ "AF_NETLINK" ];
+    SocketBindAllow = "tcp";
+  };
+
+  # NCCL defaults for single-host workers: keep the transport on loopback and
+  # off any InfiniBand fabric (there is none on a single node). Applied as
+  # environment defaults, so a deployer can still override them per model.
+  ncclEnvironment = {
+    NCCL_SOCKET_IFNAME = "lo";
+    NCCL_IB_DISABLE = "1";
+  };
+
   # Enabled-model subset shared by registry helpers and backend iteration.
   enabledModels = cfg: lib.filterAttrs (_: m: m.enable) cfg.models;
 
@@ -683,12 +703,34 @@ in
       { backend }:
       { name, ... }:
       {
-        options = baseModelOptions { inherit backend name; };
+        options = baseModelOptions { inherit backend name; } // {
+          # Escape hatch merged last by the worker, so it wins over the hardened
+          # baseline and any backend relaxations.
+          serviceConfig = mkOption {
+            type = with types; attrsOf anything;
+            default = { };
+            example = {
+              MemoryHigh = "64G";
+            };
+            description = ''
+              Extra `[Service]` settings merged verbatim into this model's
+              `${backend}-<name>` unit, applied last so they override both the
+              hardened baseline and any backend-applied relaxations (e.g. the
+              NCCL socket rules). Escape hatch for host-specific tweaks without
+              having to target the generated unit by name.
+            '';
+          };
+        };
       };
 
     # Re-exported so callers (e.g. the llmhop reverse-proxy unit) can spread
     # them into their own services without going through `mkWorker`.
-    inherit hardenedServiceConfig sharedUnitConfig;
+    inherit
+      hardenedServiceConfig
+      sharedUnitConfig
+      ncclServiceConfig
+      ncclEnvironment
+      ;
 
     # Render a systemd worker unit fragment. Returns
     # `{ serviceConfig, unitConfig }` with the shared baseline plus full

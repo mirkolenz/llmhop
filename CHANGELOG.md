@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0](https://github.com/mirkolenz/llmhop/compare/v1.2.4...v1.3.0) (2026-06-30)
+
+### Features
+
+* add optional support for openai models endpoint ([1f63b26](https://github.com/mirkolenz/llmhop/commit/1f63b26548dc5c6660afd84089bd18e2ede525bd))
+
+### Bug Fixes
+
+* **nixos:** remove protect clock from systemd units ([74b14f1](https://github.com/mirkolenz/llmhop/commit/74b14f195319a329de17f335ae29ed1b483ad6b2))
+
 ## [1.2.4](https://github.com/mirkolenz/llmhop/compare/v1.2.3...v1.2.4) (2026-06-28)
 
 ### Bug Fixes

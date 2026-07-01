@@ -12,14 +12,10 @@
   ];
   flake = {
     nixosModules = {
-      core = ./modules/core.nix;
+      default = ./modules/core.nix;
       quadlet.imports = [
         inputs.quadlet-nix.nixosModules.default
         ./modules/quadlet.nix
-      ];
-      default.imports = [
-        self.nixosModules.core
-        self.nixosModules.quadlet
       ];
     };
     lib = import ./modules/lib.nix lib;
@@ -62,17 +58,30 @@
           inherit (config.packages) llmhop;
         };
       };
-      legacyPackages.docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
-        github = {
-          enable = true;
-          token = "$GH_TOKEN";
+      # Auto-discovered from ./pkgs so new builders drop in as files. Each is a
+      # function, not a package: downstream calls it with its own args, e.g.
+      #   services.llmhop.vllm.package =
+      #     inputs.llmhop.legacyPackages.${system}.mkUvEnv { workspaceRoot = ./vllm-env; };
+      legacyPackages =
+        lib.packagesFromDirectoryRecursive {
+          callPackage = pkgs.newScope {
+            inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
+          };
+          directory = ./pkgs;
+        }
+        // {
+          docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
+            github = {
+              enable = true;
+              token = "$GH_TOKEN";
+            };
+            version = builtins.getEnv "VERSION";
+            imageStreams = with self.packages; [
+              x86_64-linux.docker
+              aarch64-linux.docker
+            ];
+          };
         };
-        version = builtins.getEnv "VERSION";
-        imageStreams = with self.packages; [
-          x86_64-linux.docker
-          aarch64-linux.docker
-        ];
-      };
       devShells.default = pkgs.mkShell {
         packages = with pkgs; [
           go

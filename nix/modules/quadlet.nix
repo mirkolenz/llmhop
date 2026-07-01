@@ -1,7 +1,7 @@
 {
   imports = [
     ./core.nix
-    ./vllm.nix
-    ./sglang.nix
+    ./quadlet/vllm.nix
+    ./quadlet/sglang.nix
   ];
 }

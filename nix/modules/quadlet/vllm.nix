@@ -5,10 +5,10 @@
   ...
 }:
 let
-  cfg = config.services.llmhop.vllm;
+  cfg = config.services.llmhop.vllm-quadlet;
 
-  llmhopLib = import ./lib.nix lib;
-  inherit (llmhopLib) flipBoolFlags sortedModels;
+  llmhopLib = import ../lib.nix lib;
+  inherit (llmhopLib) cliOptionFormat flipBoolFlags sortedModels;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
@@ -22,13 +22,7 @@ let
   # render as `--no-key`. A few manual `store_true` flags (`--headless`,
   # `--grpc`, `--disable-log-stats`, `--aggregate-engine-logging`) have no
   # `--no-X` form — omit them instead of writing `... = false`.
-  renderArgs =
-    attrs:
-    lib.cli.toCommandLineShell (name: {
-      option = "--${name}";
-      sep = "=";
-      explicitBool = false;
-    }) (flipBoolFlags attrs);
+  renderArgs = attrs: lib.cli.toCommandLineShell (cliOptionFormat "=") (flipBoolFlags attrs);
 
   # Internal port every worker binds to inside its container.
   workerPort = 8000;
@@ -43,7 +37,7 @@ let
       healthPort = workerPort;
       containerConfig =
         (mkContainerArgs {
-          backend = "vllm";
+          backend = "vllm-quadlet";
           inherit cfg model;
         })
         // {
@@ -71,9 +65,9 @@ let
     });
 in
 {
-  options.services.llmhop.vllm =
+  options.services.llmhop.vllm-quadlet =
     mkOptions {
-      backend = "vllm";
+      backend = "vllm-quadlet";
       inherit cfg config;
       defaultImage = "docker.io/vllm/vllm-openai";
       defaultCacheDir = "/var/cache/vllm";
@@ -87,7 +81,7 @@ in
           lib.types.submodule {
             imports = [
               (mkModelSubmodule {
-                backend = "vllm";
+                backend = "vllm-quadlet";
                 inherit cfg;
               })
             ];
@@ -125,7 +119,7 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       (mkConfig {
-        backend = "vllm";
+        backend = "vllm-quadlet";
         inherit cfg config pkgs;
         description = "vLLM User";
       })

@@ -59,10 +59,33 @@ let
       };
     };
 
-  # Per-model options every backend exposes, regardless of kind.
+  # Quadlet backends live under the `<service>-quadlet` option namespace but
+  # emit units named `<service>-<model>`, matching their native twin (hence the
+  # mutual-exclusion assertion in `quadlet.mkConfig`).
+  quadletServiceName = lib.removeSuffix "-quadlet";
+
+  # Ascending-port startup chaining, shared by every multi-worker GPU backend.
+  # `pinNote` names the backend-specific way to pin a model to one device.
+  startupOrderingOption =
+    { pinNote }:
+    mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Whether to chain enabled model services by ascending `port` during startup.
+        GPU-memory profiling races otherwise: two workers booting on the same device
+        each see it as fully free and race to claim their share, leading to OOM.
+        Disable only when each model pins itself to a dedicated device ${pinNote}.
+      '';
+    };
+
+  # Per-model options every backend exposes, regardless of kind. `backend` is
+  # the (possibly suffixed) option namespace used in cross-references;
+  # `serviceName` is the unsuffixed prefix of the generated unit names.
   baseModelOptions =
     {
       backend,
+      serviceName ? backend,
       name,
     }:
     {
@@ -74,7 +97,7 @@ let
         default = name;
         description = ''
           Canonical identifier for this model. Used for the unit name
-          (`${backend}-<name>`) and as the routing key registered with llmhop
+          (`${serviceName}-<name>`) and as the routing key registered with llmhop
           (clients select the backend by sending this value in the OpenAI
           `model` field).
 
@@ -226,49 +249,77 @@ let
     else
       throw "${label}: one of `tag`, `digest`, or a default tag must be provided.";
 
-  # Cross-cutting NixOS fragment every backend emits: local port-uniqueness
-  # assertion plus llmhop model + ports-registry contributions. Backend
-  # extras layer on via `lib.mkMerge`.
+  # Cross-cutting NixOS fragment every backend emits: llmhop model, ports- and
+  # units-registry contributions. Backend extras layer on via `lib.mkMerge`.
   #
-  # `portsRegistry` keys are `<backend>/<modelName>` for models and
-  # `<backend>/<extraLabel>` for auxiliaries (gateways, metrics endpoints);
-  # the labels let the global collision assertion in `default.nix` name
-  # colliding owners.
+  # Both registries are keyed by the option path that owns the entry —
+  # `<backend>.models.<name>` for models, `<backend>.<extraLabel>` for
+  # auxiliaries (gateways, metrics endpoints) — so the global collision
+  # assertions in `core.nix` name the exact options to change, and a model
+  # named after an auxiliary still gets its own entry. `serviceName` is the
+  # prefix of the emitted unit names, which is why two backends sharing one
+  # (a native/quadlet pair) collide.
   mkSharedConfig =
     {
       backend,
+      serviceName,
       cfg,
       extras ? { },
-      portsMessage ? null,
+      extraUnits ? { },
     }:
     let
       models = enabledModels cfg;
-      modelPortEntries = lib.mapAttrs' (name: m: lib.nameValuePair "${backend}/${name}" m.port) models;
-      extraPortEntries = lib.mapAttrs' (name: port: lib.nameValuePair "${backend}/${name}" port) extras;
-      portsRegistry = modelPortEntries // extraPortEntries;
-      ports = lib.attrValues portsRegistry;
+      mkRegistry =
+        modelValue: extraValues:
+        lib.mapAttrs' (name: m: lib.nameValuePair "${backend}.models.${name}" (modelValue m)) models
+        // lib.mapAttrs' (label: lib.nameValuePair "${backend}.${label}") extraValues;
+      portsRegistry = mkRegistry (m: m.port) extras;
+      unitsRegistry = mkRegistry (m: "${serviceName}-${m.name}") extraUnits;
     in
     {
-      assertions = [
-        {
-          assertion = lib.length (lib.unique ports) == lib.length ports;
-          message =
-            if portsMessage != null then
-              portsMessage
-            else
-              "services.llmhop.${backend}.models: each model must use a unique `port`.";
-        }
-      ];
       services.llmhop = {
         settings.models = lib.mapAttrs (_: m: { url = "http://127.0.0.1:${toString m.port}"; }) models;
-        inherit portsRegistry;
+        inherit portsRegistry unitsRegistry;
       };
     };
 in
 {
   inherit enabledModels sortedModels resolveImageRef;
 
+  # Global uniqueness check over a `<backend>/<component>` → resource registry
+  # written by `mkSharedConfig`. Groups by resource so the message names every
+  # owner of a contested one; `resource` is the singular noun used in the text.
+  mkRegistryAssertion =
+    { registry, resource }:
+    let
+      collisions = lib.pipe (lib.attrNames registry) [
+        (lib.groupBy (name: toString registry.${name}))
+        (lib.filterAttrs (_: owners: lib.length owners > 1))
+      ];
+    in
+    {
+      assertion = collisions == { };
+      message =
+        "services.llmhop: ${resource} collisions across backends:\n"
+        + lib.concatStringsSep "\n" (
+          map (value: "${resource} ${value} reserved by ${lib.concatStringsSep ", " collisions.${value}}") (
+            lib.naturalSort (lib.attrNames collisions)
+          )
+        );
+    };
+
   # ─── CLI helpers ──────────────────────────────────────────────────────
+
+  # Option format shared by every backend's `lib.cli.toCommandLine*` call:
+  # `--<key>`, with `null` and `false` dropped rather than rendered as an
+  # explicit value. `sep = null` emits `--key` and `value` as separate argv
+  # entries (what `utils.escapeSystemdExecArgs` needs); `sep = "="` joins them
+  # into a single `--key=value` entry (what Quadlet `Exec=` lines want).
+  cliOptionFormat = sep: name: {
+    option = "--${name}";
+    inherit sep;
+    explicitBool = false;
+  };
 
   # `lib.cli.toCommandLine` drops `false` values entirely. For backends with
   # argparse `BooleanOptionalAction` (paired `--key` / `--no-key`) we want
@@ -307,14 +358,17 @@ in
         defaultCacheDir,
         tagExample ? "latest",
       }:
+      let
+        serviceName = quadletServiceName backend;
+      in
       (baseOptions { inherit backend; })
       // {
         user = mkOption {
           type = types.str;
-          default = backend;
-          defaultText = lib.literalExpression "backend";
+          default = serviceName;
+          defaultText = lib.literalExpression "serviceName";
           description = ''
-            Dedicated system user that owns the ${backend} cache directory and that
+            Dedicated system user that owns the ${serviceName} cache directory and that
             container root is mapped to via `--uidmap`. Defaults to the backend
             name; override to point at a user the deployer manages externally
             (in which case the matching `users.users.<name>` and
@@ -370,7 +424,7 @@ in
         };
         dataDir = mkOption {
           type = types.path;
-          default = "/var/lib/${backend}";
+          default = "/var/lib/${serviceName}";
           description = ''
             Home directory of `services.llmhop.${backend}.user`.
             Used by rootless podman for container storage
@@ -414,17 +468,7 @@ in
             Defaults to `subUidCount`.
           '';
         };
-        startupOrdering = mkOption {
-          type = types.bool;
-          default = true;
-          description = ''
-            Whether to chain enabled model services by ascending `port` during startup.
-            GPU-memory profiling races otherwise: two workers booting on the same device
-            each see it as fully free and race to claim their share, leading to OOM.
-            Disable only when each model pins itself to a dedicated device via
-            its own `devices`.
-          '';
-        };
+        startupOrdering = startupOrderingOption { pinNote = "via its own `devices`"; };
         devices = mkOption {
           type = with types; listOf str;
           default =
@@ -455,10 +499,16 @@ in
     # `lib.types.submodule`. `cfg` (the top-level backend config) is passed so
     # `devices` can lazily default to the backend-wide value.
     mkModelSubmodule =
-      { backend, cfg }:
+      {
+        backend,
+        cfg,
+      }:
+      let
+        serviceName = quadletServiceName backend;
+      in
       { name, ... }:
       {
-        options = (baseModelOptions { inherit backend name; }) // {
+        options = (baseModelOptions { inherit backend serviceName name; }) // {
           model = mkOption {
             type = types.str;
             example = "Qwen/Qwen2.5-7B-Instruct";
@@ -590,13 +640,14 @@ in
       };
 
     # Cross-cutting NixOS config produced by every quadlet backend:
-    # assertions (quadlet-enabled + port uniqueness), llmhop registration,
-    # port registry, `dataDir`/`cacheDir` tmpfiles, and — when `cfg.user`
-    # is left at the backend default — the system user/group plus a helper
+    # the quadlet-enabled assertion, llmhop registration, resource registries,
+    # `dataDir`/`cacheDir` tmpfiles, and, when `cfg.user` is left at the backend
+    # default, the system user/group plus a helper
     # command that drops into the rootless session via `machinectl shell`.
     #
-    # `extras` is a labeled attrset of auxiliary host ports
-    # (e.g. `{ gateway = 30000; }`) included in the port-uniqueness checks.
+    # `extras` / `extraUnits` are labeled attrsets of auxiliary host ports
+    # (e.g. `{ gateway = 30000; }`) and unit names (e.g.
+    # `{ gateway = "sglang-gateway"; }`) folded into the global registries.
     # Deployers who override `cfg.user` must declare the matching
     # `users.users.<name>` (with the right uid + sub-id ranges) and
     # `users.groups.<group>` themselves.
@@ -608,9 +659,10 @@ in
         pkgs,
         description,
         extras ? { },
-        portsMessage ? null,
+        extraUnits ? { },
       }:
       let
+        serviceName = quadletServiceName backend;
         dirSpec = {
           user = cfg.user;
           group = cfg.group;
@@ -621,9 +673,10 @@ in
         (mkSharedConfig {
           inherit
             backend
+            serviceName
             cfg
             extras
-            portsMessage
+            extraUnits
             ;
         })
         {
@@ -634,7 +687,7 @@ in
             }
           ];
 
-          systemd.tmpfiles.settings."10-${backend}" = {
+          systemd.tmpfiles.settings."10-${serviceName}" = {
             ${cfg.dataDir}.d = dirSpec;
             ${cfg.cacheDir}.d = dirSpec;
           };
@@ -644,7 +697,7 @@ in
         # writable `~/.local/share/containers`, `machinectl shell` works, and
         # `systemctl --user` keeps running across logouts. `systemd-journal`
         # makes `journalctl --user` work inside the machinectl session.
-        (lib.mkIf (cfg.user == backend) {
+        (lib.mkIf (cfg.user == serviceName) {
           users.users.${cfg.user} = {
             inherit description;
             uid = cfg.uid;
@@ -673,12 +726,12 @@ in
           # the `machinectl` incantation.
           environment.systemPackages = [
             (pkgs.writeShellApplication {
-              name = "${backend}-shell";
+              name = "${serviceName}-shell";
               text = ''
                 if [ "$#" -eq 0 ]; then
-                  echo "Entering the ${backend} user shell. Useful commands:"
-                  echo "  systemctl --user status ${backend}-<model>    # service state"
-                  echo "  journalctl --user -u ${backend}-<model> -f    # tail logs"
+                  echo "Entering the ${serviceName} user shell. Useful commands:"
+                  echo "  systemctl --user status ${serviceName}-<model>    # service state"
+                  echo "  journalctl --user -u ${serviceName}-<model> -f    # tail logs"
                   echo "  podman ps                                     # list containers"
                   echo "  exit                                          # back to host"
                   exec sudo machinectl --quiet shell ${cfg.user}@.host
@@ -693,73 +746,350 @@ in
 
   # ─── Systemd (host-process) ──────────────────────────────────────────
 
-  systemd = {
-    # Top-level options for a systemd-service backend. Just the shared base —
-    # nothing container-specific.
-    mkOptions = { backend }: baseOptions { inherit backend; };
+  systemd =
+    let
+      # Render a systemd worker unit fragment. Returns
+      # `{ serviceConfig, unitConfig }` with the shared baseline plus full
+      # systemd-exec(5) hardening merged in; caller overrides win.
+      mkWorker =
+        {
+          openFilesLimit,
+          serviceConfig ? { },
+          unitConfig ? { },
+        }:
+        {
+          # `[Service]` defaults: worker-scale timing, universal hardening, the
+          # per-unit file-descriptor limit, and a `bind()` lockdown that pairs
+          # with the caller-provided `SocketBindAllow` for the worker's listener.
+          serviceConfig =
+            sharedServiceConfig
+            // hardenedServiceConfig
+            // {
+              LimitNOFILE = openFilesLimit;
+              SocketBindDeny = "any";
+            }
+            // serviceConfig;
+          unitConfig = sharedUnitConfig // unitConfig;
+        };
 
-    # Per-model submodule for a systemd-service backend (without `port`).
-    mkModelSubmodule =
-      { backend }:
-      { name, ... }:
-      {
-        options = baseModelOptions { inherit backend name; } // {
-          # Escape hatch merged last by the worker, so it wins over the hardened
-          # baseline and any backend relaxations.
-          serviceConfig = mkOption {
-            type = with types; attrsOf anything;
-            default = { };
-            example = {
-              MemoryHigh = "64G";
-            };
+      # Per-model escape hatch shared by every systemd (host-process) backend:
+      # extra `[Service]` settings that each worker merges last, so they win over
+      # the hardened baseline and any backend relaxations.
+      serviceConfigOption =
+        { serviceName }:
+        mkOption {
+          type = with types; attrsOf anything;
+          default = { };
+          example = {
+            MemoryHigh = "64G";
+          };
+          description = ''
+            Extra `[Service]` settings merged verbatim into this model's
+            `${serviceName}-<name>` unit, applied last so they override both the
+            hardened baseline and any backend-applied relaxations (e.g. the NCCL
+            socket rules). Escape hatch for host-specific tweaks without having
+            to target the generated unit by name.
+          '';
+        };
+
+      # `ExecStartPost` readiness probe. None of the model servers speak
+      # sd_notify, so a unit would otherwise count as started the moment the
+      # process is exec'd — long before weights are loaded and the GPU profiled.
+      # systemd keeps the unit in `activating` until `ExecStartPost` exits, so
+      # this makes `After=` chains actually serialize and `systemctl start` block
+      # until the model is servable. `--retry-all-errors` also covers the 5xx
+      # every one of these servers returns while warming up. Retries are sized to
+      # `TimeoutStartSec`, which is the authoritative bound; per-model
+      # `serviceConfig` can replace the whole command.
+      healthProbeDelay = 5;
+      mkHealthProbe =
+        {
+          pkgs,
+          utils,
+          port,
+        }:
+        utils.escapeSystemdExecArgs [
+          (lib.getExe pkgs.curl)
+          "--fail"
+          "--silent"
+          "--output"
+          "/dev/null"
+          "--retry-all-errors"
+          "--retry-connrefused"
+          "--retry"
+          (toString (sharedServiceConfig.TimeoutStartSec / healthProbeDelay))
+          "--retry-delay"
+          (toString healthProbeDelay)
+          "http://127.0.0.1:${toString port}/health"
+        ];
+
+      # One systemd service for a uv/wheel-based GPU Python worker, shared by the
+      # native vLLM and SGLang backends. Layers the CUDA-on-NixOS specifics (cache
+      # redirection, driver libs, W^X relaxation, MEMLOCK), the DynamicUser
+      # layout, the readiness probe, and the startup chain (`previous` is the
+      # preceding model, or null for the first) on top of the `mkWorker`
+      # hardening baseline; only the `execStart` argv and an optional per-backend
+      # `extraEnvironment cacheBase` differ. Expects `cfg` to carry
+      # `openFilesLimit`, `startupOrdering`, `environment`, `environmentFile`.
+      # Returns a `nameValuePair`.
+      mkUvWorker =
+        {
+          serviceName,
+          cfg,
+          pkgs,
+          utils,
+          model,
+          previous,
+          execStart,
+          extraEnvironment,
+        }:
+        let
+          subdir = "${serviceName}/${model.name}";
+          # CacheDirectory root, owned by the DynamicUser. ML runtimes scatter JIT
+          # / compile caches across HOME/XDG paths; under `ProtectSystem = "strict"`
+          # they must be redirected here or the engine fails to start.
+          cacheBase = "/var/cache/${subdir}";
+        in
+        lib.nameValuePair "${serviceName}-${model.name}" (
+          {
+            description = "${serviceName} server for ${model.name}";
+            wantedBy = [ "multi-user.target" ];
+            # Chain ascending so each worker finishes GPU-memory profiling before
+            # the next starts (booting two on one device races to OOM). This is
+            # only meaningful because `ExecStartPost` holds the unit in
+            # `activating` until the server answers `/health` — see below.
+            after = [
+              "network.target"
+            ]
+            ++ lib.optional (cfg.startupOrdering && previous != null) "${serviceName}-${previous.name}.service";
+            environment = {
+              HF_HOME = cacheBase;
+              HF_HUB_CACHE = "${cacheBase}/hub";
+              XDG_CACHE_HOME = cacheBase;
+              TRITON_CACHE_DIR = "${cacheBase}/triton";
+              TORCHINDUCTOR_CACHE_DIR = "${cacheBase}/inductor";
+              # `mkUvEnv` bakes the driver runpath into the compiled wheels
+              # (autoAddDriverRunpath), so `libcuda.so.1` resolves via RPATH. This
+              # additionally covers the host driver libs the framework `dlopen`s by
+              # name from Python during GPU-memory profiling (e.g.
+              # `libnvidia-ml.so.1`), which RPATH does not reach.
+              LD_LIBRARY_PATH = "/run/opengl-driver/lib";
+            }
+            // extraEnvironment cacheBase
+            // ncclEnvironment
+            // cfg.environment
+            // model.environment;
+          }
+          // mkWorker {
+            inherit (cfg) openFilesLimit;
+            serviceConfig = {
+              Type = "exec";
+              ExecStartPost = mkHealthProbe {
+                inherit pkgs utils;
+                inherit (model) port;
+              };
+              # The frameworks trap SIGINT to drain the engine, then exit 0, so
+              # `on-failure` would leave a crashed worker dead; `always` revives it
+              # while `StartLimitBurst` (shared unit config) still breaks loops.
+              KillSignal = "SIGINT";
+              Restart = "always";
+              TasksMax = 4096;
+              UMask = "0077";
+
+              # CUDA page-locks the host side of device buffers from RLIMIT_MEMLOCK,
+              # which a DynamicUser unit otherwise caps at systemd's 8 MiB default.
+              LimitMEMLOCK = "infinity";
+
+              DynamicUser = true;
+              StateDirectory = subdir;
+              CacheDirectory = subdir;
+              WorkingDirectory = "/var/lib/${subdir}";
+
+              EnvironmentFile =
+                lib.optional (cfg.environmentFile != null) cfg.environmentFile
+                ++ lib.optional (model.environmentFile != null) model.environmentFile;
+
+              ExecStart = execStart;
+
+              # GPU acceleration needs raw device access (`/dev/nvidia*`); the
+              # upstream NVIDIA NixOS modules disable PrivateDevices for this.
+              PrivateDevices = false;
+
+              # torch-inductor / triton JIT and the CUDA driver's PTX→SASS
+              # compilation mmap PROT_WRITE|PROT_EXEC pages — incompatible with the
+              # hardened baseline's `MemoryDenyWriteExecute = true`.
+              MemoryDenyWriteExecute = false;
+            }
+            # vLLM and SGLang drive tensor parallelism through NCCL, so the GPU
+            # worker always gets the netlink family and all-TCP bind it needs (a
+            # harmless widening for single-GPU models), then any per-model
+            # `serviceConfig` overrides last.
+            // ncclServiceConfig
+            // model.serviceConfig;
+          }
+        );
+    in
+    {
+      # Top-level options for a systemd-service backend. Just the shared base —
+      # nothing container-specific.
+      mkOptions = { backend }: baseOptions { inherit backend; };
+
+      # Options for a uv/wheel-based GPU Python backend (vLLM, SGLang): the
+      # shared base plus the `startupOrdering` switch and the required, no-default
+      # `package` whose description is templated per backend. Parallels
+      # `quadlet.mkOptions` bundling its consumer-specific options; the module
+      # adds only `enable` and `models`. `displayName`/`packageEntry` fill the
+      # prose and `packageNote` appends an optional trailing paragraph.
+      mkUvOptions =
+        {
+          backend,
+          displayName,
+          packageEntry,
+          packageNote ? "",
+        }:
+        baseOptions { inherit backend; }
+        // {
+          startupOrdering = startupOrderingOption {
+            pinNote = "via `environment` (e.g. `CUDA_VISIBLE_DEVICES`)";
+          };
+          package = mkOption {
+            type = types.package;
             description = ''
-              Extra `[Service]` settings merged verbatim into this model's
-              `${backend}-<name>` unit, applied last so they override both the
-              hardened baseline and any backend-applied relaxations (e.g. the
-              NCCL socket rules). Escape hatch for host-specific tweaks without
-              having to target the generated unit by name.
+              Package providing ${packageEntry}.
+
+              No default on purpose: ${displayName} has no one-derivation-fits-all
+              (new model architectures routinely need dev snapshots, and there are
+              CUDA-variant builds), so you build the package yourself from a uv
+              workspace and pin / follow upstream there. The flake exposes a
+              helper:
+
+              ```nix
+              inputs.llmhop.legacyPackages.''${pkgs.system}.mkUvEnv {
+                workspaceRoot = ./${backend}-env; # your pyproject.toml + uv.lock
+              }
+              ```
+
+              Individual models may override this with `models.<name>.package`.
+            ''
+            + packageNote;
+            example = lib.literalExpression ''
+              inputs.llmhop.legacyPackages.''${pkgs.system}.mkUvEnv {
+                workspaceRoot = ./${backend}-env;
+              }
             '';
           };
         };
-      };
 
-    # Re-exported so callers (e.g. the llmhop reverse-proxy unit) can spread
-    # them into their own services without going through `mkWorker`.
-    inherit
-      hardenedServiceConfig
-      sharedUnitConfig
-      ncclServiceConfig
-      ncclEnvironment
-      ;
+      # Per-model submodule for a systemd-service backend (without `port`).
+      mkModelSubmodule =
+        { backend }:
+        { name, ... }:
+        {
+          options = baseModelOptions { inherit backend name; } // {
+            serviceConfig = serviceConfigOption { serviceName = backend; };
+          };
+        };
 
-    # Render a systemd worker unit fragment. Returns
-    # `{ serviceConfig, unitConfig }` with the shared baseline plus full
-    # systemd-exec(5) hardening merged in; caller overrides win.
-    mkWorker =
-      {
-        openFilesLimit,
-        serviceConfig ? { },
-        unitConfig ? { },
-      }:
-      {
-        # `[Service]` defaults: worker-scale timing, universal hardening, the
-        # per-unit file-descriptor limit, and a `bind()` lockdown that pairs
-        # with the caller-provided `SocketBindAllow` for the worker's listener.
-        serviceConfig =
-          sharedServiceConfig
-          // hardenedServiceConfig
-          // {
-            LimitNOFILE = openFilesLimit;
-            SocketBindDeny = "any";
-          }
-          // serviceConfig;
-        unitConfig = sharedUnitConfig // unitConfig;
-      };
+      # Per-model submodule for a uv/wheel-based GPU Python backend: the shared
+      # base plus the loopback `port`, the `model` repo id (`modelArgument` names
+      # the CLI argument it is passed as), and a per-model `package` override that
+      # defaults to the backend-wide `package`. The override lets a single model
+      # pin a different release (e.g. a nightly wheel for a just-released
+      # architecture) without disturbing the others. `cfg` is the backend config,
+      # read for the package default.
+      mkUvModelSubmodule =
+        {
+          backend,
+          cfg,
+          modelArgument,
+          modelExample,
+        }:
+        { name, ... }:
+        {
+          options = baseModelOptions { inherit backend name; } // {
+            model = mkOption {
+              type = types.str;
+              example = modelExample;
+              description = "Hugging Face repo id (or local path) passed as ${modelArgument}.";
+            };
+            port = mkOption {
+              type = types.port;
+              description = ''
+                Loopback host port ${backend} binds to (`--host 127.0.0.1 --port <port>`).
+                Must be unique per enabled model; llmhop reaches the backend at
+                `http://127.0.0.1:<port>`.
+              '';
+            };
+            package = mkOption {
+              type = types.package;
+              default = cfg.package;
+              defaultText = lib.literalExpression "config.services.llmhop.${backend}.package";
+              description = ''
+                Package providing this model's worker, overriding the backend-wide
+                `package`. Set it for a model that needs a different ${backend}
+                release than the rest — e.g. a nightly wheel for a just-released
+                architecture — built the same way with `mkUvEnv` over a per-model
+                uv workspace. Defaults to the backend-wide `package`.
+              '';
+            };
+            serviceConfig = serviceConfigOption { serviceName = backend; };
+          };
+        };
 
-    # Cross-cutting NixOS config produced by every systemd backend: port
-    # uniqueness assertion (local + global registry) plus llmhop
-    # registration. No tmpfiles/user/group: systemd backends rely on
-    # `DynamicUser` per-service.
-    mkConfig = { backend, cfg }: mkSharedConfig { inherit backend cfg; };
-  };
+      # Re-exported so callers (e.g. the llmhop reverse-proxy unit) can spread
+      # them into their own services without going through `mkWorker`.
+      inherit
+        hardenedServiceConfig
+        sharedUnitConfig
+        mkHealthProbe
+        mkWorker
+        ncclServiceConfig
+        ncclEnvironment
+        ;
+
+      # All worker units for a uv/wheel-based GPU Python backend: enabled models
+      # sorted by ascending `port`, each rendered by `mkUvWorker` with its
+      # `execStart` derived from the model. Returns a `systemd.services` attrset.
+      mkUvServices =
+        {
+          serviceName,
+          cfg,
+          pkgs,
+          utils,
+          execStart,
+          extraEnvironment ? (_cacheBase: { }),
+        }:
+        let
+          models = sortedModels cfg;
+        in
+        lib.listToAttrs (
+          lib.imap0 (
+            index: model:
+            mkUvWorker {
+              inherit
+                serviceName
+                cfg
+                pkgs
+                utils
+                model
+                extraEnvironment
+                ;
+              # Ascending chain: each worker waits on its lower-port predecessor.
+              previous = if index > 0 then lib.elemAt models (index - 1) else null;
+              execStart = execStart model;
+            }
+          ) models
+        );
+
+      # Cross-cutting NixOS config produced by every systemd backend: port
+      # uniqueness assertion (local + global registry) plus llmhop
+      # registration. No tmpfiles/user/group: systemd backends rely on
+      # `DynamicUser` per-service. Units are named after the backend itself.
+      mkConfig =
+        { backend, cfg }:
+        mkSharedConfig {
+          inherit backend cfg;
+          serviceName = backend;
+        };
+    };
 }

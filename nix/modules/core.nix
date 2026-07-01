@@ -10,16 +10,13 @@ let
   format = pkgs.formats.json { };
   configFile = format.generate "llmhop.json" cfg.settings;
 
-  inherit (import ./lib.nix lib) systemd;
-
-  collisions = lib.pipe (lib.attrNames cfg.portsRegistry) [
-    (lib.groupBy (name: toString cfg.portsRegistry.${name}))
-    (lib.filterAttrs (_: owners: lib.length owners > 1))
-  ];
+  inherit (import ./lib.nix lib) mkRegistryAssertion systemd;
 in
 {
   imports = [
-    ./llama-cpp.nix
+    ./systemd/llama-cpp.nix
+    ./systemd/vllm.nix
+    ./systemd/sglang.nix
   ];
 
   options.services.llmhop = {
@@ -51,9 +48,24 @@ in
       internal = true;
       description = ''
         Internal registry of host ports reserved by llmhop backends and their
-        auxiliary components (gateways, metrics endpoints). Keyed by
-        `<backend>/<component>` so the global uniqueness assertion can name the
-        colliding owners. Written by `lib.nix:mkSharedConfig`; do not set directly.
+        auxiliary components (gateways, metrics endpoints). Keyed by the owning
+        option path (`<backend>.models.<name>` / `<backend>.<component>`) so the
+        global uniqueness assertion can name the colliding owners. Written by
+        `lib.nix:mkSharedConfig`; do not set directly.
+      '';
+    };
+
+    unitsRegistry = lib.mkOption {
+      type = with lib.types; attrsOf str;
+      default = { };
+      internal = true;
+      description = ''
+        Internal registry of systemd unit names emitted by llmhop backends and
+        their auxiliary components, keyed the same way as `portsRegistry`. Two
+        backends claiming one unit name — most commonly a native backend and its
+        `-quadlet` twin, which share a unit prefix — are mutually exclusive, and
+        the global uniqueness assertion names both owners. Written by
+        `lib.nix:mkSharedConfig`; do not set directly.
       '';
     };
   };
@@ -61,16 +73,14 @@ in
   config = lib.mkMerge [
     {
       assertions = [
-        {
-          assertion = collisions == { };
-          message =
-            "services.llmhop: host port collisions across backends:\n"
-            + lib.concatStringsSep "\n" (
-              map (port: "port ${port} reserved by ${lib.concatStringsSep ", " collisions.${port}}") (
-                lib.naturalSort (lib.attrNames collisions)
-              )
-            );
-        }
+        (mkRegistryAssertion {
+          registry = cfg.portsRegistry;
+          resource = "host port";
+        })
+        (mkRegistryAssertion {
+          registry = cfg.unitsRegistry;
+          resource = "systemd unit";
+        })
       ];
     }
     (lib.mkIf cfg.enable {

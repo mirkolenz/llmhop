@@ -23,11 +23,10 @@
           # hide /nix/store/* prefix
           transformOptions = opt: opt // { declarations = [ ]; };
         }).optionsCommonMark;
-      subpages = [
-        "llama-cpp"
-        "sglang"
-        "vllm"
-      ];
+      # Every backend is a nested attrset under `services.llmhop`; the top-level
+      # options next to them form the core page. Splitting on `isOption` keeps
+      # new backends documented without touching this file.
+      backends = lib.filterAttrs (_: v: !lib.isOption v) moduleOptions.services.llmhop;
       sections = [
         {
           title = "NixOS Options";
@@ -36,14 +35,14 @@
             {
               name = "core";
               title = "Core";
-              value = mkOptions (lib.removeAttrs moduleOptions.services.llmhop subpages);
+              value = mkOptions (lib.filterAttrs (_: lib.isOption) moduleOptions.services.llmhop);
             }
           ]
-          ++ map (subpage: {
-            name = subpage;
-            title = subpage;
-            value = mkOptions moduleOptions.services.llmhop.${subpage};
-          }) subpages;
+          ++ lib.mapAttrsToList (name: options: {
+            inherit name;
+            title = name;
+            value = mkOptions options;
+          }) backends;
         }
       ];
     in

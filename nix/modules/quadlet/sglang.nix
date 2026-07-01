@@ -5,10 +5,10 @@
   ...
 }:
 let
-  cfg = config.services.llmhop.sglang;
+  cfg = config.services.llmhop.sglang-quadlet;
 
-  llmhopLib = import ./lib.nix lib;
-  inherit (llmhopLib) resolveImageRef sortedModels;
+  llmhopLib = import ../lib.nix lib;
+  inherit (llmhopLib) cliOptionFormat resolveImageRef sortedModels;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
@@ -22,13 +22,7 @@ let
   # has no auto-negation), so we deliberately do NOT apply `flipBoolFlags`
   # here. `true` collapses to `--key`, `null`/`false` are dropped; users
   # write the negated key explicitly (e.g. `disable-radix-cache = true`).
-  renderArgs =
-    attrs:
-    lib.cli.toCommandLineShell (name: {
-      option = "--${name}";
-      sep = "=";
-      explicitBool = false;
-    }) attrs;
+  renderArgs = lib.cli.toCommandLineShell (cliOptionFormat "=");
 
   # Internal port every worker binds to inside its container.
   workerPort = 30000;
@@ -43,7 +37,7 @@ let
       healthPort = workerPort;
       containerConfig =
         (mkContainerArgs {
-          backend = "sglang";
+          backend = "sglang-quadlet";
           inherit cfg model;
         })
         // {
@@ -89,11 +83,7 @@ let
   # `--worker-urls` is `nargs='*'`, so each URL becomes its own argv entry;
   # we build the full argv list and shell-escape once for Quadlet's `Exec=`.
   gatewayExec = lib.escapeShellArgs (
-    lib.cli.toCommandLine (name: {
-      option = "--${name}";
-      sep = "=";
-      explicitBool = false;
-    }) (gatewayBaseSettings // cfg.gateway.settings)
+    lib.cli.toCommandLine (cliOptionFormat "=") (gatewayBaseSettings // cfg.gateway.settings)
     ++ lib.optionals (models != [ ]) (
       [ "--worker-urls" ] ++ map (m: "http://127.0.0.1:${toString m.port}") models
     )
@@ -111,7 +101,7 @@ let
       Image = resolveImageRef {
         inherit (cfg.gateway) image tag digest;
         defaultTag = "latest";
-        label = "services.llmhop.sglang.gateway";
+        label = "services.llmhop.sglang-quadlet.gateway";
       };
       Pull = if cfg.gateway.digest != null then "missing" else "newer";
       # Host networking lets the gateway reach each worker at
@@ -140,9 +130,9 @@ let
   });
 in
 {
-  options.services.llmhop.sglang =
+  options.services.llmhop.sglang-quadlet =
     mkOptions {
-      backend = "sglang";
+      backend = "sglang-quadlet";
       inherit cfg config;
       defaultImage = "docker.io/lmsysorg/sglang";
       defaultCacheDir = "/var/cache/sglang";
@@ -155,7 +145,7 @@ in
           lib.types.submodule {
             imports = [
               (mkModelSubmodule {
-                backend = "sglang";
+                backend = "sglang-quadlet";
                 inherit cfg;
               })
             ];
@@ -282,7 +272,7 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       (mkConfig {
-        backend = "sglang";
+        backend = "sglang-quadlet";
         inherit cfg config pkgs;
         description = "SGLang User";
         extras =
@@ -290,7 +280,8 @@ in
           // lib.optionalAttrs (cfg.gateway.enable && cfg.gateway.enableMetrics) {
             gateway-metrics = cfg.gateway.metricsPort;
           };
-        portsMessage = "services.llmhop.sglang: each model `port` must be unique and must not collide with `gateway.port` or `gateway.metricsPort`.";
+        # `gateway-metrics` is only a second port on the gateway, not its own unit.
+        extraUnits = lib.optionalAttrs cfg.gateway.enable { gateway = "sglang-gateway"; };
       })
       {
         virtualisation.quadlet.containers = lib.listToAttrs (

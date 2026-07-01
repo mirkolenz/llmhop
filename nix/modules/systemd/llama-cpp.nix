@@ -8,10 +8,11 @@
 let
   cfg = config.services.llmhop.llama-cpp;
 
-  llmhopLib = import ./lib.nix lib;
-  inherit (llmhopLib) enabledModels flipBoolFlags;
+  llmhopLib = import ../lib.nix lib;
+  inherit (llmhopLib) cliOptionFormat enabledModels flipBoolFlags;
   inherit (llmhopLib.systemd)
     mkConfig
+    mkHealthProbe
     mkModelSubmodule
     mkOptions
     mkWorker
@@ -25,13 +26,7 @@ let
   # direction flags (`--verbose`) and tri-state options (`--flash-attn`
   # takes `on|off|auto`) have no `--no-X` form — set the positive value
   # explicitly instead of writing `... = false`.
-  renderArgs =
-    attrs:
-    lib.cli.toCommandLine (name: {
-      option = "--${name}";
-      sep = null;
-      explicitBool = false;
-    }) (flipBoolFlags attrs);
+  renderArgs = attrs: lib.cli.toCommandLine (cliOptionFormat null) (flipBoolFlags attrs);
 
   mkService =
     model:
@@ -91,6 +86,13 @@ let
               // model.settings
             )
           );
+
+          # llama-server serves `/health` as 503 while the model loads, 200 once
+          # it can generate, so the unit only goes active when it is servable.
+          ExecStartPost = mkHealthProbe {
+            inherit pkgs utils;
+            inherit (model) port;
+          };
 
           # GPU acceleration needs raw device access (e.g. `/dev/nvidia*`,
           # `/dev/kfd` + `/dev/dri/*`, `/dev/dri/renderD*`); the upstream NixOS

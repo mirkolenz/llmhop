@@ -20,7 +20,8 @@ import (
 
 // New returns an http.Handler that serves the OpenAI models API from the
 // configured models and proxies every other request to the backend matching
-// its JSON "model" field, all guarded by the configured auth tokens.
+// its JSON "model" field, all guarded by the configured auth tokens. Only
+// GET /health is served unauthenticated.
 func New(cfg *config.Config) (http.Handler, error) {
 	proxies := make(map[string]*httputil.ReverseProxy, len(cfg.Models))
 	for name, m := range cfg.Models {
@@ -50,7 +51,13 @@ func New(cfg *config.Config) (http.Handler, error) {
 	registerModels(mux, cfg)
 	mux.HandleFunc("/", proxyHandler(proxies, cfg.MaxBodyBytes))
 
-	return authMiddleware(tokens, mux), nil
+	// Health sits outside the auth middleware: liveness probes and downstream
+	// load balancers must be able to check the proxy without a token.
+	root := http.NewServeMux()
+	registerHealth(root, cfg)
+	root.Handle("/", authMiddleware(tokens, mux))
+
+	return root, nil
 }
 
 // proxyHandler buffers each request body so it can peek at the JSON "model"

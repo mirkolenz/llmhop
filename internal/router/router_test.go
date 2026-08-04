@@ -122,6 +122,24 @@ func TestModelsAPI(t *testing.T) {
 	})
 }
 
+func TestHealth(t *testing.T) {
+	h := newHandler(t, []string{"secret"}, "a", "b")
+
+	rec := get(t, h, "/health", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200 without a token", rec.Code)
+	}
+
+	var got health
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Status != "ok" || got.Models != 2 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestModelsAPIAuth(t *testing.T) {
 	h := newHandler(t, []string{"secret"}, "m")
 	if rec := get(t, h, "/v1/models", ""); rec.Code != http.StatusUnauthorized {

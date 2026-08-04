@@ -9,6 +9,7 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 
 - OpenAI-compatible reverse proxy, model router and request dispatcher for self-hosted LLM inference.
 - Native `GET /v1/models` and `GET /v1/models/{model}` endpoints served directly from the config, so clients can discover every backend behind the single endpoint.
+- Unauthenticated `GET /health` for load balancers and probes, plus `sd_notify` readiness so systemd reports the service as started only once the port answers.
 - Stateless single-binary HTTP service: no database, no cache, no background workers, safe behind any load balancer.
 - Zero external dependencies: pure Go, no third-party packages, no CGO.
 - Works with any OpenAI API-compatible backend, self-hosted or remote: vLLM, sglang, TabbyAPI, Aphrodite, Ollama, LocalAI, OpenRouter, together.ai, DeepInfra, etc.
@@ -25,6 +26,17 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 Everything else is dispatched by its `model` field as above.
 When `authTokens` is set, all routes (the models API included) require a valid bearer token.
 
+### Health
+
+`GET /health` is served by LLMhop itself and is the one route that never requires a token, so probes and load balancers do not need a credential:
+
+```json
+{ "status": "ok", "models": 3 }
+```
+
+The model count lets a downstream check assert that the proxy came up with the catalog it expects, not merely that the process is listening.
+Under systemd the same guarantee comes for free: LLMhop sends `READY=1` only after the listener is bound, so a `Type=notify` unit stays in `activating` until requests are actually served.
+
 ## Authentication
 
 LLMhop can optionally gate incoming requests with a list of bearer tokens and inject per-model `Authorization` (or any other) headers when forwarding to the backend.
@@ -39,7 +51,8 @@ Create a `config.json`:
 
 ```json
 {
-  "listen": ":8080",
+  "host": "127.0.0.1",
+  "port": 8080,
   "authTokens": ["${file:client_token}"],
   "models": {
     "llama-3-8b": {
@@ -55,6 +68,9 @@ Create a `config.json`:
 }
 ```
 
+`host` defaults to every interface and `port` to `8080`.
+IPv6 literals are written plain (`"host": "::1"`) and bracketed internally.
+
 ### Secret references
 
 String values inside `authTokens` and `models.*.headers` are expanded at startup, so no plaintext secret ever has to live in the config file:
@@ -64,6 +80,19 @@ String values inside `authTokens` and `models.*.headers` are expanded at startup
 - `$NAME`: shorthand for `${env:NAME}`.
 
 Unresolved references are a hard startup error.
+
+### Validation
+
+Unknown keys are rejected rather than ignored, so a misspelled `maxBodyBytes` fails loudly instead of silently falling back to its default, and every model `url` must be an absolute `http(s)` URL.
+
+`--check` runs the full startup path (parsing, validation, router construction) and exits without binding a port:
+
+```sh
+llmhop --check --config config.json
+```
+
+Secret references are left unexpanded in this mode, so a config can be validated where the referenced files and environment variables do not exist, such as a CI job or a Nix build.
+The NixOS module uses exactly this to validate the generated config at build time.
 
 ### Request size limit
 
@@ -112,12 +141,11 @@ Add LLMhop to your flake inputs and import the module into your system configura
           {
             services.llmhop = {
               enable = true;
-              settings = {
-                listen = ":8080";
-                models = {
-                  "llama-3-8b".url = "http://localhost:30000";
-                  "qwen-2.5-7b".url = "http://localhost:30001";
-                };
+              port = 8080;
+              openFirewall = true;
+              settings.models = {
+                "llama-3-8b".url = "http://localhost:30000";
+                "qwen-2.5-7b".url = "http://localhost:30001";
               };
             };
           }
@@ -128,6 +156,12 @@ Add LLMhop to your flake inputs and import the module into your system configura
 ```
 
 The unit runs under `DynamicUser` with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
+
+The module and the binary are deliberately coupled in three places:
+
+- `host` and `port` are module options that map one-to-one onto the binary's own config fields, so the listener port is a first-class value on both sides, with nothing rendered or re-parsed in between. It joins the same global port registry the inference backends use, so a backend model reusing it fails evaluation instead of leaving one of the two services unable to bind, and `openFirewall` can act on it directly.
+- The generated config is validated at build time by the binary itself (`llmhop -check`), so a typo or a malformed model URL fails `nixos-rebuild` rather than the service. The schema therefore lives in exactly one place, the Go `Config` struct, instead of being mirrored in Nix. Validation is skipped when the target platform cannot be executed by the build machine (cross-compiled deployments).
+- The unit is `Type=notify`, matching the binary's readiness signal, so anything ordered after `llmhop.service` can assume the port answers.
 
 The NixOS module is split into two exports.
 `nixosModules.default` ships the reverse proxy and the native systemd backends (llama.cpp, and vLLM and SGLang from prebuilt wheels), with no dependency on quadlet-nix, so it stays compatible with non-NixOS deployers such as [system-manager](https://github.com/numtide/system-manager).
@@ -292,22 +326,22 @@ A backend's native (`vllm`/`sglang`) and container (`vllm-quadlet`/`sglang-quadl
 ### Secrets
 
 The generated config file lives in the world-readable Nix store, so secrets should never be placed in `services.llmhop.settings` directly.
-Instead, reference them via `${file:...}` and hand the files to the service with systemd's `LoadCredential=`.
-The right-hand side of each `LoadCredential` entry is just a file path, so anything that produces a file works: [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs, a manually-managed file under `/etc/llmhop/`, or a path emitted by your own secret-provisioning tool.
+Instead, reference them via `${file:...}` and hand the files to the service through the `credentials` option, which maps each entry to systemd's `LoadCredential=`.
+The right-hand side is just a file path, so anything that produces a file works: [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs, a manually-managed file under `/etc/llmhop/`, or a path emitted by your own secret-provisioning tool.
 
 ```nix
-services.llmhop.settings = {
-  authTokens = [ "\${file:client_token}" ];
-  models."openai-gpt-4o" = {
-    url = "https://api.openai.com";
-    headers.Authorization = "Bearer \${env:OPENAI_KEY}";
+services.llmhop = {
+  credentials.client_token = "/etc/llmhop/client-token";
+  settings = {
+    authTokens = [ "\${file:client_token}" ];
+    models."openai-gpt-4o" = {
+      url = "https://api.openai.com";
+      headers.Authorization = "Bearer \${env:OPENAI_KEY}";
+    };
   };
 };
 
-systemd.services.llmhop.serviceConfig = {
-  LoadCredential = [ "client_token:/etc/llmhop/client-token" ];
-  EnvironmentFile = [ "/etc/llmhop/openai.env" ];
-};
+systemd.services.llmhop.serviceConfig.EnvironmentFile = [ "/etc/llmhop/openai.env" ];
 ```
 
 `/etc/llmhop/openai.env` is a plain `KEY=VALUE` file:

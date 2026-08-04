@@ -18,8 +18,13 @@ testers.nixosTest {
 
       services.llmhop = {
         enable = true;
+        host = "127.0.0.1";
+        port = 8080;
+        credentials = {
+          client_token = clientToken;
+          upstream_key = upstreamKey;
+        };
         settings = {
-          listen = "127.0.0.1:8080";
           authTokens = [ "\${file:client_token}" ];
           models."test-model" = {
             url = "http://127.0.0.1:9000";
@@ -27,11 +32,6 @@ testers.nixosTest {
           };
         };
       };
-
-      systemd.services.llmhop.serviceConfig.LoadCredential = [
-        "client_token:${clientToken}"
-        "upstream_key:${upstreamKey}"
-      ];
 
       services.caddy = {
         enable = true;
@@ -52,8 +52,15 @@ testers.nixosTest {
 
     machine.wait_for_unit("llmhop.service")
     machine.wait_for_unit("caddy.service")
-    machine.wait_for_open_port(8080)
     machine.wait_for_open_port(9000)
+
+    with subtest("the unit is only active once the listener is bound"):
+        # Type=notify + sd_notify: no wait_for_open_port needed for llmhop.
+        machine.succeed("curl -fsS http://127.0.0.1:8080/health >/dev/null")
+
+    with subtest("health is served without a token"):
+        body = machine.succeed("curl -fsS http://127.0.0.1:8080/health")
+        assert json.loads(body) == {"status": "ok", "models": 1}, f"unexpected body: {body!r}"
 
     with subtest("missing auth is rejected"):
         machine.fail(curl({"model": "test-model"}))

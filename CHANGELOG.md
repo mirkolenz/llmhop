@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.0](https://github.com/mirkolenz/llmhop/compare/v1.3.0...v2.0.0) (2026-08-07)
+
+### ⚠ BREAKING CHANGES
+
+* **nixos:** vllm and sglang are now native systemd units by default. The quadlet-based approach is still available as a fallback for the time being. The new services require users to set up a custom uv workspace to lock dependencies.
+
+### Features
+
+* couple go binary and systemd module more closely ([bbbe7db](https://github.com/mirkolenz/llmhop/commit/bbbe7db2c388ea5ad9725f44713d91267df45554))
+* **nixos:** add systemd-based vllm and sglang services using uv ([4917357](https://github.com/mirkolenz/llmhop/commit/49173576d6ccd45670d57b00af85cff3bf494580))
+
+### Bug Fixes
+
+* **nixos:** add support for nccl to llama-cpp ([fdc9578](https://github.com/mirkolenz/llmhop/commit/fdc95780066e898ecb2f30272d355a44c2858ce8))
+
 ## [1.3.0](https://github.com/mirkolenz/llmhop/compare/v1.2.4...v1.3.0) (2026-06-30)
 
 ### Features

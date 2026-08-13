@@ -82,22 +82,20 @@ in
           inherit cfg pkgs utils;
           execStart =
             model:
-            utils.escapeSystemdExecArgs (
-              [
-                (lib.getExe' model.package "python")
-                "-m"
-                "sglang.launch_server"
-              ]
-              ++ renderArgs (
-                {
-                  model-path = model.model;
-                  served-model-name = model.name;
-                  host = "127.0.0.1";
-                  port = model.port;
-                }
-                // cfg.modelSettings
-                // model.settings
-              )
+            [
+              (lib.getExe' model.package "python")
+              "-m"
+              "sglang.launch_server"
+            ]
+            ++ renderArgs (
+              {
+                model-path = model.model;
+                served-model-name = model.name;
+                host = "127.0.0.1";
+                port = model.port;
+              }
+              // cfg.modelSettings
+              // model.settings
             );
         };
       }

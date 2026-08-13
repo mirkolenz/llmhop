@@ -157,11 +157,12 @@ Add LLMhop to your flake inputs and import the module into your system configura
 
 The unit runs under `DynamicUser` with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
 
-The module and the binary are deliberately coupled in three places:
+The module and the binary are deliberately coupled in four places:
 
 - `host` and `port` are module options that map one-to-one onto the binary's own config fields, so the listener port is a first-class value on both sides, with nothing rendered or re-parsed in between. It joins the same global port registry the inference backends use, so a backend model reusing it fails evaluation instead of leaving one of the two services unable to bind, and `openFirewall` can act on it directly.
 - The generated config is validated at build time by the binary itself (`llmhop -check`), so a typo or a malformed model URL fails `nixos-rebuild` rather than the service. The schema therefore lives in exactly one place, the Go `Config` struct, instead of being mirrored in Nix. Validation is skipped when the target platform cannot be executed by the build machine (cross-compiled deployments).
 - The unit is `Type=notify`, matching the binary's readiness signal, so anything ordered after `llmhop.service` can assume the port answers.
+- The same package ships `llmhop-notify`, which the native backends prefix to every model server's command line. None of them speak `sd_notify`, so it polls `/health` and reports readiness on their behalf, letting the worker units be `Type=notify` too. It stays the unit's main process and exits with the server's status, so a model that dies while loading fails its unit immediately instead of being waited out until `TimeoutStartSec`.
 
 The NixOS module is split into two exports.
 `nixosModules.default` ships the reverse proxy and the native systemd backends (llama.cpp, and vLLM and SGLang from prebuilt wheels), with no dependency on quadlet-nix, so it stays compatible with non-NixOS deployers such as [system-manager](https://github.com/numtide/system-manager).

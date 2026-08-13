@@ -84,21 +84,19 @@ in
           };
           execStart =
             model:
-            utils.escapeSystemdExecArgs (
-              [
-                (lib.getExe' model.package "vllm")
-                "serve"
-                model.model
-              ]
-              ++ renderArgs (
-                {
-                  served-model-name = model.name;
-                  host = "127.0.0.1";
-                  port = model.port;
-                }
-                // cfg.modelSettings
-                // model.settings
-              )
+            [
+              (lib.getExe' model.package "vllm")
+              "serve"
+              model.model
+            ]
+            ++ renderArgs (
+              {
+                served-model-name = model.name;
+                host = "127.0.0.1";
+                port = model.port;
+              }
+              // cfg.modelSettings
+              // model.settings
             );
         };
       }

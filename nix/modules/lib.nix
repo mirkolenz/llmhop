@@ -748,12 +748,31 @@ in
 
   systemd =
     let
-      # Render a systemd worker unit fragment. Returns
+      # The readiness supervisor, resolved from this flake rather than from
+      # `services.llmhop.package`: it is a module implementation detail, and a
+      # deployer-supplied llmhop build need not ship `llmhop-notify` at all —
+      # `getExe'` would not catch that, leaving every worker in `activating`
+      # until `TimeoutStartSec`.
+      notifyExe = pkgs: lib.getExe' (pkgs.callPackage ../package.nix { }) "llmhop-notify";
+
+      # Render a systemd worker unit fragment from the worker's argv. Returns
       # `{ serviceConfig, unitConfig }` with the shared baseline plus full
       # systemd-exec(5) hardening merged in; caller overrides win.
+      #
+      # `execStart` is wrapped in `llmhop-notify`, which polls `/health` on
+      # `healthPort` and reports READY=1 once the server answers: none of the
+      # model servers speak sd_notify, so the unit would otherwise count as
+      # started the moment the process is exec'd. Owning the wrapper together
+      # with its `Type = "notify"` mirrors how `quadlet.mkWorker` owns
+      # `Notify = "healthy"`, and means replacing one per model requires
+      # replacing the other.
       mkWorker =
         {
           openFilesLimit,
+          pkgs,
+          utils,
+          healthPort,
+          execStart,
           serviceConfig ? { },
           unitConfig ? { },
         }:
@@ -767,6 +786,15 @@ in
             // {
               LimitNOFILE = openFilesLimit;
               SocketBindDeny = "any";
+              Type = "notify";
+              ExecStart = utils.escapeSystemdExecArgs (
+                [
+                  (notifyExe pkgs)
+                  "-port"
+                  (toString healthPort)
+                ]
+                ++ execStart
+              );
             }
             // serviceConfig;
           unitConfig = sharedUnitConfig // unitConfig;
@@ -789,49 +817,22 @@ in
             hardened baseline and any backend-applied relaxations (e.g. the NCCL
             socket rules). Escape hatch for host-specific tweaks without having
             to target the generated unit by name.
+
+            `ExecStart` and `Type` are a pair here: the rendered command wraps
+            the server in `llmhop-notify`, which is what reports readiness for a
+            `Type = "notify"` unit. Overriding one without the other leaves the
+            unit in `activating` until `TimeoutStartSec` expires.
           '';
         };
-
-      # `ExecStartPost` readiness probe. None of the model servers speak
-      # sd_notify, so a unit would otherwise count as started the moment the
-      # process is exec'd — long before weights are loaded and the GPU profiled.
-      # systemd keeps the unit in `activating` until `ExecStartPost` exits, so
-      # this makes `After=` chains actually serialize and `systemctl start` block
-      # until the model is servable. `--retry-all-errors` also covers the 5xx
-      # every one of these servers returns while warming up. Retries are sized to
-      # `TimeoutStartSec`, which is the authoritative bound; per-model
-      # `serviceConfig` can replace the whole command.
-      healthProbeDelay = 5;
-      mkHealthProbe =
-        {
-          pkgs,
-          utils,
-          port,
-        }:
-        utils.escapeSystemdExecArgs [
-          (lib.getExe pkgs.curl)
-          "--fail"
-          "--silent"
-          "--output"
-          "/dev/null"
-          "--retry-all-errors"
-          "--retry-connrefused"
-          "--retry"
-          (toString (sharedServiceConfig.TimeoutStartSec / healthProbeDelay))
-          "--retry-delay"
-          (toString healthProbeDelay)
-          "http://127.0.0.1:${toString port}/health"
-        ];
 
       # One systemd service for a uv/wheel-based GPU Python worker, shared by the
       # native vLLM and SGLang backends. Layers the CUDA-on-NixOS specifics (cache
       # redirection, driver libs, W^X relaxation, MEMLOCK), the DynamicUser
-      # layout, the readiness probe, and the startup chain (`previous` is the
-      # preceding model, or null for the first) on top of the `mkWorker`
-      # hardening baseline; only the `execStart` argv and an optional per-backend
-      # `extraEnvironment cacheBase` differ. Expects `cfg` to carry
-      # `openFilesLimit`, `startupOrdering`, `environment`, `environmentFile`.
-      # Returns a `nameValuePair`.
+      # layout, and the startup chain (`previous` is the preceding model, or null
+      # for the first) on top of the `mkWorker` hardening baseline; only the
+      # `execStart` argv and an optional per-backend `extraEnvironment cacheBase`
+      # differ. Expects `cfg` to carry `openFilesLimit`, `startupOrdering`,
+      # `environment`, `environmentFile`. Returns a `nameValuePair`.
       mkUvWorker =
         {
           serviceName,
@@ -856,8 +857,8 @@ in
             wantedBy = [ "multi-user.target" ];
             # Chain ascending so each worker finishes GPU-memory profiling before
             # the next starts (booting two on one device races to OOM). This is
-            # only meaningful because `ExecStartPost` holds the unit in
-            # `activating` until the server answers `/health` — see below.
+            # only meaningful because `mkWorker` holds the unit in `activating`
+            # until the server reports itself ready.
             after = [
               "network.target"
             ]
@@ -882,12 +883,9 @@ in
           }
           // mkWorker {
             inherit (cfg) openFilesLimit;
+            inherit pkgs utils execStart;
+            healthPort = model.port;
             serviceConfig = {
-              Type = "exec";
-              ExecStartPost = mkHealthProbe {
-                inherit pkgs utils;
-                inherit (model) port;
-              };
               # The frameworks trap SIGINT to drain the engine, then exit 0, so
               # `on-failure` would leave a crashed worker dead; `always` revives it
               # while `StartLimitBurst` (shared unit config) still breaks loops.
@@ -908,8 +906,6 @@ in
               EnvironmentFile =
                 lib.optional (cfg.environmentFile != null) cfg.environmentFile
                 ++ lib.optional (model.environmentFile != null) model.environmentFile;
-
-              ExecStart = execStart;
 
               # GPU acceleration needs raw device access (`/dev/nvidia*`); the
               # upstream NVIDIA NixOS modules disable PrivateDevices for this.
@@ -1041,7 +1037,6 @@ in
       inherit
         hardenedServiceConfig
         sharedUnitConfig
-        mkHealthProbe
         mkWorker
         ncclServiceConfig
         ncclEnvironment
@@ -1049,7 +1044,8 @@ in
 
       # All worker units for a uv/wheel-based GPU Python backend: enabled models
       # sorted by ascending `port`, each rendered by `mkUvWorker` with its
-      # `execStart` derived from the model. Returns a `systemd.services` attrset.
+      # `execStart` argv derived from the model. Returns a `systemd.services`
+      # attrset.
       mkUvServices =
         {
           serviceName,

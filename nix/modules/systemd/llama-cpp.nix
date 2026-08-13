@@ -12,7 +12,6 @@ let
   inherit (llmhopLib) cliOptionFormat enabledModels flipBoolFlags;
   inherit (llmhopLib.systemd)
     mkConfig
-    mkHealthProbe
     mkModelSubmodule
     mkOptions
     mkWorker
@@ -47,8 +46,23 @@ let
       }
       // mkWorker {
         inherit (cfg) openFilesLimit;
+        inherit pkgs utils;
+        # llama-server serves `/health` as 503 while the model loads, 200 once it
+        # can generate, so the unit only goes active when it is servable.
+        healthPort = model.port;
+        execStart = [
+          (lib.getExe' cfg.package "llama-server")
+        ]
+        ++ renderArgs (
+          {
+            host = "127.0.0.1";
+            port = model.port;
+            alias = model.name;
+          }
+          // cfg.modelSettings
+          // model.settings
+        );
         serviceConfig = {
-          Type = "idle";
           KillSignal = "SIGINT";
           Restart = "on-failure";
           TasksMax = 4096;
@@ -73,26 +87,6 @@ let
           EnvironmentFile =
             lib.optional (cfg.environmentFile != null) cfg.environmentFile
             ++ lib.optional (model.environmentFile != null) model.environmentFile;
-
-          ExecStart = utils.escapeSystemdExecArgs (
-            [ (lib.getExe' cfg.package "llama-server") ]
-            ++ renderArgs (
-              {
-                host = "127.0.0.1";
-                port = model.port;
-                alias = model.name;
-              }
-              // cfg.modelSettings
-              // model.settings
-            )
-          );
-
-          # llama-server serves `/health` as 503 while the model loads, 200 once
-          # it can generate, so the unit only goes active when it is servable.
-          ExecStartPost = mkHealthProbe {
-            inherit pkgs utils;
-            inherit (model) port;
-          };
 
           # GPU acceleration needs raw device access (e.g. `/dev/nvidia*`,
           # `/dev/kfd` + `/dev/dri/*`, `/dev/dri/renderD*`); the upstream NixOS

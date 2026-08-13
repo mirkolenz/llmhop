@@ -79,7 +79,9 @@ func TestReadyWhenHealthy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ReadyWhenHealthy(srv.URL, time.Millisecond)
+	if err := ReadyWhenHealthy(srv.URL, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := readNotify(t, conn); got != "READY=1" {
 		t.Fatalf("got %q, want READY=1", got)
@@ -87,6 +89,19 @@ func TestReadyWhenHealthy(t *testing.T) {
 
 	if got := calls.Load(); got != 3 {
 		t.Errorf("probed %d times, want 3", got)
+	}
+}
+
+func TestReadyWhenHealthyReturnsNotifyError(t *testing.T) {
+	t.Setenv("NOTIFY_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := ReadyWhenHealthy(srv.URL, time.Millisecond); err == nil {
+		t.Fatal("expected notification error")
 	}
 }
 

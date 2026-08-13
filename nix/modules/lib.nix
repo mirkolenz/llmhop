@@ -868,15 +868,10 @@ in
 
       # Render a systemd worker unit fragment from the worker's argv. Returns
       # `{ serviceConfig, unitConfig }` with the shared baseline plus full
-      # systemd-exec(5) hardening merged in; caller overrides win.
+      # systemd-exec(5) hardening merged in and lifecycle settings enforced last.
       #
-      # `execStart` is wrapped in `llmhop-notify`, which polls `/health` on
-      # `healthPort` and reports READY=1 once the server answers: none of the
-      # model servers speak sd_notify, so the unit would otherwise count as
-      # started the moment the process is exec'd. Owning the wrapper together
-      # with its `Type = "notify"` mirrors how `quadlet.mkWorker` owns
-      # `Notify = "healthy"`, and means replacing one per model requires
-      # replacing the other.
+      # `llmhop-notify` keeps the unit activating until `/health` answers and
+      # propagates server failures that happen while the model is loading.
       mkWorker =
         {
           openFilesLimit,
@@ -897,6 +892,10 @@ in
             // {
               LimitNOFILE = openFilesLimit;
               SocketBindDeny = "any";
+            }
+            // serviceConfig
+            // {
+              KillMode = "control-group";
               Type = "notify";
               ExecStart = utils.escapeSystemdExecArgs (
                 [
@@ -906,8 +905,7 @@ in
                 ]
                 ++ execStart
               );
-            }
-            // serviceConfig;
+            };
           unitConfig = sharedUnitConfig // unitConfig;
         };
 
@@ -923,16 +921,11 @@ in
             MemoryHigh = "64G";
           };
           description = ''
-            Extra `[Service]` settings merged verbatim into this model's
-            `${serviceName}-<name>` unit, applied last so they override both the
-            hardened baseline and any backend-applied relaxations (e.g. the NCCL
-            socket rules). Escape hatch for host-specific tweaks without having
-            to target the generated unit by name.
-
-            `ExecStart` and `Type` are a pair here: the rendered command wraps
-            the server in `llmhop-notify`, which is what reports readiness for a
-            `Type = "notify"` unit. Overriding one without the other leaves the
-            unit in `activating` until `TimeoutStartSec` expires.
+            Extra `[Service]` settings merged into this model's
+            `${serviceName}-<name>` unit after the hardened baseline and
+            backend-specific relaxations. The module retains ownership of
+            `ExecStart`, `KillMode`, and `Type` because they implement readiness
+            supervision as one lifecycle contract.
           '';
         };
 

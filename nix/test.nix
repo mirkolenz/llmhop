@@ -20,16 +20,16 @@ let
     #!${lib.getExe pkgs.python3Minimal}
     import http.server
     import sys
-    import time
 
     port = int(sys.argv[sys.argv.index("--port") + 1])
-    ready_at = time.monotonic() + 5
 
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        health_checks = 0
+
         def do_GET(self):
-            loaded = time.monotonic() >= ready_at
-            self.send_response(200 if loaded else 503)
+            type(self).health_checks += 1
+            self.send_response(200 if self.health_checks > 1 else 503)
             self.end_headers()
 
         def log_message(self, *args):
@@ -135,6 +135,11 @@ testers.nixosTest {
     with subtest("the unit goes active once the model answers 200"):
         # Only reachable if READY=1 crossed the worker sandbox.
         machine.wait_for_unit("llama-cpp-fake-model.service")
+
+    with subtest("the worker stops cleanly"):
+        machine.succeed("systemctl stop llama-cpp-fake-model.service")
+        state = machine.get_unit_info("llama-cpp-fake-model.service")["ActiveState"]
+        assert state == "inactive", f"unexpected state: {state}"
 
     with subtest("a model that dies while loading fails its unit at once"):
         # Without the supervisor propagating the exit, this would poll a dead

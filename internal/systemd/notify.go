@@ -49,10 +49,8 @@ func Ready() error {
 }
 
 // ReadyWhenHealthy polls url until it answers 200, then reports readiness on
-// behalf of a server that speaks no sd_notify itself. Every other outcome is a
-// server still warming up: connection refused before the listener binds, then
-// the 5xx these servers return while weights load.
-func ReadyWhenHealthy(url string, interval time.Duration) {
+// behalf of a server that speaks no sd_notify itself.
+func ReadyWhenHealthy(url string, interval time.Duration) error {
 	client := &http.Client{Timeout: probeTimeout}
 	defer client.CloseIdleConnections()
 
@@ -60,9 +58,7 @@ func ReadyWhenHealthy(url string, interval time.Duration) {
 		time.Sleep(interval)
 	}
 
-	if err := Ready(); err != nil {
-		log.Printf("sd_notify: %v", err)
-	}
+	return Ready()
 }
 
 // healthy reports whether url answers 200. The body is drained before closing

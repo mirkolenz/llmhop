@@ -58,6 +58,11 @@ let
           (old.nativeBuildInputs or [ ]) ++ [ pkgs.autoAddDriverRunpath ] ++ nativeBuildInputs;
         buildInputs = (old.buildInputs or [ ]) ++ buildInputs;
         appendRunpaths = (old.appendRunpaths or [ ]) ++ runtimePaths;
+        # Wheels reach their sibling libraries through `$ORIGIN`, and dispatch
+        # shims such as `libcudnn.so.9` `dlopen` their backends that way, which
+        # names them nowhere in the ELF. auto-patchelf rewrites the runpath to
+        # absolute store paths and drops those entries unless asked to keep them.
+        autoPatchelfFlags = (old.autoPatchelfFlags or [ ]) ++ [ "--preserve-origin" ];
         autoPatchelfIgnoreMissingDeps = (old.autoPatchelfIgnoreMissingDeps or [ ]) ++ ignoreMissingLibs;
       })
     );

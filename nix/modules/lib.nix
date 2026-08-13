@@ -208,6 +208,26 @@ let
     SocketBindAllow = "tcp";
   };
 
+  # Relaxations the CUDA Python runtimes need on top of the hardened baseline,
+  # named for the same reason `ncclServiceConfig` is: so "what does a GPU worker
+  # give up, and why" has one place to read rather than accreting inline.
+  cudaServiceConfig = {
+    # GPU acceleration needs raw device access (`/dev/nvidia*`); the upstream
+    # NVIDIA NixOS modules disable PrivateDevices for this.
+    PrivateDevices = false;
+
+    # torch-inductor / triton JIT and the CUDA driver's PTX→SASS compilation
+    # mmap PROT_WRITE|PROT_EXEC pages.
+    MemoryDenyWriteExecute = false;
+
+    # The baseline's `ProcSubset = "pid"` hides everything in /proc that is not
+    # a process directory. psutil, torch and NUMA discovery all read
+    # /proc/meminfo and /proc/cpuinfo, so the engine dies on a missing
+    # /proc/meminfo before it reaches the GPU. `ProtectProc` still keeps other
+    # users' process directories invisible.
+    ProcSubset = "all";
+  };
+
   # NCCL defaults for single-host workers: keep the transport on loopback and
   # off any InfiniBand fabric (there is none on a single node). Applied as
   # environment defaults, so a deployer can still override them per model.
@@ -863,7 +883,19 @@ in
               "network.target"
             ]
             ++ lib.optional (cfg.startupOrdering && previous != null) "${serviceName}-${previous.name}.service";
+            # A toolchain on `PATH`, because these runtimes compile at runtime and
+            # look one up the FHS way. Triton builds its CUDA driver shim on the
+            # first kernel launch and searches `$CC`, then `gcc`/`clang` on `PATH`;
+            # ctypes falls back to invoking `gcc` and `ld` once nixpkgs' patched
+            # `ldconfig` lookup returns nothing. A unit otherwise has none of them.
+            path = with pkgs; [ stdenv.cc ];
             environment = {
+              # A DynamicUser has no home, so `$HOME` is `/` and every library
+              # that reaches for `~` (flashinfer's JIT workspace, among others)
+              # hits the read-only root under `ProtectSystem = "strict"`. Pointing
+              # it at the cache root keeps those writes with the rest of the
+              # regenerable state, where `systemctl clean` can reach them.
+              HOME = cacheBase;
               HF_HOME = cacheBase;
               HF_HUB_CACHE = "${cacheBase}/hub";
               XDG_CACHE_HOME = cacheBase;
@@ -875,6 +907,11 @@ in
               # name from Python during GPU-memory profiling (e.g.
               # `libnvidia-ml.so.1`), which RPATH does not reach.
               LD_LIBRARY_PATH = "/run/opengl-driver/lib";
+              # Triton locates `libcuda.so.1` by shelling out to `/sbin/ldconfig -p`,
+              # which does not exist on NixOS, so its JIT backend dies with a
+              # `FileNotFoundError` the moment a kernel is compiled. This knob is the
+              # upstream escape hatch and short-circuits the lookup entirely.
+              TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
             }
             // extraEnvironment cacheBase
             // ncclEnvironment
@@ -906,20 +943,12 @@ in
               EnvironmentFile =
                 lib.optional (cfg.environmentFile != null) cfg.environmentFile
                 ++ lib.optional (model.environmentFile != null) model.environmentFile;
-
-              # GPU acceleration needs raw device access (`/dev/nvidia*`); the
-              # upstream NVIDIA NixOS modules disable PrivateDevices for this.
-              PrivateDevices = false;
-
-              # torch-inductor / triton JIT and the CUDA driver's PTX→SASS
-              # compilation mmap PROT_WRITE|PROT_EXEC pages — incompatible with the
-              # hardened baseline's `MemoryDenyWriteExecute = true`.
-              MemoryDenyWriteExecute = false;
             }
-            # vLLM and SGLang drive tensor parallelism through NCCL, so the GPU
-            # worker always gets the netlink family and all-TCP bind it needs (a
-            # harmless widening for single-GPU models), then any per-model
-            # `serviceConfig` overrides last.
+            # The CUDA relaxations, then NCCL's: vLLM and SGLang drive tensor
+            # parallelism through NCCL, so the GPU worker always gets the netlink
+            # family and all-TCP bind it needs (a harmless widening for
+            # single-GPU models), then any per-model `serviceConfig` last.
+            // cudaServiceConfig
             // ncclServiceConfig
             // model.serviceConfig;
           }

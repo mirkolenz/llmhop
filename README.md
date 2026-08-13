@@ -179,7 +179,7 @@ Every native worker stays in `activating` until its server answers `/health`, so
 Cold starts download weights and profile the GPU, so that wait can be long: `TimeoutStartSec` allows an hour.
 The container variants get the same guarantee from their `Notify=healthy` health check.
 
-llama.cpp runs as a native, hardened systemd system unit under `DynamicUser`, and the default `vllm` and `sglang` backends do the same from prebuilt wheels (see [below](#native-vllm-and-sglang-from-prebuilt-wheels)).
+llama.cpp runs as a native, hardened systemd system unit under `DynamicUser`, and the default `vllm` and `sglang` backends run the same way from prebuilt wheels, except under a dedicated system user (see [below](#native-vllm-and-sglang-from-prebuilt-wheels)).
 As a last resort, when the prebuilt wheels cannot be used, vLLM and SGLang can instead run as rootless Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `vllm-quadlet` and `sglang-quadlet` options.
 Each Quadlet backend gets a dedicated, lingering system user (`sglang`, `vllm`) that owns its cache directory, sub-UID range and rootless container store.
 The container units are installed under that user's per-UID search path and therefore run as **systemd user units**, not system units.
@@ -227,7 +227,8 @@ See the [options reference](https://mirkolenz.github.io/llmhop/) for the full li
 
 ### Native vLLM and SGLang from prebuilt wheels
 
-The default vLLM and SGLang backends run as native systemd units built from upstream's prebuilt CUDA wheels: no Podman, and the same `DynamicUser` hardening as the llama.cpp backend.
+The default vLLM and SGLang backends run as native systemd units built from upstream's prebuilt CUDA wheels: no Podman, and the same sandboxing as the llama.cpp backend.
+They need a dedicated system user rather than `DynamicUser`, so `uid` is required: the `/var/lib/private` layout `DynamicUser` implies hands the state and cache directories to the unit as noexec ID-mapped mounts, and these runtimes `dlopen` kernels they compiled into that cache.
 vLLM and SGLang lean heavily on dev snapshots and architecture-specific builds, so there is no one-derivation-fits-all version, and you pin yours in a tiny [uv](https://docs.astral.sh/uv/) workspace and build the package with the flake's `mkUvEnv` helper.
 
 ```nix
@@ -239,6 +240,7 @@ vLLM and SGLang lean heavily on dev snapshots and architecture-specific builds, 
 
 services.llmhop.vllm = {
   enable = true;
+  uid = 503; # required: pick one free on this host
   package = inputs.llmhop.legacyPackages.${pkgs.system}.mkUvEnv {
     workspaceRoot = ./vllm-env; # directory holding pyproject.toml + uv.lock
   };

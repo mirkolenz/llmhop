@@ -64,6 +64,87 @@ let
   # mutual-exclusion assertion in `quadlet.mkConfig`).
   quadletServiceName = lib.removeSuffix "-quadlet";
 
+  # Identity of a backend whose directories outlive any single service start, so
+  # their ownership has to be pinned rather than left to systemd to allocate.
+  # The group side lazily defaults to its user counterpart, which is why `cfg`
+  # (the backend's own config) is passed in. `userns` appends the quadlet-only
+  # note that these IDs are also mapped into the container's user namespace.
+  identityOptions =
+    {
+      backend,
+      cfg,
+      userns ? false,
+    }:
+    let
+      serviceName = quadletServiceName backend;
+      note = text: lib.optionalString userns " ${text}";
+    in
+    {
+      user = mkOption {
+        type = types.str;
+        default = serviceName;
+        description = ''
+          Dedicated system user owning the ${serviceName} data and cache
+          directories. Defaults to the backend name; override to point at a
+          user the deployer manages externally (in which case the matching
+          `users.users.<name>` and `users.groups.<name>` declarations become the
+          deployer's responsibility).${note "Container root is mapped to this user via `--uidmap`."}
+        '';
+      };
+      uid = mkOption {
+        type = types.ints.unsigned;
+        example = 503;
+        description = ''
+          Host UID assigned to `services.llmhop.${backend}.user`.
+          Required — pick a value that does not clash with other system users on the
+          host.${note "It is also the inner-to-outer target of `--uidmap`."}
+        '';
+      };
+      group = mkOption {
+        type = types.str;
+        default = cfg.user;
+        defaultText = lib.literalExpression "config.services.llmhop.${backend}.user";
+        description = ''
+          Primary group for `services.llmhop.${backend}.user`.
+          Defaults to the user name (matching the typical 1:1 user/group layout).
+        '';
+      };
+      gid = mkOption {
+        type = types.ints.unsigned;
+        default = cfg.uid;
+        defaultText = lib.literalExpression "config.services.llmhop.${backend}.uid";
+        description = ''
+          Host GID assigned to `services.llmhop.${backend}.group`.
+          Defaults to `uid`.${note "It is also the inner-to-outer target of `--gidmap`."}
+        '';
+      };
+    };
+
+  # Config-side twin of `identityOptions`: the system user and group the
+  # backend's units run as. Declared only while `user` is still llmhop's own
+  # default — pointing it at an externally managed account makes the matching
+  # declarations the deployer's responsibility. `userExtra` carries the
+  # rootless-session attributes only quadlet needs.
+  identityConfig =
+    {
+      backend,
+      cfg,
+      userExtra ? { },
+    }:
+    let
+      serviceName = quadletServiceName backend;
+    in
+    lib.mkIf (cfg.user == serviceName) {
+      users.users.${cfg.user} = {
+        description = "${serviceName} service user";
+        uid = cfg.uid;
+        isSystemUser = true;
+        group = cfg.group;
+      }
+      // userExtra;
+      users.groups.${cfg.group}.gid = cfg.gid;
+    };
+
   # Ascending-port startup chaining, shared by every multi-worker GPU backend.
   # `pinNote` names the backend-specific way to pin a model to one device.
   startupOrderingOption =
@@ -304,7 +385,12 @@ let
     };
 in
 {
-  inherit enabledModels sortedModels resolveImageRef;
+  inherit
+    enabledModels
+    sortedModels
+    resolveImageRef
+    identityConfig
+    ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
   # written by `mkSharedConfig`. Groups by resource so the message names every
@@ -382,48 +468,11 @@ in
         serviceName = quadletServiceName backend;
       in
       (baseOptions { inherit backend; })
+      // identityOptions {
+        inherit backend cfg;
+        userns = true;
+      }
       // {
-        user = mkOption {
-          type = types.str;
-          default = serviceName;
-          defaultText = lib.literalExpression "serviceName";
-          description = ''
-            Dedicated system user that owns the ${serviceName} cache directory and that
-            container root is mapped to via `--uidmap`. Defaults to the backend
-            name; override to point at a user the deployer manages externally
-            (in which case the matching `users.users.<name>` and
-            `users.groups.<name>` declarations become the deployer's
-            responsibility).
-          '';
-        };
-        uid = mkOption {
-          type = types.ints.unsigned;
-          example = 503;
-          description = ''
-            Host UID assigned to `services.llmhop.${backend}.user` and used as the
-            inner-to-outer mapping target in `--uidmap`.
-            Required — pick a value that does not clash with other system users on the
-            host.
-          '';
-        };
-        group = mkOption {
-          type = types.str;
-          default = cfg.user;
-          defaultText = lib.literalExpression "config.services.llmhop.${backend}.user";
-          description = ''
-            Primary group for `services.llmhop.${backend}.user`.
-            Defaults to the user name (matching the typical 1:1 user/group layout).
-          '';
-        };
-        gid = mkOption {
-          type = types.ints.unsigned;
-          default = cfg.uid;
-          defaultText = lib.literalExpression "config.services.llmhop.${backend}.uid";
-          description = ''
-            Host GID assigned to `services.llmhop.${backend}.group` and used as the
-            inner-to-outer mapping target in `--gidmap`. Defaults to `uid`.
-          '';
-        };
         image = mkOption {
           type = types.str;
           default = defaultImage;
@@ -661,9 +710,9 @@ in
 
     # Cross-cutting NixOS config produced by every quadlet backend:
     # the quadlet-enabled assertion, llmhop registration, resource registries,
-    # `dataDir`/`cacheDir` tmpfiles, and, when `cfg.user` is left at the backend
-    # default, the system user/group plus a helper
-    # command that drops into the rootless session via `machinectl shell`.
+    # `dataDir`/`cacheDir` tmpfiles, a helper command that drops into the
+    # rootless session via `machinectl shell`, and, when `cfg.user` is left at
+    # the backend default, the system user/group.
     #
     # `extras` / `extraUnits` are labeled attrsets of auxiliary host ports
     # (e.g. `{ gateway = 30000; }`) and unit names (e.g.
@@ -677,7 +726,6 @@ in
         cfg,
         config,
         pkgs,
-        description,
         extras ? { },
         extraUnits ? { },
       }:
@@ -711,18 +759,35 @@ in
             ${cfg.dataDir}.d = dirSpec;
             ${cfg.cacheDir}.d = dirSpec;
           };
+
+          # Lets operators inspect the rootless services without remembering the
+          # `machinectl` incantation. Follows `cfg.user`, so it stays useful when
+          # the account is managed externally.
+          environment.systemPackages = [
+            (pkgs.writeShellApplication {
+              name = "${serviceName}-shell";
+              text = ''
+                if [ "$#" -eq 0 ]; then
+                  echo "Entering the ${serviceName} user shell. Useful commands:"
+                  echo "  systemctl --user status ${serviceName}-<model>    # service state"
+                  echo "  journalctl --user -u ${serviceName}-<model> -f    # tail logs"
+                  echo "  podman ps                                     # list containers"
+                  echo "  exit                                          # back to host"
+                  exec sudo machinectl --quiet shell ${cfg.user}@.host
+                fi
+                exec sudo machinectl --quiet shell ${cfg.user}@.host /usr/bin/env "$@"
+              '';
+            })
+          ];
         }
         # Real home + shell + linger turn the system user into something
         # systemd-logind treats as a real session: rootless podman gets a
         # writable `~/.local/share/containers`, `machinectl shell` works, and
         # `systemctl --user` keeps running across logouts. `systemd-journal`
         # makes `journalctl --user` work inside the machinectl session.
-        (lib.mkIf (cfg.user == serviceName) {
-          users.users.${cfg.user} = {
-            inherit description;
-            uid = cfg.uid;
-            isSystemUser = true;
-            group = cfg.group;
+        (identityConfig {
+          inherit backend cfg;
+          userExtra = {
             home = cfg.dataDir;
             shell = config.users.defaultUserShell;
             extraGroups = [ "systemd-journal" ];
@@ -740,26 +805,6 @@ in
               }
             ];
           };
-          users.groups.${cfg.group}.gid = cfg.gid;
-
-          # Lets operators inspect the rootless services without remembering
-          # the `machinectl` incantation.
-          environment.systemPackages = [
-            (pkgs.writeShellApplication {
-              name = "${serviceName}-shell";
-              text = ''
-                if [ "$#" -eq 0 ]; then
-                  echo "Entering the ${serviceName} user shell. Useful commands:"
-                  echo "  systemctl --user status ${serviceName}-<model>    # service state"
-                  echo "  journalctl --user -u ${serviceName}-<model> -f    # tail logs"
-                  echo "  podman ps                                     # list containers"
-                  echo "  exit                                          # back to host"
-                  exec sudo machinectl --quiet shell ${cfg.user}@.host
-                fi
-                exec sudo machinectl --quiet shell ${cfg.user}@.host /usr/bin/env "$@"
-              '';
-            })
-          ];
         })
       ];
   };
@@ -866,7 +911,7 @@ in
         }:
         let
           subdir = "${serviceName}/${model.name}";
-          # CacheDirectory root, owned by the DynamicUser. ML runtimes scatter JIT
+          # CacheDirectory root, owned by `cfg.user`. ML runtimes scatter JIT
           # / compile caches across HOME/XDG paths; under `ProtectSystem = "strict"`
           # they must be redirected here or the engine fails to start.
           cacheBase = "/var/cache/${subdir}";
@@ -886,11 +931,18 @@ in
             # A toolchain on `PATH`, because these runtimes compile at runtime and
             # look one up the FHS way. Triton builds its CUDA driver shim on the
             # first kernel launch and searches `$CC`, then `gcc`/`clang` on `PATH`;
-            # ctypes falls back to invoking `gcc` and `ld` once nixpkgs' patched
-            # `ldconfig` lookup returns nothing. A unit otherwise has none of them.
-            path = with pkgs; [ stdenv.cc ];
+            # torch's `cpp_extension` and flashinfer's JIT drive their builds
+            # through `ninja`, which nixpkgs patches to `posix_spawnp("sh")`, so
+            # it needs a shell on `PATH` rather than at `/bin/sh`; ctypes falls
+            # back to invoking `gcc` and `ld` once nixpkgs' patched `ldconfig`
+            # lookup returns nothing. A unit otherwise has none of them.
+            path = with pkgs; [
+              stdenv.cc
+              ninja
+              bash
+            ];
             environment = {
-              # A DynamicUser has no home, so `$HOME` is `/` and every library
+              # The service user has no home, so `$HOME` is `/` and every library
               # that reaches for `~` (flashinfer's JIT workspace, among others)
               # hits the read-only root under `ProtectSystem = "strict"`. Pointing
               # it at the cache root keeps those writes with the rest of the
@@ -932,10 +984,16 @@ in
               UMask = "0077";
 
               # CUDA page-locks the host side of device buffers from RLIMIT_MEMLOCK,
-              # which a DynamicUser unit otherwise caps at systemd's 8 MiB default.
+              # which systemd otherwise caps at its 8 MiB default.
               LimitMEMLOCK = "infinity";
 
-              DynamicUser = true;
+              # A real user, not `DynamicUser`: the `/var/lib/private` layout it
+              # implies makes systemd hand `State`/`CacheDirectory` over as
+              # ID-mapped mounts, which are unconditionally noexec and beyond
+              # the reach of `ExecPaths=`. These runtimes compile kernels into
+              # that cache and `dlopen` them back.
+              User = cfg.user;
+              Group = cfg.group;
               StateDirectory = subdir;
               CacheDirectory = subdir;
               WorkingDirectory = "/var/lib/${subdir}";
@@ -960,19 +1018,21 @@ in
       mkOptions = { backend }: baseOptions { inherit backend; };
 
       # Options for a uv/wheel-based GPU Python backend (vLLM, SGLang): the
-      # shared base plus the `startupOrdering` switch and the required, no-default
-      # `package` whose description is templated per backend. Parallels
+      # shared base plus the service identity, the `startupOrdering` switch and
+      # the required, no-default `package` templated per backend. Parallels
       # `quadlet.mkOptions` bundling its consumer-specific options; the module
       # adds only `enable` and `models`. `displayName`/`packageEntry` fill the
       # prose and `packageNote` appends an optional trailing paragraph.
       mkUvOptions =
         {
           backend,
+          cfg,
           displayName,
           packageEntry,
           packageNote ? "",
         }:
         baseOptions { inherit backend; }
+        // identityOptions { inherit backend cfg; }
         // {
           startupOrdering = startupOrderingOption {
             pinNote = "via `environment` (e.g. `CUDA_VISIBLE_DEVICES`)";
@@ -1106,10 +1166,11 @@ in
           ) models
         );
 
-      # Cross-cutting NixOS config produced by every systemd backend: port
-      # uniqueness assertion (local + global registry) plus llmhop
-      # registration. No tmpfiles/user/group: systemd backends rely on
-      # `DynamicUser` per-service. Units are named after the backend itself.
+      # Cross-cutting NixOS config produced by a systemd backend: port
+      # uniqueness assertion (local + global registry) plus llmhop registration.
+      # Units are named after the backend itself. No user/group: llama.cpp gets
+      # one per service from `DynamicUser`, while the uv backends, which cannot
+      # (see `mkUvWorker`), merge in `identityConfig` alongside this.
       mkConfig =
         { backend, cfg }:
         mkSharedConfig {

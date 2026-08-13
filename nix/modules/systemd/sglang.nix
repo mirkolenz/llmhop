@@ -9,7 +9,7 @@ let
   cfg = config.services.llmhop.sglang;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat;
+  inherit (llmhopLib) cliOptionFormat identityConfig;
   inherit (llmhopLib.systemd)
     mkConfig
     mkUvModelSubmodule
@@ -27,6 +27,7 @@ in
   options.services.llmhop.sglang =
     mkUvOptions {
       backend = "sglang";
+      inherit cfg;
       displayName = "SGLang";
       packageEntry = "the SGLang Python environment, launched as `bin/python -m sglang.launch_server`";
       packageNote = "\nThe native module serves workers only; the SGL Model Gateway remains a `sglang-quadlet` feature (llmhop already routes between backends).";
@@ -69,6 +70,11 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       (mkConfig {
+        backend = "sglang";
+        inherit cfg;
+      })
+      # The workers run as a real user rather than `DynamicUser`; see `mkUvWorker`.
+      (identityConfig {
         backend = "sglang";
         inherit cfg;
       })

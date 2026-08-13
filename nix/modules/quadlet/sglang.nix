@@ -274,7 +274,6 @@ in
       (mkConfig {
         backend = "sglang-quadlet";
         inherit cfg config pkgs;
-        description = "SGLang User";
         extras =
           lib.optionalAttrs cfg.gateway.enable { gateway = cfg.gateway.port; }
           // lib.optionalAttrs (cfg.gateway.enable && cfg.gateway.enableMetrics) {

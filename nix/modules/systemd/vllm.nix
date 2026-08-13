@@ -9,7 +9,7 @@ let
   cfg = config.services.llmhop.vllm;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat flipBoolFlags;
+  inherit (llmhopLib) cliOptionFormat flipBoolFlags identityConfig;
   inherit (llmhopLib.systemd)
     mkConfig
     mkUvModelSubmodule
@@ -26,6 +26,7 @@ in
   options.services.llmhop.vllm =
     mkUvOptions {
       backend = "vllm";
+      inherit cfg;
       displayName = "vLLM";
       packageEntry = "the `vllm` CLI at `bin/vllm`";
     }
@@ -68,6 +69,11 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       (mkConfig {
+        backend = "vllm";
+        inherit cfg;
+      })
+      # The workers run as a real user rather than `DynamicUser`; see `mkUvWorker`.
+      (identityConfig {
         backend = "vllm";
         inherit cfg;
       })

@@ -121,7 +121,6 @@ in
       (mkConfig {
         backend = "vllm-quadlet";
         inherit cfg config pkgs;
-        description = "vLLM User";
       })
       {
         virtualisation.quadlet.containers = lib.listToAttrs (lib.imap0 mkContainer models);

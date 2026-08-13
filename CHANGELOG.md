@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.1](https://github.com/mirkolenz/llmhop/compare/v2.0.0...v2.0.1) (2026-08-13)
+
+### Bug Fixes
+
+* **nixos:** add --preserve-origin to auto patchelf flags ([e29e622](https://github.com/mirkolenz/llmhop/commit/e29e62298783cdd0cad61106f8665b99c6917a1f))
+* **nixos:** generalize for gpu acceleration beyond cuda ([38df11a](https://github.com/mirkolenz/llmhop/commit/38df11ad9d18e3b0bb30dd14dc97448e57d1378d))
+* **nixos:** give the gpu workers the toolchain, env, and proc cuda needs ([b267e5d](https://github.com/mirkolenz/llmhop/commit/b267e5d27fffd5752f9dee2fcfb19306f99d73db))
+* **nixos:** supervise worker readiness with llmhop-notify ([009b2e6](https://github.com/mirkolenz/llmhop/commit/009b2e6dfde1e8d2d92b1217d3ee2be75cc0fbbf))
+* **nixos:** use dedicated users for uv workers ([90fc83a](https://github.com/mirkolenz/llmhop/commit/90fc83af344d8265d4a1b572c2d7ede3978c19e6))
+* **notify:** simplify helper functions ([bb77c1b](https://github.com/mirkolenz/llmhop/commit/bb77c1b0af4a3dac0870af67e484f1de834e467c))
+
 ## [2.0.0](https://github.com/mirkolenz/llmhop/compare/v1.3.0...v2.0.0) (2026-08-07)
 
 ### ⚠ BREAKING CHANGES

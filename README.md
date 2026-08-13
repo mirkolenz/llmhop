@@ -227,7 +227,7 @@ See the [options reference](https://mirkolenz.github.io/llmhop/) for the full li
 
 ### Native vLLM and SGLang from prebuilt wheels
 
-The default vLLM and SGLang backends run as native systemd units built from upstream's prebuilt CUDA wheels: no Podman, and the same sandboxing as the llama.cpp backend.
+The default vLLM and SGLang backends run as native systemd units built from upstream's prebuilt wheels: no Podman, and the same sandboxing as the llama.cpp backend.
 They need a dedicated system user rather than `DynamicUser`, so `uid` is required: the `/var/lib/private` layout `DynamicUser` implies hands the state and cache directories to the unit as noexec ID-mapped mounts, and these runtimes `dlopen` kernels they compiled into that cache.
 vLLM and SGLang lean heavily on dev snapshots and architecture-specific builds, so there is no one-derivation-fits-all version, and you pin yours in a tiny [uv](https://docs.astral.sh/uv/) workspace and build the package with the flake's `mkUvEnv` helper.
 
@@ -251,9 +251,44 @@ services.llmhop.vllm = {
 };
 ```
 
-`mkUvEnv` installs the wheels, so no CUDA or C++ toolchain runs at build time, and patches them for NixOS by baking the GPU driver runpath into the closure.
-The driver itself is host state, so enable `hardware.graphics` and your `hardware.nvidia` configuration as usual.
+`mkUvEnv` installs the wheels, so no GPU or C++ toolchain runs at build time, and patches them for NixOS by baking the GPU driver runpath into the closure.
+The driver itself is host state, so enable `hardware.graphics` and your vendor configuration (`hardware.nvidia`, the `amdgpu` kernel driver, ...) as usual.
 `services.llmhop.sglang` works identically, launched via `python -m sglang.launch_server`.
+
+#### GPUs other than NVIDIA
+
+Nothing in the module is CUDA-specific.
+Every GPU worker joins the `render` and `video` groups inside a `PrivateUsers = "identity"` namespace that keeps those group IDs intact, which is what opening `/dev/kfd` and `/dev/dri/renderD*` takes.
+Runtime kernel caches are redirected into the unit's cache root for every stack at once, and the `NCCL_*` defaults cover AMD too, since RCCL reads the same variables.
+
+Only the wheels differ per vendor:
+
+| Stack | Native (uv) backends | Notes |
+| --- | --- | --- |
+| NVIDIA CUDA | vLLM, SGLang | The wheels published on PyPI. |
+| AMD ROCm | vLLM | Official ROCm wheels from v0.14.0 onwards, off a separate index. SGLang's are still landing upstream. |
+| Intel XPU | none | vLLM ships no prebuilt XPU wheels and needs a oneAPI source build, so use `vllm-quadlet` with an Intel image, or llama.cpp built for SYCL or Vulkan. |
+
+A ROCm workspace differs from a CUDA one only in where the wheel comes from:
+
+```toml
+# vllm-env/pyproject.toml — the ROCm version is part of both the pin and the index URL.
+[project]
+name = "vllm-env"
+requires-python = "==3.12.*"
+dependencies = [ "vllm==0.15.0+rocm700" ]
+
+[[tool.uv.index]]
+name = "vllm-rocm"
+url = "https://wheels.vllm.ai/rocm/0.15.0/rocm700"
+explicit = true
+
+[tool.uv.sources]
+vllm = { index = "vllm-rocm" }
+```
+
+Those wheels carry a matched ROCm and torch build, so the host contributes only the kernel driver.
+Expect a different set of missing native libraries than a CUDA workspace, and use the `ignoreMissingLibs = [ ]` triage below to find them.
 
 #### Missing build systems
 

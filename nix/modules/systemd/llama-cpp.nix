@@ -17,6 +17,8 @@ let
     mkWorker
     ncclServiceConfig
     ncclEnvironment
+    gpuServiceConfig
+    gpuCacheEnvironment
     ;
 
   # llama-server's parser only accepts space-separated `--key value` (no
@@ -31,6 +33,7 @@ let
     model:
     let
       subdir = "llama-cpp/${model.name}";
+      cacheBase = "/var/cache/${subdir}";
     in
     lib.nameValuePair "llama-cpp-${model.name}" (
       {
@@ -38,8 +41,9 @@ let
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ];
         environment = {
-          LLAMA_CACHE = "/var/cache/${subdir}";
+          LLAMA_CACHE = cacheBase;
         }
+        // gpuCacheEnvironment cacheBase
         // ncclEnvironment
         // cfg.environment
         // model.environment;
@@ -68,12 +72,6 @@ let
           TasksMax = 4096;
           UMask = "0077";
 
-          # `--mlock` locks model weights into RAM, and on CUDA the host side
-          # of device buffers is page-locked too. Both draw from RLIMIT_MEMLOCK,
-          # which a DynamicUser unit otherwise inherits as systemd's 8 MiB
-          # default — too small, so `cudaMalloc` reports OOM despite free VRAM.
-          LimitMEMLOCK = "infinity";
-
           # DynamicUser + per-unit StateDirectory/CacheDirectory pin the
           # ephemeral UID across restarts and own writable paths under
           # `ProtectSystem = "strict"`. The `parent/leaf` form shares
@@ -87,17 +85,11 @@ let
           EnvironmentFile =
             lib.optional (cfg.environmentFile != null) cfg.environmentFile
             ++ lib.optional (model.environmentFile != null) model.environmentFile;
-
-          # GPU acceleration needs raw device access (e.g. `/dev/nvidia*`,
-          # `/dev/kfd` + `/dev/dri/*`, `/dev/dri/renderD*`); the upstream NixOS
-          # module disables PrivateDevices for the same reason.
-          PrivateDevices = false;
         }
-        # llama.cpp drives multi-GPU inference through NCCL, so the worker always
-        # gets the netlink family and all-TCP bind it needs (a harmless widening
-        # for single-GPU models, and it covers llama-server's own listener that
-        # `SocketBindDeny = "any"` would otherwise deny), then any per-model
-        # `serviceConfig` overrides last.
+        # GPU relaxations, then NCCL/RCCL's — which also cover llama-server's own
+        # listener, denied by `SocketBindDeny = "any"` otherwise — then the
+        # per-model escape hatch.
+        // gpuServiceConfig
         // ncclServiceConfig
         // model.serviceConfig;
       }

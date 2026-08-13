@@ -289,17 +289,49 @@ let
     SocketBindAllow = "tcp";
   };
 
-  # Relaxations the CUDA Python runtimes need on top of the hardened baseline,
-  # named for the same reason `ncclServiceConfig` is: so "what does a GPU worker
-  # give up, and why" has one place to read rather than accreting inline.
-  cudaServiceConfig = {
-    # GPU acceleration needs raw device access (`/dev/nvidia*`); the upstream
+  # NCCL defaults for single-host workers: keep the transport on loopback and
+  # off any InfiniBand fabric (there is none on a single node). Applied as
+  # environment defaults, so a deployer can still override them per model.
+  # RCCL is an API clone of NCCL and reads the same variables, so this covers
+  # AMD as well; oneCCL (Intel) uses `CCL_*` and simply ignores them.
+  ncclEnvironment = {
+    NCCL_SOCKET_IFNAME = "lo";
+    NCCL_IB_DISABLE = "1";
+  };
+
+  # Relaxations a GPU worker needs on top of the hardened baseline, named for
+  # the same reason `ncclServiceConfig` is: so "what does a GPU worker give up,
+  # and why" has one place to read rather than accreting inline.
+  gpuServiceConfig = {
+    # GPU acceleration needs raw device access (`/dev/nvidia*` for CUDA,
+    # `/dev/kfd` + `/dev/dri/renderD*` for ROCm and Level Zero); the upstream
     # NVIDIA NixOS modules disable PrivateDevices for this.
     PrivateDevices = false;
 
-    # torch-inductor / triton JIT and the CUDA driver's PTX→SASS compilation
-    # mmap PROT_WRITE|PROT_EXEC pages.
+    # `/dev/nvidia*` is world-readable, but systemd's default udev rules leave
+    # the AMD and Intel nodes group-owned, so a worker running as a real user
+    # (or a `DynamicUser`) cannot open them without joining those groups.
+    SupplementaryGroups = [
+      "render"
+      "video"
+    ];
+
+    # Those groups only mean anything if their GIDs survive into the worker's
+    # user namespace, and the baseline's `PrivateUsers = true` maps everything
+    # but the unit's own identity to `nobody`. `identity` keeps the namespace
+    # but maps the first 65536 IDs one-to-one, so the check resolves normally.
+    PrivateUsers = "identity";
+
+    # Runtime kernel compilation mmaps PROT_WRITE|PROT_EXEC pages: torch-inductor
+    # and triton, the CUDA driver's PTX→SASS pass, and the SPIR-V JIT behind
+    # SYCL and Level Zero all do it.
     MemoryDenyWriteExecute = false;
+
+    # Page-locked memory draws from RLIMIT_MEMLOCK, which systemd otherwise caps
+    # at its 8 MiB default: every stack pins the host side of its device buffers
+    # (CUDA, and the ROCm KFD the same way), and llama.cpp's `--mlock` pins the
+    # weights outright. Too low a limit reports OOM despite free VRAM.
+    LimitMEMLOCK = "infinity";
 
     # The baseline's `ProcSubset = "pid"` hides everything in /proc that is not
     # a process directory. psutil, torch and NUMA discovery all read
@@ -309,12 +341,26 @@ let
     ProcSubset = "all";
   };
 
-  # NCCL defaults for single-host workers: keep the transport on loopback and
-  # off any InfiniBand fabric (there is none on a single node). Applied as
-  # environment defaults, so a deployer can still override them per model.
-  ncclEnvironment = {
-    NCCL_SOCKET_IFNAME = "lo";
-    NCCL_IB_DISABLE = "1";
+  # Where a GPU worker's runtime caches go. Every accelerator stack compiles
+  # kernels on first use and caches them next to `$HOME`, which `ProtectSystem =
+  # "strict"` makes read-only, so each one is redirected into the unit's own
+  # cache root — the single place `systemctl clean` can reach. All of them are
+  # set unconditionally: a variable belonging to a stack that is not installed
+  # is never read, which is cheaper than tracking which host has which vendor.
+  gpuCacheEnvironment = cacheBase: {
+    TRITON_CACHE_DIR = "${cacheBase}/triton";
+    TORCHINDUCTOR_CACHE_DIR = "${cacheBase}/inductor";
+    # MIOpen (ROCm) needs both: its kernel database and its compiled-kernel
+    # cache otherwise land under separate `$HOME` roots.
+    MIOPEN_USER_DB_PATH = "${cacheBase}/miopen";
+    MIOPEN_CUSTOM_CACHE_DIR = "${cacheBase}/miopen";
+    # SYCL and the Intel compute runtime (NEO) only cache their SPIR-V → ISA
+    # compilation when asked to, which is what turns a multi-minute JIT into a
+    # one-time cost across restarts.
+    SYCL_CACHE_PERSISTENT = "1";
+    SYCL_CACHE_DIR = "${cacheBase}/sycl";
+    NEO_CACHE_PERSISTENT = "1";
+    NEO_CACHE_DIR = "${cacheBase}/neo";
   };
 
   # Enabled-model subset shared by registry helpers and backend iteration.
@@ -891,8 +937,8 @@ in
         };
 
       # One systemd service for a uv/wheel-based GPU Python worker, shared by the
-      # native vLLM and SGLang backends. Layers the CUDA-on-NixOS specifics (cache
-      # redirection, driver libs, W^X relaxation, MEMLOCK), the DynamicUser
+      # native vLLM and SGLang backends. Layers the GPU-on-NixOS specifics (cache
+      # redirection, driver libs, W^X relaxation, MEMLOCK), the dedicated-user
       # layout, and the startup chain (`previous` is the preceding model, or null
       # for the first) on top of the `mkWorker` hardening baseline; only the
       # `execStart` argv and an optional per-backend `extraEnvironment cacheBase`
@@ -911,9 +957,7 @@ in
         }:
         let
           subdir = "${serviceName}/${model.name}";
-          # CacheDirectory root, owned by `cfg.user`. ML runtimes scatter JIT
-          # / compile caches across HOME/XDG paths; under `ProtectSystem = "strict"`
-          # they must be redirected here or the engine fails to start.
+          # CacheDirectory root, owned by `cfg.user`; see `gpuCacheEnvironment`.
           cacheBase = "/var/cache/${subdir}";
         in
         lib.nameValuePair "${serviceName}-${model.name}" (
@@ -951,10 +995,13 @@ in
               HF_HOME = cacheBase;
               HF_HUB_CACHE = "${cacheBase}/hub";
               XDG_CACHE_HOME = cacheBase;
-              TRITON_CACHE_DIR = "${cacheBase}/triton";
-              TORCHINDUCTOR_CACHE_DIR = "${cacheBase}/inductor";
-              # `mkUvEnv` bakes the driver runpath into the compiled wheels
-              # (autoAddDriverRunpath), so `libcuda.so.1` resolves via RPATH. This
+              # These two stay here rather than in `gpuCacheEnvironment` because
+              # they are about prebuilt wheels finding host driver libraries, not
+              # about GPUs: a nixpkgs-built worker resolves the same libraries
+              # from the runpath `autoAddDriverRunpath` gave it at build time.
+              #
+              # `mkUvEnv` bakes that runpath into the wheels too, so `libcuda.so.1`
+              # and its ROCm / Level Zero counterparts resolve via RPATH. This
               # additionally covers the host driver libs the framework `dlopen`s by
               # name from Python during GPU-memory profiling (e.g.
               # `libnvidia-ml.so.1`), which RPATH does not reach.
@@ -965,6 +1012,7 @@ in
               # upstream escape hatch and short-circuits the lookup entirely.
               TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
             }
+            // gpuCacheEnvironment cacheBase
             // extraEnvironment cacheBase
             // ncclEnvironment
             // cfg.environment
@@ -983,10 +1031,6 @@ in
               TasksMax = 4096;
               UMask = "0077";
 
-              # CUDA page-locks the host side of device buffers from RLIMIT_MEMLOCK,
-              # which systemd otherwise caps at its 8 MiB default.
-              LimitMEMLOCK = "infinity";
-
               # A real user, not `DynamicUser`: the `/var/lib/private` layout it
               # implies makes systemd hand `State`/`CacheDirectory` over as
               # ID-mapped mounts, which are unconditionally noexec and beyond
@@ -1002,11 +1046,8 @@ in
                 lib.optional (cfg.environmentFile != null) cfg.environmentFile
                 ++ lib.optional (model.environmentFile != null) model.environmentFile;
             }
-            # The CUDA relaxations, then NCCL's: vLLM and SGLang drive tensor
-            # parallelism through NCCL, so the GPU worker always gets the netlink
-            # family and all-TCP bind it needs (a harmless widening for
-            # single-GPU models), then any per-model `serviceConfig` last.
-            // cudaServiceConfig
+            # GPU relaxations, then NCCL/RCCL's, then the per-model escape hatch.
+            // gpuServiceConfig
             // ncclServiceConfig
             // model.serviceConfig;
           }
@@ -1035,7 +1076,7 @@ in
         // identityOptions { inherit backend cfg; }
         // {
           startupOrdering = startupOrderingOption {
-            pinNote = "via `environment` (e.g. `CUDA_VISIBLE_DEVICES`)";
+            pinNote = "via `environment` (the variable is stack-specific: `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `ZE_AFFINITY_MASK`, ...)";
           };
           package = mkOption {
             type = types.package;
@@ -1043,8 +1084,8 @@ in
               Package providing ${packageEntry}.
 
               No default on purpose: ${displayName} has no one-derivation-fits-all
-              (new model architectures routinely need dev snapshots, and there are
-              CUDA-variant builds), so you build the package yourself from a uv
+              (new model architectures routinely need dev snapshots, and the wheels
+              come in per-accelerator variants), so you build the package from a uv
               workspace and pin / follow upstream there. The flake exposes a
               helper:
 
@@ -1129,6 +1170,8 @@ in
         mkWorker
         ncclServiceConfig
         ncclEnvironment
+        gpuServiceConfig
+        gpuCacheEnvironment
         ;
 
       # All worker units for a uv/wheel-based GPU Python backend: enabled models

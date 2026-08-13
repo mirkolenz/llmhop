@@ -44,7 +44,7 @@ let
   projectOverlay = workspace.mkPyprojectOverlay { inherit sourcePreference; };
 
   # Every package the lock resolves, rather than a hand-curated list of the ones
-  # known to ship CUDA extensions: a wheel growing one, or a new dependency
+  # known to ship GPU extensions: a wheel growing one, or a new dependency
   # appearing on an upstream bump, would otherwise silently fail to build.
   # The fixups are no-ops for the pure-Python majority, which ships no ELF files.
   lockedNames = map (package: package.name) uvLock.package;

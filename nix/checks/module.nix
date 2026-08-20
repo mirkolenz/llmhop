@@ -9,7 +9,7 @@ let
   clientToken = pkgs.writeText "client-token" "client-secret";
   upstreamKey = pkgs.writeText "upstream-key" "upstream-secret";
 
-  notify = lib.getExe' (pkgs.callPackage ./package.nix { }) "llmhop-notify";
+  notify = lib.getExe' (pkgs.callPackage ../package.nix { }) "llmhop-notify";
 
   # Stands in for `llama-server`: binds the `--port` the module renders and
   # answers 503 while "loading", 200 afterwards. Driving it through the real

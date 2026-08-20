@@ -8,7 +8,12 @@ let
   cfg = config.services.llmhop.sglang-quadlet;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat resolveImageRef sortedModels;
+  inherit (llmhopLib)
+    renderCliArgsShell
+    resolveImageRef
+    settingsRendering
+    sortedModels
+    ;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
@@ -17,12 +22,9 @@ let
     mkWorker
     ;
 
-  # SGLang uses plain `store_true` booleans paired as `--enable-X` /
-  # `--disable-X` (and the Rust SGL Model Gateway's clap `SetTrue` likewise
-  # has no auto-negation), so we deliberately do NOT apply `flipBoolFlags`
-  # here. `true` collapses to `--key`, `null`/`false` are dropped; users
-  # write the negated key explicitly (e.g. `disable-radix-cache = true`).
-  renderArgs = lib.cli.toCommandLineShell (cliOptionFormat "=");
+  # The Rust SGL Model Gateway's clap `SetTrue` flags negate the same way
+  # SGLang's own `store_true` ones do, so both share the `sglang` dialect.
+  renderArgs = renderCliArgsShell "sglang-quadlet";
 
   # Internal port every worker binds to inside its container.
   workerPort = 30000;
@@ -78,16 +80,10 @@ let
     prometheus-host = if cfg.gateway.enableMetrics then cfg.gateway.bindAddress else null;
     prometheus-port = if cfg.gateway.enableMetrics then cfg.gateway.metricsPort else null;
     enable-igw = true;
+    worker-urls = map (m: "http://127.0.0.1:${toString m.port}") models;
   };
 
-  # `--worker-urls` is `nargs='*'`, so each URL becomes its own argv entry;
-  # we build the full argv list and shell-escape once for Quadlet's `Exec=`.
-  gatewayExec = lib.escapeShellArgs (
-    lib.cli.toCommandLine (cliOptionFormat "=") (gatewayBaseSettings // cfg.gateway.settings)
-    ++ lib.optionals (models != [ ]) (
-      [ "--worker-urls" ] ++ map (m: "http://127.0.0.1:${toString m.port}") models
-    )
-  );
+  gatewayExec = renderArgs (gatewayBaseSettings // cfg.gateway.settings);
 
   workerServices = map (
     m: "${config.virtualisation.quadlet.containers."sglang-${m.name}".serviceName}.service"
@@ -262,8 +258,9 @@ in
           };
           description = ''
             Additional CLI flags forwarded to `sgl-model-gateway`.
-            `true` collapses to `--<key>`; `null` and `false` are dropped (write
-            the negated key explicitly when the upstream CLI registers one).
+            ${settingsRendering "sglang-quadlet"}
+            `--worker-urls` is rendered from the enabled models, so setting it here
+            replaces the generated list.
           '';
         };
       };

@@ -9,7 +9,7 @@ let
   cfg = config.services.llmhop.sglang;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat identityConfig;
+  inherit (llmhopLib) identityConfig renderCliArgs;
   inherit (llmhopLib.systemd)
     mkConfig
     mkUvModelSubmodule
@@ -17,11 +17,7 @@ let
     mkUvServices
     ;
 
-  # SGLang uses plain `store_true` booleans paired as `--enable-X` /
-  # `--disable-X`, so we deliberately do NOT apply `flipBoolFlags` here.
-  # `true` collapses to `--key`, `null`/`false` are dropped; users write the
-  # negated key explicitly (e.g. `disable-radix-cache = true`).
-  renderArgs = lib.cli.toCommandLine (cliOptionFormat null);
+  renderArgs = renderCliArgs "sglang";
 in
 {
   options.services.llmhop.sglang =

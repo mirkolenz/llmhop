@@ -9,7 +9,7 @@ let
   cfg = config.services.llmhop.llama-cpp;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat enabledModels flipBoolFlags;
+  inherit (llmhopLib) enabledModels renderCliArgs;
   inherit (llmhopLib.systemd)
     mkConfig
     mkModelSubmodule
@@ -21,13 +21,7 @@ let
     gpuCacheEnvironment
     ;
 
-  # llama-server's parser only accepts space-separated `--key value` (no
-  # `--key=value`). Most boolean flags come paired as `--key` / `--no-key`,
-  # so `flipBoolFlags` lets `key = false` render as `--no-key`. Single-
-  # direction flags (`--verbose`) and tri-state options (`--flash-attn`
-  # takes `on|off|auto`) have no `--no-X` form — set the positive value
-  # explicitly instead of writing `... = false`.
-  renderArgs = attrs: lib.cli.toCommandLine (cliOptionFormat null) (flipBoolFlags attrs);
+  renderArgs = renderCliArgs "llama-cpp";
 
   mkService =
     model:

@@ -37,10 +37,11 @@
       };
       checks = {
         inherit (config.packages) llmhop;
+        cli = pkgs.callPackage ./checks/cli.nix { };
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
         inherit (config.packages) docker;
-        module = pkgs.callPackage ./test.nix { inherit self; };
+        module = pkgs.callPackage ./checks/module.nix { inherit self; };
       };
       packages = {
         default = config.packages.llmhop;

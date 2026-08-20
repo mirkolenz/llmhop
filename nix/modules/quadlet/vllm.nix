@@ -8,7 +8,7 @@ let
   cfg = config.services.llmhop.vllm-quadlet;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat flipBoolFlags sortedModels;
+  inherit (llmhopLib) renderCliArgsShell sortedModels;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
@@ -17,12 +17,7 @@ let
     mkWorker
     ;
 
-  # vLLM uses argparse `BooleanOptionalAction` (paired `--key` / `--no-key`)
-  # for every `bool`-typed option, so `flipBoolFlags` lets `key = false`
-  # render as `--no-key`. A few manual `store_true` flags (`--headless`,
-  # `--grpc`, `--disable-log-stats`, `--aggregate-engine-logging`) have no
-  # `--no-X` form — omit them instead of writing `... = false`.
-  renderArgs = attrs: lib.cli.toCommandLineShell (cliOptionFormat "=") (flipBoolFlags attrs);
+  renderArgs = renderCliArgsShell "vllm-quadlet";
 
   # Internal port every worker binds to inside its container.
   workerPort = 8000;

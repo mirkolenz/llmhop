@@ -12,6 +12,137 @@ let
   # `qwen3.6-…`-style version suffixes work.
   modelLabel = types.strMatching "[[:alnum:]][[:alnum:].-]*";
 
+  # ─── CLI rendering (private) ─────────────────────────────────────────
+
+  # How each backend's parser reads the two `settings` shapes that have no
+  # portable rendering. Keyed by the unsuffixed service name, so a native
+  # backend and its quadlet twin share one entry.
+  #
+  # `negateBools`: the parser registers a `--no-<key>` twin for every boolean
+  # (argparse `BooleanOptionalAction`, llama.cpp's paired flags). SGLang
+  # instead pairs `--enable-X` with `--disable-X` and rejects `--no-X`.
+  #
+  # `listStyle`: `"values"` hands every element to one flag (`--key a b`), what
+  # argparse `nargs` and clap multi-value options take. `"repeat"` emits the
+  # flag once per element (`--key a --key b`), all that llama.cpp's hand-rolled
+  # parser understands (it also takes only `--key value`, never `--key=value`).
+  # Both argparse backends register a few options in the other style, so this
+  # is the dominant form for a backend rather than a guarantee for every flag.
+  #
+  # `lib.cli.toCommandLine` renders neither axis: its `optionFormat` never sees
+  # the value, and list handling is hardcoded to repeat-style. The `mkBool` and
+  # `mkList` hooks of `lib.cli.toGNUCommandLine` could, but it is deprecated as
+  # of nixpkgs 25.11 and warns on every evaluation.
+  cliDialects = {
+    llama-cpp = {
+      negateBools = true;
+      listStyle = "repeat";
+    };
+    vllm = {
+      negateBools = true;
+      listStyle = "values";
+    };
+    sglang = {
+      negateBools = false;
+      listStyle = "values";
+    };
+  };
+
+  cliDialect = backend: cliDialects.${quadletServiceName backend};
+
+  # `false` becomes `--no-<key>` (and `no-<key> = false` becomes `--<key>`) for
+  # the backends whose parsers auto-register the negated twin. Other values
+  # pass through untouched.
+  flipBoolFlags = lib.mapAttrs' (
+    name: value:
+    if value == false then
+      lib.nameValuePair (
+        if lib.hasPrefix "no-" name then lib.removePrefix "no-" name else "no-${name}"
+      ) true
+    else
+      lib.nameValuePair name value
+  );
+
+  # Settings values are Nix-typed, so each shape is rendered the way the
+  # parsers read it: strings, paths and derivations verbatim, everything else
+  # through JSON. That keeps `0.6` from becoming `0.600000` (what `toString`
+  # makes of a float) and turns an attribute set into the JSON object that
+  # options like vLLM's `--speculative-config` parse.
+  cliValue = value: if lib.isStringLike value then toString value else builtins.toJSON value;
+
+  # Prose shared by `modelSettings` and `settings`, phrased for the dialect the
+  # backend's parser speaks.
+  settingsRendering =
+    backend:
+    let
+      dialect = cliDialect backend;
+    in
+    ''
+      `true` collapses to `--<key>`, `null` and empty lists are dropped, and an
+      attribute set is serialised to JSON.
+      ${
+        if dialect.negateBools then
+          "`false` renders as `--no-<key>`, so a flag with no negated twin (an on-only one, or a tri-state one taking `on|off|auto`) has to be omitted or given its value explicitly rather than set to `false`."
+        else
+          "`false` is dropped, since the CLI pairs `--enable-X` with `--disable-X` instead of auto-negating: write the negated key explicitly, e.g. `disable-radix-cache = true;`."
+      }
+      ${
+        if dialect.listStyle == "values" then
+          "A list hands every element to a single flag (`--<key> a b`), which is what most multi-value options of this CLI take. The few that instead expect a repeated flag have to be written out one value at a time."
+        else
+          "A list repeats the flag once per element (`--<key> a --<key> b`)."
+      }
+    '';
+
+  # Render a `settings` attribute set into the argv `backend`'s parser expects,
+  # following its entry in `cliDialects`. A `"values"` list always spends one
+  # argv entry per element, `sep` or not: argparse stops consuming values after
+  # the one glued onto `--<key>=`.
+  renderCliArgsWith =
+    sep: backend:
+    let
+      dialect = cliDialect backend;
+      flag =
+        name: value:
+        if sep == null then
+          [
+            "--${name}"
+            (cliValue value)
+          ]
+        else
+          [ "--${name}${sep}${cliValue value}" ];
+      # `false` only reaches this point for dialects without a negated twin,
+      # `flipBoolFlags` having rewritten the key otherwise.
+      render =
+        name: value:
+        if value == null || value == false then
+          [ ]
+        else if value == true then
+          [ "--${name}" ]
+        else if !lib.isList value then
+          flag name value
+        else if dialect.listStyle == "values" then
+          lib.optionals (value != [ ]) ([ "--${name}" ] ++ map cliValue value)
+        else
+          lib.concatMap (flag name) value;
+    in
+    attrs:
+    lib.concatLists (
+      lib.mapAttrsToList render (if dialect.negateBools then flipBoolFlags attrs else attrs)
+    );
+
+  # Flag and value as separate argv entries, what `utils.escapeSystemdExecArgs`
+  # takes.
+  renderCliArgs = renderCliArgsWith null;
+
+  # One shell-quoted string of `--key=value` tokens, what a Quadlet `Exec=` takes.
+  renderCliArgsShell =
+    backend:
+    let
+      render = renderCliArgsWith "=" backend;
+    in
+    attrs: lib.escapeShellArgs (render attrs);
+
   # Top-level options every backend exposes, regardless of kind.
   baseOptions =
     { backend }:
@@ -42,9 +173,7 @@ let
         default = { };
         description = ''
           CLI flags forwarded to the model server for every model.
-          `true` collapses to `--<key>`; `null` and `false` are dropped (write
-          the negated key explicitly, e.g. `"no-mmap" = true;`, when the upstream
-          CLI registers a `--no-<key>` form).
+          ${settingsRendering backend}
           Merged with `services.llmhop.${backend}.models.<name>.settings`; per-model
           entries take precedence.
         '';
@@ -191,9 +320,7 @@ let
         default = { };
         description = ''
           CLI flags forwarded to the model server for this model.
-          `true` collapses to `--<key>`; `null` and `false` are dropped (write
-          the negated key explicitly, e.g. `"no-mmap" = true;`, when the upstream
-          CLI registers a `--no-<key>` form).
+          ${settingsRendering backend}
           Merged with `services.llmhop.${backend}.modelSettings`; per-model entries
           take precedence.
         '';
@@ -436,6 +563,9 @@ in
     sortedModels
     resolveImageRef
     identityConfig
+    renderCliArgs
+    renderCliArgsShell
+    settingsRendering
     ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
@@ -459,37 +589,6 @@ in
           )
         );
     };
-
-  # ─── CLI helpers ──────────────────────────────────────────────────────
-
-  # Option format shared by every backend's `lib.cli.toCommandLine*` call:
-  # `--<key>`, with `null` and `false` dropped rather than rendered as an
-  # explicit value. `sep = null` emits `--key` and `value` as separate argv
-  # entries (what `utils.escapeSystemdExecArgs` needs); `sep = "="` joins them
-  # into a single `--key=value` entry (what Quadlet `Exec=` lines want).
-  cliOptionFormat = sep: name: {
-    option = "--${name}";
-    inherit sep;
-    explicitBool = false;
-  };
-
-  # `lib.cli.toCommandLine` drops `false` values entirely. For backends with
-  # argparse `BooleanOptionalAction` (paired `--key` / `--no-key`) we want
-  # `key = false` to render as `--no-key` instead. This helper rewrites
-  # `{ key = false; }` to `{ "no-key" = true; }` (and vice-versa for `no-`-
-  # prefixed keys); other values pass through unchanged.
-  #
-  # Don't use with backends like SGLang that have explicit `--enable-X` /
-  # `--disable-X` pairs and reject invalid `--no-X` flags.
-  flipBoolFlags = lib.mapAttrs' (
-    name: value:
-    if value == false then
-      lib.nameValuePair (
-        if lib.hasPrefix "no-" name then lib.removePrefix "no-" name else "no-${name}"
-      ) true
-    else
-      lib.nameValuePair name value
-  );
 
   # ─── Quadlet (container-based) ───────────────────────────────────────
 

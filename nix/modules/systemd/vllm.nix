@@ -9,7 +9,7 @@ let
   cfg = config.services.llmhop.vllm;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) cliOptionFormat flipBoolFlags identityConfig;
+  inherit (llmhopLib) identityConfig renderCliArgs;
   inherit (llmhopLib.systemd)
     mkConfig
     mkUvModelSubmodule
@@ -17,10 +17,7 @@ let
     mkUvServices
     ;
 
-  # vLLM uses argparse `BooleanOptionalAction` (paired `--key` / `--no-key`)
-  # for every `bool`-typed option, so `flipBoolFlags` lets `key = false`
-  # render as `--no-key`.
-  renderArgs = attrs: lib.cli.toCommandLine (cliOptionFormat null) (flipBoolFlags attrs);
+  renderArgs = renderCliArgs "vllm";
 in
 {
   options.services.llmhop.vllm =

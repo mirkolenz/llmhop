@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.2](https://github.com/mirkolenz/llmhop/compare/v2.0.1...v2.0.2) (2026-08-20)
+
+### Bug Fixes
+
+* **nix:** improve conversion of settings to cli flags ([e0c09f9](https://github.com/mirkolenz/llmhop/commit/e0c09f9c770746ea75815a20aa8ac44aaa5e0d96))
+
 ## [2.0.1](https://github.com/mirkolenz/llmhop/compare/v2.0.0...v2.0.1) (2026-08-13)
 
 ### Bug Fixes

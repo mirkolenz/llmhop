@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.3](https://github.com/mirkolenz/llmhop/compare/v2.0.2...v2.0.3) (2026-08-31)
+
+### Bug Fixes
+
+* **nixos:** add network-online dependency to systemd units ([b91426a](https://github.com/mirkolenz/llmhop/commit/b91426a06f8d9190fc70bf4a697abb75e51aed03))
+* **nixos:** allow overriding systemd unit config ([822d67f](https://github.com/mirkolenz/llmhop/commit/822d67f6972015e7fd77f64e4b1ffc92fe3fc7d8))
+
 ## [2.0.2](https://github.com/mirkolenz/llmhop/compare/v2.0.1...v2.0.2) (2026-08-20)
 
 ### Bug Fixes

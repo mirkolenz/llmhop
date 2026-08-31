@@ -87,6 +87,7 @@ let
         // gpuServiceConfig
         // ncclServiceConfig
         // model.serviceConfig;
+        inherit (model) unitConfig;
       }
     );
 in

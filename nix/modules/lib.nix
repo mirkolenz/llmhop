@@ -1028,6 +1028,28 @@ in
           '';
         };
 
+      # Companion `[Unit]` hatch, merged over `sharedUnitConfig` the same way.
+      unitConfigOption =
+        { serviceName }:
+        mkOption {
+          type = with types; attrsOf anything;
+          default = { };
+          example = {
+            StartLimitBurst = 10;
+          };
+          description = ''
+            Extra `[Unit]` settings merged into this model's
+            `${serviceName}-<name>` unit after the shared baseline.
+
+            Ordering and dependency directives (`After=`, `Requires=`, `Wants=`)
+            do not belong here: NixOS renders those from the `after`, `requires`
+            and `wants` options, so a definition of the same key in `unitConfig`
+            conflicts with it instead of merging. Declare them on
+            `systemd.services."${serviceName}-<name>"` from your own module,
+            where the module system concatenates them with what this one sets.
+          '';
+        };
+
       # One systemd service for a uv/wheel-based GPU Python worker, shared by the
       # native vLLM and SGLang backends. Layers the GPU-on-NixOS specifics (cache
       # redirection, driver libs, W^X relaxation, MEMLOCK), the dedicated-user
@@ -1143,6 +1165,7 @@ in
             // gpuServiceConfig
             // ncclServiceConfig
             // model.serviceConfig;
+            inherit (model) unitConfig;
           }
         );
     in
@@ -1206,6 +1229,7 @@ in
         {
           options = baseModelOptions { inherit backend name; } // {
             serviceConfig = serviceConfigOption { serviceName = backend; };
+            unitConfig = unitConfigOption { serviceName = backend; };
           };
         };
 
@@ -1252,6 +1276,7 @@ in
               '';
             };
             serviceConfig = serviceConfigOption { serviceName = backend; };
+            unitConfig = unitConfigOption { serviceName = backend; };
           };
         };
 

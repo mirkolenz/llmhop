@@ -1056,12 +1056,13 @@ in
           {
             description = "${serviceName} server for ${model.name}";
             wantedBy = [ "multi-user.target" ];
+            wants = [ "network-online.target" ];
             # Chain ascending so each worker finishes GPU-memory profiling before
             # the next starts (booting two on one device races to OOM). This is
             # only meaningful because `mkWorker` holds the unit in `activating`
             # until the server reports itself ready.
             after = [
-              "network.target"
+              "network-online.target"
             ]
             ++ lib.optional (cfg.startupOrdering && previous != null) "${serviceName}-${previous.name}.service";
             # A toolchain on `PATH`, because these runtimes compile at runtime and

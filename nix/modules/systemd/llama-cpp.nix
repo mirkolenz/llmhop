@@ -33,7 +33,8 @@ let
       {
         description = "llama.cpp server for ${model.name}";
         wantedBy = [ "multi-user.target" ];
-        after = [ "network.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
         environment = {
           LLAMA_CACHE = cacheBase;
         }

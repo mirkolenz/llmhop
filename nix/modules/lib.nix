@@ -193,20 +193,17 @@ let
   # mutual-exclusion assertion in `quadlet.mkConfig`).
   quadletServiceName = lib.removeSuffix "-quadlet";
 
-  # Identity of a backend whose directories outlive any single service start, so
-  # their ownership has to be pinned rather than left to systemd to allocate.
+  # Identity of a native backend whose directories outlive any single service
+  # start, so their ownership has to be pinned rather than left to systemd.
   # The group side lazily defaults to its user counterpart, which is why `cfg`
-  # (the backend's own config) is passed in. `userns` appends the quadlet-only
-  # note that these IDs are also mapped into the container's user namespace.
+  # is passed in.
   identityOptions =
     {
       backend,
       cfg,
-      userns ? false,
     }:
     let
       serviceName = quadletServiceName backend;
-      note = text: lib.optionalString userns " ${text}";
     in
     {
       user = mkOption {
@@ -217,7 +214,7 @@ let
           directories. Defaults to the backend name; override to point at a
           user the deployer manages externally (in which case the matching
           `users.users.<name>` and `users.groups.<name>` declarations become the
-          deployer's responsibility).${note "Container root is mapped to this user via `--uidmap`."}
+          deployer's responsibility).
         '';
       };
       uid = mkOption {
@@ -226,7 +223,7 @@ let
         description = ''
           Host UID assigned to `services.llmhop.${backend}.user`.
           Required — pick a value that does not clash with other system users on the
-          host.${note "It is also the inner-to-outer target of `--uidmap`."}
+          host.
         '';
       };
       group = mkOption {
@@ -244,7 +241,7 @@ let
         defaultText = lib.literalExpression "config.services.llmhop.${backend}.uid";
         description = ''
           Host GID assigned to `services.llmhop.${backend}.group`.
-          Defaults to `uid`.${note "It is also the inner-to-outer target of `--gidmap`."}
+          Defaults to `uid`.
         '';
       };
     };
@@ -556,6 +553,43 @@ let
         inherit portsRegistry unitsRegistry;
       };
     };
+
+  mkQuadletObjectOptions =
+    {
+      description ? "this container",
+    }:
+    let
+      sectionOption =
+        section:
+        mkOption {
+          type = with types; attrsOf anything;
+          default = { };
+          description = "Extra `[${section}]` settings applied to ${description}.";
+        };
+    in
+    {
+      containerConfig = mkOption {
+        type = with types; attrsOf anything;
+        default = { };
+        description = ''
+          Extra `[Container]` settings applied to ${description}.
+          Keys use Quadlet's native `PascalCase` names, including `User`,
+          `UserNS`, `UIDMap`, `GIDMap`, `SubUIDMap`, and `SubGIDMap`.
+        '';
+      };
+      serviceConfig = sectionOption "Service";
+      unitConfig = sectionOption "Unit";
+      quadletConfig = sectionOption "Quadlet";
+      extraConfig = mkOption {
+        type = with types; attrsOf (attrsOf anything);
+        default = { };
+        description = ''
+          Extra unit sections applied to ${description} after all generated
+          sections. This is the final escape hatch for settings that do not
+          fit one of the dedicated `*Config` options.
+        '';
+      };
+    };
 in
 {
   inherit
@@ -593,6 +627,8 @@ in
   # ─── Quadlet (container-based) ───────────────────────────────────────
 
   quadlet = {
+    mkObjectOptions = mkQuadletObjectOptions;
+
     # Top-level options for a quadlet-based backend. Spread under
     # `options.services.llmhop.<backend>` via `//`; the caller adds `enable`,
     # `models`, and any backend-specific extras (gateway sub-options, etc.).
@@ -611,12 +647,86 @@ in
       }:
       let
         serviceName = quadletServiceName backend;
+        rangeOptions =
+          startName:
+          types.submodule {
+            options = {
+              ${startName} = mkOption {
+                type = types.ints.unsigned;
+                description = "First subordinate ID in this range.";
+              };
+              count = mkOption {
+                type = types.ints.positive;
+                description = "Number of consecutive subordinate IDs in this range.";
+              };
+            };
+          };
+        userType = types.submodule (
+          { config, ... }:
+          {
+            options = {
+              manage = mkOption {
+                type = types.bool;
+                default = true;
+                description = ''
+                  Whether llmhop creates and configures this account. Disable
+                  this for an account managed elsewhere, including its home,
+                  linger setting, group, and subordinate ID ranges.
+                '';
+              };
+              name = mkOption {
+                type = types.str;
+                default = serviceName;
+                description = "Host account whose systemd user manager owns the Quadlets.";
+              };
+              uid = mkOption {
+                type = types.ints.positive;
+                example = 503;
+                description = "UID of the systemd user manager that owns the Quadlets.";
+              };
+              group = mkOption {
+                type = types.str;
+                default = config.name;
+                defaultText = lib.literalExpression "config.name";
+                description = "Primary group of the managed account.";
+              };
+              gid = mkOption {
+                type = types.ints.positive;
+                default = config.uid;
+                defaultText = lib.literalExpression "config.uid";
+                description = "GID of the managed account's primary group.";
+              };
+              home = mkOption {
+                type = types.path;
+                default = "/var/lib/${serviceName}";
+                description = ''
+                  Home directory used for rootless Podman storage. This must
+                  live on a filesystem that supports the selected storage driver.
+                '';
+              };
+              autoSubUidGidRange = mkOption {
+                type = types.bool;
+                default = true;
+                description = ''
+                  Whether NixOS automatically allocates subordinate UID and GID
+                  ranges for the managed account.
+                '';
+              };
+              subUidRanges = mkOption {
+                type = types.listOf (rangeOptions "startUid");
+                default = [ ];
+                description = "Explicit subordinate UID ranges for the managed account.";
+              };
+              subGidRanges = mkOption {
+                type = types.listOf (rangeOptions "startGid");
+                default = [ ];
+                description = "Explicit subordinate GID ranges for the managed account.";
+              };
+            };
+          }
+        );
       in
       (baseOptions { inherit backend; })
-      // identityOptions {
-        inherit backend cfg;
-        userns = true;
-      }
       // {
         image = mkOption {
           type = types.str;
@@ -631,56 +741,72 @@ in
             `tag` or `digest`.
           '';
         };
-        cacheDir = mkOption {
-          type = types.path;
-          default = defaultCacheDir;
-          description = "Host directory bind-mounted as the Hugging Face cache for every worker.";
+        quadlet = mkQuadletObjectOptions { description = "every generated container"; } // {
+          user = mkOption {
+            type = types.nullOr userType;
+            default = null;
+            description = ''
+              Host account whose systemd user manager owns these Quadlets.
+              `null` installs system units and runs Podman rootfully. An
+              attribute set installs user units for its `uid` and runs Podman
+              rootlessly. This is independent of `[Container] User=` and the
+              container's user namespace configuration.
+            '';
+          };
         };
-        dataDir = mkOption {
-          type = types.path;
-          default = "/var/lib/${serviceName}";
-          description = ''
-            Home directory of `services.llmhop.${backend}.user`.
-            Used by rootless podman for container storage
-            (`~/.local/share/containers`), so it must live on a filesystem that
-            tolerates overlayfs.
-          '';
-        };
-        subUidStart = mkOption {
-          type = types.ints.unsigned;
-          example = 300000;
-          description = ''
-            First host UID of the subordinate range mapped into every container.
-            Container UIDs ≥1 are mapped to `subUidCount` consecutive host IDs starting here.
-            Required — pick a value clear of NixOS system users (`<1000`), regular login
-            UIDs, and other backends' subordinate ranges on the same host.
-          '';
-        };
-        subUidCount = mkOption {
-          type = types.ints.positive;
-          default = 65536;
-          description = ''
-            Size of the subordinate UID range mapped into every container.
-            65536 covers the full unprivileged ID space inside the namespace.
-          '';
-        };
-        subGidStart = mkOption {
-          type = types.ints.unsigned;
-          default = cfg.subUidStart;
-          defaultText = lib.literalExpression "config.services.llmhop.${backend}.subUidStart";
-          description = ''
-            First host GID of the subordinate range mapped into every container.
-            Defaults to `subUidStart` — most setups keep the UID and GID ranges aligned.
-          '';
-        };
-        subGidCount = mkOption {
-          type = types.ints.positive;
-          default = cfg.subUidCount;
-          defaultText = lib.literalExpression "config.services.llmhop.${backend}.subUidCount";
-          description = ''
-            Size of the subordinate GID range mapped into every container.
-            Defaults to `subUidCount`.
-          '';
+        cache = {
+          directory = mkOption {
+            type = types.path;
+            default = defaultCacheDir;
+            description = "Host directory bind-mounted as the Hugging Face cache.";
+          };
+          containerDirectory = mkOption {
+            type = types.str;
+            default = "/root/.cache/huggingface";
+            description = "Path at which the cache is mounted inside every model container.";
+          };
+          mountOptions = mkOption {
+            type = with types; listOf str;
+            default = [ ];
+            example = [ "idmap" ];
+            description = ''
+              Options appended to the cache's Quadlet `Volume=` entry. This can
+              be used for Podman ownership mechanisms such as `U`, `idmap`, or
+              SELinux relabeling.
+            '';
+          };
+          manage = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether llmhop creates the host cache directory with systemd-tmpfiles.";
+          };
+          user = mkOption {
+            type = types.str;
+            default = if cfg.quadlet.user == null then "root" else cfg.quadlet.user.name;
+            defaultText = lib.literalExpression ''
+              if config.services.llmhop.${backend}.quadlet.user == null then
+                "root"
+              else
+                config.services.llmhop.${backend}.quadlet.user.name
+            '';
+            description = "Host owner used when `cache.manage` is enabled.";
+          };
+          group = mkOption {
+            type = types.str;
+            default = if cfg.quadlet.user == null then "root" else cfg.quadlet.user.group;
+            defaultText = lib.literalExpression ''
+              if config.services.llmhop.${backend}.quadlet.user == null then
+                "root"
+              else
+                config.services.llmhop.${backend}.quadlet.user.group
+            '';
+            description = "Host group used when `cache.manage` is enabled.";
+          };
+          mode = mkOption {
+            type = types.str;
+            default = "0700";
+            description = "Mode used when `cache.manage` is enabled.";
+          };
         };
         startupOrdering = startupOrderingOption { pinNote = "via its own `devices`"; };
         devices = mkOption {
@@ -769,15 +895,13 @@ in
               isolation: raise the value for larger models or higher tensor-parallel sizes.
             '';
           };
+          quadlet = mkQuadletObjectOptions { description = "this model container"; };
         };
       };
 
-    # Render a Quadlet container worker fragment. Returns
-    # `{ uid, serviceConfig, unitConfig, containerConfig }` with the shared
-    # baseline merged in; caller overrides win. The top-level `uid` is
-    # quadlet-nix's rootless-system marker — it installs the unit under the
-    # per-user rootless search path so the resulting service is owned by that
-    # UID's systemd-user instance.
+    # Render a Quadlet container worker fragment. The optional host user
+    # selects the systemd user manager. Native Quadlet section overrides are
+    # layered globally and then per container.
     mkWorker =
       {
         cfg,
@@ -787,9 +911,10 @@ in
         serviceConfig ? { },
         unitConfig ? { },
         containerConfig ? { },
+        overrides ? { },
       }:
       {
-        uid = cfg.uid;
+        uid = if cfg.quadlet.user == null then null else cfg.quadlet.user.uid;
         # `Restart = "always"` overrides quadlet-nix's `on-failure` default:
         # vLLM/sglang catch an EngineCore death, shut the API server down
         # gracefully, and exit 0, so `on-failure` would leave a crashed worker
@@ -800,8 +925,12 @@ in
             Restart = "always";
             LimitNOFILE = cfg.openFilesLimit;
           }
-          // serviceConfig;
-        unitConfig = sharedUnitConfig // unitConfig;
+          // serviceConfig
+          // cfg.quadlet.serviceConfig
+          // overrides.serviceConfig;
+        unitConfig = sharedUnitConfig // unitConfig // cfg.quadlet.unitConfig // overrides.unitConfig;
+        quadletConfig = cfg.quadlet.quadletConfig // overrides.quadletConfig;
+        extraConfig = lib.recursiveUpdate cfg.quadlet.extraConfig overrides.extraConfig;
         # `[Container]` defaults: minimal hardening (podman handles the rest)
         # plus an HTTP `/health` probe. The rootfs stays writable — ML runtimes
         # scatter JIT/compile caches across version-dependent HOME paths, so an
@@ -817,24 +946,28 @@ in
           HealthInterval = "10s";
           HealthTimeout = "5s";
         }
-        // containerConfig;
+        // containerConfig
+        // cfg.quadlet.containerConfig
+        // overrides.containerConfig;
       };
 
     # Common Quadlet `containerConfig` fields for a model worker: image,
     # pull policy, GPU CDI device, HF cache bind-mount, env, shm, ulimits.
     # Backend-specific extras (`PublishPort`, `Exec`, ...) spread on top.
     #
-    # No `UIDMap`/`GIDMap` needed: the quadlet runs under the backend
-    # user's systemd instance and rootless podman handles the userns remap
-    # from `/etc/sub{u,g}id`. Digest-locked images use `Pull=missing`;
-    # tag-tracking ones `Pull=newer`. EnvironmentFile is global-then-per-
-    # model so per-model entries win.
+    # Digest-locked images use `Pull=missing`; tag-tracking ones use
+    # `Pull=newer`. EnvironmentFile is global then per model.
     mkContainerArgs =
       {
         backend,
         cfg,
         model,
       }:
+      let
+        mountOptions = lib.optionalString (
+          cfg.cache.mountOptions != [ ]
+        ) ":${lib.concatStringsSep "," cfg.cache.mountOptions}";
+      in
       {
         Image = resolveImageRef {
           inherit (cfg) image;
@@ -844,27 +977,26 @@ in
         };
         Pull = if model.digest != null then "missing" else "newer";
         AddDevice = model.devices;
-        Volume = [ "${cfg.cacheDir}:/root/.cache/huggingface" ];
+        Volume = [ "${cfg.cache.directory}:${cfg.cache.containerDirectory}${mountOptions}" ];
         EnvironmentFile =
           lib.optional (cfg.environmentFile != null) cfg.environmentFile
           ++ lib.optional (model.environmentFile != null) model.environmentFile;
-        Environment = cfg.environment // model.environment;
+        Environment = {
+          HF_HOME = cfg.cache.containerDirectory;
+        }
+        // cfg.environment
+        // model.environment;
         ShmSize = model.shmSize;
         Ulimit = "host";
       };
 
     # Cross-cutting NixOS config produced by every quadlet backend:
     # the quadlet-enabled assertion, llmhop registration, resource registries,
-    # `dataDir`/`cacheDir` tmpfiles, a helper command that drops into the
-    # rootless session via `machinectl shell`, and, when `cfg.user` is left at
-    # the backend default, the system user/group.
+    # cache directory, and optional rootless account and operator helper.
     #
     # `extras` / `extraUnits` are labeled attrsets of auxiliary host ports
     # (e.g. `{ gateway = 30000; }`) and unit names (e.g.
     # `{ gateway = "sglang-gateway"; }`) folded into the global registries.
-    # Deployers who override `cfg.user` must declare the matching
-    # `users.users.<name>` (with the right uid + sub-id ranges) and
-    # `users.groups.<group>` themselves.
     mkConfig =
       {
         backend,
@@ -876,11 +1008,7 @@ in
       }:
       let
         serviceName = quadletServiceName backend;
-        dirSpec = {
-          user = cfg.user;
-          group = cfg.group;
-          mode = "0700";
-        };
+        user = cfg.quadlet.user;
       in
       lib.mkMerge [
         (mkSharedConfig {
@@ -898,18 +1026,24 @@ in
               assertion = config.virtualisation.quadlet.enable;
               message = "services.llmhop.${backend} requires virtualisation.quadlet.enable.";
             }
+            {
+              assertion =
+                user == null
+                || !user.manage
+                || !user.autoSubUidGidRange
+                || (user.subUidRanges == [ ] && user.subGidRanges == [ ]);
+              message = "services.llmhop.${backend}.quadlet.user cannot combine automatic and explicit subordinate ID ranges.";
+            }
           ];
 
-          systemd.tmpfiles.settings."10-${serviceName}" = {
-            ${cfg.dataDir}.d = dirSpec;
-            ${cfg.cacheDir}.d = dirSpec;
+          systemd.tmpfiles.settings."10-${serviceName}" = lib.optionalAttrs cfg.cache.manage {
+            ${cfg.cache.directory}.d = {
+              inherit (cfg.cache) user group mode;
+            };
           };
 
-          # Lets operators inspect the rootless services without remembering the
-          # `machinectl` incantation. Follows `cfg.user`, so it stays useful when
-          # the account is managed externally.
-          environment.systemPackages = [
-            (pkgs.writeShellApplication {
+          environment.systemPackages = lib.optional (user != null) (
+            pkgs.writeShellApplication {
               name = "${serviceName}-shell";
               text = ''
                 if [ "$#" -eq 0 ]; then
@@ -918,38 +1052,31 @@ in
                   echo "  journalctl --user -u ${serviceName}-<model> -f    # tail logs"
                   echo "  podman ps                                     # list containers"
                   echo "  exit                                          # back to host"
-                  exec sudo machinectl --quiet shell ${cfg.user}@.host
+                  exec sudo machinectl --quiet shell ${user.name}@.host
                 fi
-                exec sudo machinectl --quiet shell ${cfg.user}@.host /usr/bin/env "$@"
+                exec sudo machinectl --quiet shell ${user.name}@.host /usr/bin/env "$@"
               '';
-            })
-          ];
+            }
+          );
         }
-        # Real home + shell + linger turn the system user into something
-        # systemd-logind treats as a real session: rootless podman gets a
-        # writable `~/.local/share/containers`, `machinectl shell` works, and
-        # `systemctl --user` keeps running across logouts. `systemd-journal`
-        # makes `journalctl --user` work inside the machinectl session.
-        (identityConfig {
-          inherit backend cfg;
-          userExtra = {
-            home = cfg.dataDir;
+        (lib.mkIf (user != null && user.manage) {
+          users.users.${user.name} = {
+            description = "${serviceName} container service user";
+            inherit (user)
+              uid
+              group
+              home
+              autoSubUidGidRange
+              subUidRanges
+              subGidRanges
+              ;
+            isSystemUser = true;
+            createHome = true;
             shell = config.users.defaultUserShell;
             extraGroups = [ "systemd-journal" ];
             linger = true;
-            subUidRanges = [
-              {
-                startUid = cfg.subUidStart;
-                count = cfg.subUidCount;
-              }
-            ];
-            subGidRanges = [
-              {
-                startGid = cfg.subGidStart;
-                count = cfg.subGidCount;
-              }
-            ];
           };
+          users.groups.${user.group}.gid = user.gid;
         })
       ];
   };

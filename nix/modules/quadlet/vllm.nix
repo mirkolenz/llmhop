@@ -29,6 +29,7 @@ let
     i: model:
     lib.nameValuePair "vllm-${model.name}" (mkWorker {
       inherit cfg;
+      overrides = model.quadlet;
       healthPort = workerPort;
       containerConfig =
         (mkContainerArgs {

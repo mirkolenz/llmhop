@@ -180,15 +180,16 @@ Cold starts download weights and profile the GPU, so that wait can be long: `Tim
 The container variants get the same guarantee from their `Notify=healthy` health check.
 
 llama.cpp runs as a native, hardened systemd system unit under `DynamicUser`, and the default `vllm` and `sglang` backends run the same way from prebuilt wheels, except under a dedicated system user (see [below](#native-vllm-and-sglang-from-prebuilt-wheels)).
-As a last resort, when the prebuilt wheels cannot be used, vLLM and SGLang can instead run as rootless Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `vllm-quadlet` and `sglang-quadlet` options.
-Each Quadlet backend gets a dedicated, lingering system user (`sglang`, `vllm`) that owns its cache directory, sub-UID range and rootless container store.
-The container units are installed under that user's per-UID search path and therefore run as **systemd user units**, not system units.
-This is a deliberate workaround for [NVIDIA/nvidia-container-toolkit#648](https://github.com/NVIDIA/nvidia-container-toolkit/issues/648):
-`nvidia-cdi-hook` runs as an OCI `createContainer` hook inside the container's user namespace and fails to read the OCI bundle's `config.json` whenever Podman uses a UID-mapped namespace (e.g., `--userns auto` or `--userns nomap`), which is the mode you end up in when systemd's system manager launches a rootless container.
-Running each Quadlet unit under a real, lingering system user's systemd instance keeps Podman in the `keep-id`-style mapping where the CDI hook can read the bundle and the GPU is correctly exposed.
-No worker ever runs as root.
+As a last resort, when the prebuilt wheels cannot be used, vLLM and SGLang can instead run as Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `vllm-quadlet` and `sglang-quadlet` options.
+They are rootful system units by default, matching Quadlet itself and requiring no host UID configuration.
+Set `quadlet.user` to run them as rootless systemd user units instead.
+The module can create a dedicated lingering account, or target an account managed elsewhere.
 
-For convenience, the module injects a tiny per-backend helper into `environment.systemPackages` whenever the backend's default user is used:
+The dedicated user mode remains useful for NVIDIA systems affected by [NVIDIA/nvidia-container-toolkit#648](https://github.com/NVIDIA/nvidia-container-toolkit/issues/648).
+`nvidia-cdi-hook` runs as an OCI `createContainer` hook inside the container's user namespace and can fail to read the OCI bundle's `config.json` with some UID-mapped namespaces.
+Running the Quadlet under a real user's systemd manager avoids that system-manager launch path while retaining rootless Podman.
+
+For convenience, a rootless Quadlet backend adds a tiny per-backend helper to `environment.systemPackages`:
 
 - Native workers (`llama-cpp`, `vllm`, `sglang`) are plain system units, so they are managed with the usual `systemctl status <backend>-<model>` and `journalctl -u <backend>-<model>`.
 - For the container variants, `sglang-shell` and `vllm-shell` are `writeShellApplication` wrappers around `machinectl shell` that drop you into the backend user's session, where `systemctl --user`, `journalctl --user` and `podman ps` see the worker units directly. Run them with no arguments for an interactive shell, or pass a command to execute it inside the session.
@@ -224,6 +225,98 @@ services.llmhop = {
 ```
 
 See the [options reference](https://mirkolenz.github.io/llmhop/) for the full list of per-backend options.
+
+#### Quadlet execution and user namespaces
+
+The Quadlet backends separate the host account that invokes Podman from the identity used inside each container.
+With no `quadlet.user`, quadlet-nix installs system units and Podman runs rootfully:
+
+```nix
+services.llmhop.vllm-quadlet = {
+  enable = true;
+  tag = "latest";
+  models."qwen3-8b" = {
+    model = "Qwen/Qwen3-8B";
+    port = 18001;
+  };
+};
+```
+
+To keep the previous dedicated-user layout, set a positive UID.
+llmhop creates the matching system user and group, enables linger, creates its home, and asks NixOS to allocate subordinate IDs:
+
+```nix
+services.llmhop.vllm-quadlet.quadlet.user.uid = 503;
+```
+
+Every account detail remains configurable:
+
+```nix
+services.llmhop.vllm-quadlet.quadlet.user = {
+  name = "inference";
+  uid = 503;
+  group = "inference";
+  gid = 503;
+  home = "/var/lib/inference";
+  autoSubUidGidRange = false;
+  subUidRanges = [
+    {
+      startUid = 300000;
+      count = 65536;
+    }
+  ];
+  subGidRanges = [
+    {
+      startGid = 300000;
+      count = 65536;
+    }
+  ];
+};
+```
+
+Set `manage = false` to select an existing account without changing it:
+
+```nix
+services.llmhop.vllm-quadlet.quadlet.user = {
+  manage = false;
+  name = "inference";
+  uid = 1000;
+  group = "inference";
+};
+```
+
+Native Quadlet sections are exposed at backend level and on each model.
+Backend settings apply to every generated container, then model settings override individual keys:
+
+```nix
+services.llmhop.vllm-quadlet = {
+  quadlet.containerConfig = {
+    User = "1000";
+    UserNS = "auto:size=65536";
+  };
+
+  models."qwen3-8b".quadlet.containerConfig.GroupAdd = [ "keep-groups" ];
+};
+```
+
+`containerConfig` accepts every [upstream `[Container]` key](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html#container-units-container), including `User`, `Group`, `GroupAdd`, `UserNS`, `UIDMap`, `GIDMap`, `SubUIDMap`, `SubGIDMap`, `PodmanArgs`, and `GlobalArgs`.
+`serviceConfig`, `unitConfig`, `quadletConfig`, and `extraConfig` provide the corresponding systemd and Quadlet escape hatches.
+The SGLang gateway has the same options under `gateway.quadlet`.
+
+The Hugging Face cache mount is configured separately because host ownership depends on the selected mapping:
+
+```nix
+services.llmhop.vllm-quadlet.cache = {
+  directory = "/var/cache/vllm";
+  containerDirectory = "/cache/huggingface";
+  user = "100000";
+  group = "100000";
+  mountOptions = [ "idmap" ];
+};
+```
+
+Set `cache.manage = false` when another module owns the host directory.
+Podman validates incompatible namespace combinations during the build, using the same generator that consumes the final unit.
 
 ### Native vLLM and SGLang from prebuilt wheels
 

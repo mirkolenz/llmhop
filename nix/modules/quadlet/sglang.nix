@@ -18,6 +18,7 @@ let
     mkConfig
     mkContainerArgs
     mkModelSubmodule
+    mkObjectOptions
     mkOptions
     mkWorker
     ;
@@ -36,6 +37,7 @@ let
     i: model:
     lib.nameValuePair "sglang-${model.name}" (mkWorker {
       inherit cfg;
+      overrides = model.quadlet;
       healthPort = workerPort;
       containerConfig =
         (mkContainerArgs {
@@ -91,6 +93,7 @@ let
 
   mkGatewayContainer = lib.nameValuePair "sglang-gateway" (mkWorker {
     inherit cfg;
+    overrides = cfg.gateway.quadlet;
     healthPort = cfg.gateway.port;
     healthStartPeriod = "5m";
     containerConfig = {
@@ -263,6 +266,8 @@ in
             replaces the generated list.
           '';
         };
+
+        quadlet = mkObjectOptions { description = "the gateway container"; };
       };
     };
 

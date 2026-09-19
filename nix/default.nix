@@ -42,6 +42,10 @@
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
         inherit (config.packages) docker;
         module = pkgs.callPackage ./checks/module.nix { inherit self; };
+        quadlet = pkgs.callPackage ./checks/quadlet.nix {
+          inherit self;
+          inherit (inputs.nixpkgs.lib) nixosSystem;
+        };
       };
       packages = {
         default = config.packages.llmhop;

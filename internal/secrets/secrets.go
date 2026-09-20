@@ -1,5 +1,5 @@
-// Package secrets resolves ${env:NAME}, ${file:PATH} and $NAME references
-// inside config strings so credentials can stay out of the config file.
+// Package secrets resolves ${cred:NAME}, ${env:NAME}, ${file:PATH} and $NAME
+// references inside config strings so credentials can stay out of the config file.
 package secrets
 
 import (
@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// credentialsDirectory is where systemd exposes the unit's LoadCredential= set.
+const credentialsDirectory = "CREDENTIALS_DIRECTORY"
 
 // Expand resolves every secret reference inside s. Unresolved references
 // return the first error encountered so misconfiguration fails loudly at
@@ -25,6 +28,9 @@ func Expand(s string) (string, error) {
 }
 
 func resolve(key string) (string, error) {
+	if name, ok := strings.CutPrefix(key, "cred:"); ok {
+		return readCredential(name)
+	}
 	if name, ok := strings.CutPrefix(key, "env:"); ok {
 		return lookupEnv(name)
 	}
@@ -42,13 +48,27 @@ func lookupEnv(name string) (string, error) {
 	return v, nil
 }
 
-// readFile reads a credential from disk. Relative paths are resolved
-// against systemd's $CREDENTIALS_DIRECTORY when set, matching LoadCredential=.
+// readCredential resolves the systemd credential called name. This is the same
+// reference the NixOS module rewrites at eval time for the model servers, which
+// receive a path because they read the file themselves; llmhop reads its own
+// config, so here the reference expands to the credential's contents.
+func readCredential(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, filepath.Separator) {
+		return "", fmt.Errorf("invalid credential name %q", name)
+	}
+	dir := os.Getenv(credentialsDirectory)
+	if dir == "" {
+		return "", fmt.Errorf("credential %q requested but $%s is not set", name, credentialsDirectory)
+	}
+	return readFile(filepath.Join(dir, name))
+}
+
+// readFile reads a credential from an absolute path. Credentials granted through
+// systemd are addressed by name with ${cred:NAME} instead, so this stays a plain
+// path reference for files llmhop is pointed at directly.
 func readFile(path string) (string, error) {
 	if !filepath.IsAbs(path) {
-		if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
-			path = filepath.Join(dir, path)
-		}
+		return "", fmt.Errorf("secret file %q must be an absolute path", path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

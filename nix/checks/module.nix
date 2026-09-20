@@ -8,6 +8,7 @@
 let
   clientToken = pkgs.writeText "client-token" "client-secret";
   upstreamKey = pkgs.writeText "upstream-key" "upstream-secret";
+  workerKey = pkgs.writeText "worker-key" "worker-secret";
 
   notify = lib.getExe' (pkgs.callPackage ../package.nix { }) "llmhop-notify";
 
@@ -50,7 +51,11 @@ testers.nixosTest {
       services.llmhop.llama-cpp = {
         enable = true;
         package = fakeServer;
-        models."fake-model".port = 9100;
+        models."fake-model" = {
+          port = 9100;
+          credentials.apiKeys = workerKey;
+          settings.api-key-file = "\${cred:apiKeys}";
+        };
       };
 
       # Started by hand so the `activating` window is observable rather than
@@ -76,10 +81,10 @@ testers.nixosTest {
           upstream_key = upstreamKey;
         };
         settings = {
-          authTokens = [ "\${file:client_token}" ];
+          authTokens = [ "\${cred:client_token}" ];
           models."test-model" = {
             url = "http://127.0.0.1:9000";
-            headers.Authorization = "Bearer \${file:upstream_key}";
+            headers.Authorization = "Bearer \${cred:upstream_key}";
           };
         };
       };
@@ -128,6 +133,14 @@ testers.nixosTest {
         machine.fail(curl({"model": "unknown"}, token="client-secret"))
 
     with subtest("a loading model holds its unit in activating"):
+        load_credential = machine.succeed(
+            "systemctl show llama-cpp-fake-model -p LoadCredential --value"
+        )
+        assert "apiKeys:" in load_credential, load_credential
+        exec_start = machine.succeed(
+            "systemctl show llama-cpp-fake-model -p ExecStart --value"
+        )
+        assert "/run/credentials/llama-cpp-fake-model.service/apiKeys" in exec_start, exec_start
         machine.succeed("systemctl start --no-block llama-cpp-fake-model")
         state = machine.get_unit_info("llama-cpp-fake-model")["ActiveState"]
         assert state == "activating", f"unexpected state: {state}"

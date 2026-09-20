@@ -9,17 +9,21 @@ let
 
   llmhopLib = import ../lib.nix lib;
   inherit (llmhopLib)
+    credentialDirectory
+    credentialsOption
     renderCliArgsShell
-    resolveImageRef
+    resolveCredentialRefs
     settingsRendering
     sortedModels
     ;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
+    mkImageArgs
     mkModelSubmodule
     mkObjectOptions
     mkOptions
+    mkStartupOrdering
     mkWorker
     ;
 
@@ -34,9 +38,20 @@ let
   models = sortedModels cfg;
 
   mkContainer =
-    i: model:
+    index: model:
+    let
+      settings = {
+        model-path = model.model;
+        served-model-name = model.name;
+        host = "0.0.0.0";
+        port = workerPort;
+      }
+      // cfg.modelSettings
+      // model.settings;
+    in
     lib.nameValuePair "sglang-${model.name}" (mkWorker {
       inherit cfg;
+      inherit (model) credentials;
       overrides = model.quadlet;
       healthPort = workerPort;
       containerConfig =
@@ -51,24 +66,16 @@ let
             "sglang"
             "serve"
           ];
-          Exec = renderArgs (
-            {
-              model-path = model.model;
-              served-model-name = model.name;
-              host = "0.0.0.0";
-              port = workerPort;
-            }
-            // cfg.modelSettings
-            // model.settings
-          );
+          Exec = renderArgs (resolveCredentialRefs credentialDirectory model.credentials settings);
         };
-      # Chain ascending so each worker finishes GPU-memory profiling before the next starts.
-      unitConfig = {
-        After =
-          lib.optional (cfg.startupOrdering && i > 0)
-            "${
-              config.virtualisation.quadlet.containers."sglang-${(lib.elemAt models (i - 1)).name}".serviceName
-            }.service";
+      unitConfig = mkStartupOrdering {
+        inherit
+          config
+          cfg
+          models
+          index
+          ;
+        prefix = "sglang";
       };
     });
 
@@ -85,7 +92,11 @@ let
     worker-urls = map (m: "http://127.0.0.1:${toString m.port}") models;
   };
 
-  gatewayExec = renderArgs (gatewayBaseSettings // cfg.gateway.settings);
+  gatewayExec = renderArgs (
+    resolveCredentialRefs credentialDirectory cfg.gateway.credentials (
+      gatewayBaseSettings // cfg.gateway.settings
+    )
+  );
 
   workerServices = map (
     m: "${config.virtualisation.quadlet.containers."sglang-${m.name}".serviceName}.service"
@@ -93,24 +104,26 @@ let
 
   mkGatewayContainer = lib.nameValuePair "sglang-gateway" (mkWorker {
     inherit cfg;
+    inherit (cfg.gateway) credentials;
     overrides = cfg.gateway.quadlet;
     healthPort = cfg.gateway.port;
     healthStartPeriod = "5m";
-    containerConfig = {
-      Image = resolveImageRef {
-        inherit (cfg.gateway) image tag digest;
+    containerConfig =
+      mkImageArgs {
+        inherit (cfg.gateway) image;
         defaultTag = "latest";
+        workload = cfg.gateway;
         label = "services.llmhop.sglang-quadlet.gateway";
+      }
+      // {
+        # Host networking lets the gateway reach each worker at
+        # `127.0.0.1:<model.port>` and binds its own listeners directly on
+        # `bindAddress`, so no `PublishPort` is required.
+        Network = "host";
+        EnvironmentFile = lib.optional (cfg.gateway.environmentFile != null) cfg.gateway.environmentFile;
+        Environment = cfg.gateway.environment;
+        Exec = gatewayExec;
       };
-      Pull = if cfg.gateway.digest != null then "missing" else "newer";
-      # Host networking lets the gateway reach each worker at
-      # `127.0.0.1:<model.port>` and binds its own listeners directly on
-      # `bindAddress`, so no `PublishPort` is required.
-      Network = "host";
-      EnvironmentFile = lib.optional (cfg.gateway.environmentFile != null) cfg.gateway.environmentFile;
-      Environment = cfg.gateway.environment;
-      Exec = gatewayExec;
-    };
     # The gateway is a stateless Rust binary — short timing overrides the
     # worker-scale defaults baked into `mkWorker`.
     serviceConfig = {
@@ -251,6 +264,8 @@ in
             `settings` if the value is non-secret.
           '';
         };
+
+        credentials = credentialsOption;
 
         settings = lib.mkOption {
           type = with lib.types; attrsOf anything;

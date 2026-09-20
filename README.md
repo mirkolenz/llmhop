@@ -53,7 +53,7 @@ Create a `config.json`:
 {
   "host": "127.0.0.1",
   "port": 8080,
-  "authTokens": ["${file:client_token}"],
+  "authTokens": ["${cred:client_token}"],
   "models": {
     "llama-3-8b": {
       "url": "http://localhost:30000"
@@ -75,9 +75,13 @@ IPv6 literals are written plain (`"host": "::1"`) and bracketed internally.
 
 String values inside `authTokens` and `models.*.headers` are expanded at startup, so no plaintext secret ever has to live in the config file:
 
+- `${cred:name}`: read the systemd credential `name` from `$CREDENTIALS_DIRECTORY`, where `LoadCredential=` puts it.
+  This is the same reference the NixOS module rewrites for the model backends, so one spelling covers every service: those servers receive the credential's path because they open the file themselves, while llmhop reads its own config and so receives its contents.
 - `${env:NAME}`: read from the `NAME` environment variable.
-- `${file:path}`: read from a file. Relative paths are resolved against `$CREDENTIALS_DIRECTORY` when set (e.g. when launched by systemd with `LoadCredential=`), otherwise against the current working directory. A single trailing newline is trimmed.
+- `${file:/absolute/path}`: read from a file llmhop is pointed at directly. The path must be absolute, since credentials are addressed by name with `${cred:name}`.
 - `$NAME`: shorthand for `${env:NAME}`.
+
+A single trailing newline is trimmed from a file's contents.
 
 Unresolved references are a hard startup error.
 
@@ -180,7 +184,7 @@ Cold starts download weights and profile the GPU, so that wait can be long: `Tim
 The container variants get the same guarantee from their `Notify=healthy` health check.
 
 llama.cpp runs as a native, hardened systemd system unit under `DynamicUser`, and the default `vllm` and `sglang` backends run the same way from prebuilt wheels, except under a dedicated system user (see [below](#native-vllm-and-sglang-from-prebuilt-wheels)).
-As a last resort, when the prebuilt wheels cannot be used, vLLM and SGLang can instead run as Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `vllm-quadlet` and `sglang-quadlet` options.
+vLLM and SGLang can instead run as Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `vllm-quadlet` and `sglang-quadlet` options.
 They are rootful system units by default, matching Quadlet itself and requiring no host UID configuration.
 Set `quadlet.user` to run them as rootless systemd user units instead.
 The module can create a dedicated lingering account, or target an account managed elsewhere.
@@ -192,7 +196,7 @@ Running the Quadlet under a real user's systemd manager avoids that system-manag
 For convenience, a rootless Quadlet backend adds a tiny per-backend helper to `environment.systemPackages`:
 
 - Native workers (`llama-cpp`, `vllm`, `sglang`) are plain system units, so they are managed with the usual `systemctl status <backend>-<model>` and `journalctl -u <backend>-<model>`.
-- For the container variants, `sglang-shell` and `vllm-shell` are `writeShellApplication` wrappers around `machinectl shell` that drop you into the backend user's session, where `systemctl --user`, `journalctl --user` and `podman ps` see the worker units directly. Run them with no arguments for an interactive shell, or pass a command to execute it inside the session.
+- For the container variants, `<backend>-shell` is a `writeShellApplication` wrapper around `machinectl shell` that drops you into the backend user's session, where `systemctl --user`, `journalctl --user` and `podman ps` see the worker units directly. Run it with no arguments for an interactive shell, or pass a command to execute it inside the session.
 
 ```nix
 services.llmhop = {
@@ -452,19 +456,86 @@ Each model defaults to the backend's `package` but can pin its own with `models.
 Because a unit only goes active once it is healthy, `startupOrdering` (on by default) is effective here: workers boot one at a time in ascending `port` order, each finishing its GPU-memory profiling before the next begins, which is what keeps two models sharing a device from racing into an OOM.
 
 The container variants live under `services.llmhop.vllm-quadlet` and `sglang-quadlet`.
-A backend's native (`vllm`/`sglang`) and container (`vllm-quadlet`/`sglang-quadlet`) variants emit the same `vllm-<model>` and `sglang-<model>` units and are therefore mutually exclusive, so enable at most one per backend.
+A backend's native and container variants emit the same `<backend>-<model>` units and are therefore mutually exclusive, so enable at most one variant per backend.
+
+### Inference server credentials
+
+Credentials are granted to individual model services, never inherited from a backend.
+This keeps one compromised worker from reading another model's keys.
+Assign the same Nix value to multiple models when sharing is intentional.
+
+```nix
+services.llmhop.llama-cpp.models."qwen3-8b" = {
+  port = 18001;
+  credentials.apiKeys = "/run/secrets/qwen-api-keys";
+  settings = {
+    hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
+    api-key-file = "\${cred:apiKeys}";
+  };
+};
+```
+
+`credentials.<name>` accepts a source path for `LoadCredential=` or an extended value for an encrypted systemd credential:
+
+```nix
+credentials.tlsKey = {
+  source = "/etc/credstore.encrypted/qwen-tls-key";
+  encrypted = true;
+};
+```
+
+For rootless Quadlets, the selected user's systemd manager must be able to read the source.
+Encrypted credentials for a user manager must be created with `systemd-creds encrypt --user`.
+
+`${cred:name}` expands to the read-only credential path, not its contents.
+Unknown references fail evaluation.
+Native workers use their systemd credential directory.
+Quadlet workers mount only that unit's credential directory at `/run/llmhop/credentials`.
+
+vLLM and SGLang also accept a per-model YAML file through their `--config` flag.
+That is an ordinary file-taking setting, so it needs no dedicated option:
+
+```nix
+services.llmhop.vllm-quadlet.models."qwen3-8b" = {
+  model = "Qwen/Qwen3-8B";
+  port = 18001;
+  credentials.config = "/run/secrets/qwen-vllm.yaml";
+  settings.config = "\${cred:config}";
+};
+```
+
+llama.cpp has no general server config file, so use its file-taking settings such as `api-key-file`, `ssl-key-file`, and `ssl-cert-file` instead.
+
+The default root user in rootful containers and the mapped root user in rootless containers can read the credential mount.
+If `[Container] User=` selects another identity, its user namespace mapping must map the systemd unit owner to that container UID.
+The module does not weaken credential modes to make an incompatible mapping work.
+Use an idmapped credential mount when the selected namespace does not already provide that mapping:
+
+```nix
+models."qwen3-8b".quadlet.credentialMountOptions = [
+  "idmap=uids=0-1000-1;gids=0-1000-1"
+];
+```
+
+Literal values remain available for non-secret development configuration:
+
+```nix
+services.llmhop.sglang.models.test.settings.api-key = "development-only";
+```
+
+Such values enter the world-readable Nix store and should not be used for production secrets.
 
 ### Secrets
 
 The generated config file lives in the world-readable Nix store, so secrets should never be placed in `services.llmhop.settings` directly.
-Instead, reference them via `${file:...}` and hand the files to the service through the `credentials` option, which maps each entry to systemd's `LoadCredential=`.
+Instead, reference them via `${cred:...}` and hand the files to the service through the `credentials` option, which maps a path to systemd's `LoadCredential=` and an entry with `encrypted = true` to `LoadCredentialEncrypted=`.
 The right-hand side is just a file path, so anything that produces a file works: [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs, a manually-managed file under `/etc/llmhop/`, or a path emitted by your own secret-provisioning tool.
 
 ```nix
 services.llmhop = {
   credentials.client_token = "/etc/llmhop/client-token";
   settings = {
-    authTokens = [ "\${file:client_token}" ];
+    authTokens = [ "\${cred:client_token}" ];
     models."openai-gpt-4o" = {
       url = "https://api.openai.com";
       headers.Authorization = "Bearer \${env:OPENAI_KEY}";
@@ -481,6 +552,6 @@ systemd.services.llmhop.serviceConfig.EnvironmentFile = [ "/etc/llmhop/openai.en
 OPENAI_KEY=sk-...
 ```
 
-`${file:...}` references are resolved against `$CREDENTIALS_DIRECTORY`, which systemd exposes as a per-unit tmpfs accessible only to this service, compatible with `DynamicUser` and the rest of the sandbox.
+`${cred:...}` references are resolved against `$CREDENTIALS_DIRECTORY`, which systemd exposes as a per-unit tmpfs accessible only to this service, compatible with `DynamicUser` and the rest of the sandbox.
 `${env:...}` picks up anything the unit inherits, typically via `EnvironmentFile=`.
 Pick whichever matches how your secret tooling hands you the data; mixing both in one config is fine.

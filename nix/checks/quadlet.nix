@@ -6,6 +6,16 @@
   stdenv,
 }:
 let
+  llmhopLib = import ../modules/lib.nix lib;
+  apiKeys = pkgs.writeText "api-keys" "secret";
+  serverConfig = pkgs.writeText "server.yaml" "api-key: secret";
+  tlsKey = pkgs.writeText "tls-key" "encrypted-placeholder";
+  # Not `lib.hasInfix`: it compiles the needle into a regex, and `builtins.match`
+  # rejects patterns carrying store-path context. Literal replacement has no
+  # such restriction, so store paths can be matched directly.
+  containsAll =
+    values: string: lib.all (value: builtins.replaceStrings [ value ] [ "" ] string != string) values;
+
   mkSystem =
     llmhopConfig:
     (nixosSystem {
@@ -50,7 +60,22 @@ let
       unitConfig.StartLimitBurst = 7;
       quadletConfig.DefaultDependencies = false;
     };
-    models.test.quadlet.containerConfig.User = "1000";
+    models.test = {
+      credentials = {
+        inherit apiKeys serverConfig;
+        tlsKey = {
+          source = tlsKey;
+          encrypted = true;
+        };
+      };
+      settings = {
+        config = "\${cred:serverConfig}";
+        api-key-file = "\${cred:apiKeys}";
+        ssl-keyfile = "\${cred:tlsKey}";
+      };
+      quadlet.containerConfig.User = "1000";
+      quadlet.credentialMountOptions = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+    };
   };
 
   rootless = mkConfig {
@@ -65,19 +90,62 @@ let
       models.test = {
         model = "example/test";
         port = 19001;
+        credentials = { inherit serverConfig tlsKey; };
+        settings = {
+          config = "\${cred:serverConfig}";
+          ssl-keyfile = "\${cred:tlsKey}";
+        };
       };
       gateway = {
         enable = true;
         port = 19000;
+        credentials.tlsKey = tlsKey;
+        settings.tls-key-path = "\${cred:tlsKey}";
         quadlet.containerConfig.User = "1000";
+        quadlet.credentialMountOptions = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+      };
+    };
+  };
+
+  nativeVllm = mkSystem {
+    vllm = {
+      enable = true;
+      uid = 504;
+      package = pkgs.writeShellScriptBin "vllm" "exit 0";
+      models.test = {
+        model = "example/test";
+        port = 21001;
+        credentials = {
+          inherit apiKeys serverConfig;
+          tlsKey = {
+            source = tlsKey;
+            encrypted = true;
+          };
+        };
+        settings = {
+          config = "\${cred:serverConfig}";
+          api-key-file = "\${cred:apiKeys}";
+          ssl-keyfile = "\${cred:tlsKey}";
+        };
+        serviceConfig.LoadCredential = [ "manual:/run/manual" ];
       };
     };
   };
 
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
+  sglangGateway = sglang.virtualisation.quadlet.containers.sglang-gateway;
+  sglangWorker = sglang.virtualisation.quadlet.containers.sglang-test;
+  nativeVllmWorker = nativeVllm.systemd.services.vllm-test;
 
   failures = lib.runTests {
+    testUnknownCredentialReference = {
+      expr =
+        (builtins.tryEval (llmhopLib.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"))
+        .success;
+      expected = false;
+    };
+
     testRootfulScope = {
       expr = rootfulWorker.uid;
       expected = null;
@@ -85,19 +153,41 @@ let
 
     testNativeConfigLayers = {
       expr = {
-        inherit (rootfulWorker.containerConfig) User UserNS Volume;
-        inherit (rootfulWorker.serviceConfig) MemoryMax;
+        inherit (rootfulWorker.containerConfig) User UserNS;
+        volumes = lib.all (volume: lib.elem volume rootfulWorker.containerConfig.Volume) [
+          "/var/cache/vllm:/cache:idmap,Z"
+          "%d:/run/llmhop/credentials:ro,idmap=uids=0-1000-1;gids=0-1000-1"
+        ];
+        inherit (rootfulWorker.serviceConfig)
+          LoadCredential
+          LoadCredentialEncrypted
+          MemoryMax
+          ;
         inherit (rootfulWorker.unitConfig) StartLimitBurst;
         inherit (rootfulWorker.quadletConfig) DefaultDependencies;
       };
       expected = {
         User = "1000";
         UserNS = "auto:size=65536";
-        Volume = [ "/var/cache/vllm:/cache:idmap,Z" ];
+        volumes = true;
+        LoadCredential = [
+          "apiKeys:${apiKeys}"
+          "serverConfig:${serverConfig}"
+        ];
+        LoadCredentialEncrypted = [ "tlsKey:${tlsKey}" ];
         MemoryMax = "64G";
         StartLimitBurst = 7;
         DefaultDependencies = false;
       };
+    };
+
+    testCredentialReferences = {
+      expr = containsAll [
+        "--api-key-file=/run/llmhop/credentials/apiKeys"
+        "--config=/run/llmhop/credentials/serverConfig"
+        "--ssl-keyfile=/run/llmhop/credentials/tlsKey"
+      ] rootfulWorker.containerConfig.Exec;
+      expected = true;
     };
 
     testRootlessScope = {
@@ -128,16 +218,64 @@ let
 
     testGatewayOverrides = {
       expr = {
-        inherit (sglang.virtualisation.quadlet.containers.sglang-gateway.containerConfig)
+        inherit (sglangGateway.containerConfig)
           User
           UserNS
+          Volume
           ;
+        arguments = containsAll [
+          "--tls-key-path=/run/llmhop/credentials/tlsKey"
+          "http://127.0.0.1:19001"
+        ] sglangGateway.containerConfig.Exec;
+        load = sglangGateway.serviceConfig.LoadCredential;
       };
       expected = {
+        arguments = true;
         User = "1000";
         UserNS = "host";
+        Volume = [ "%d:/run/llmhop/credentials:ro,idmap=uids=0-1000-1;gids=0-1000-1" ];
+        load = [ "tlsKey:${tlsKey}" ];
       };
     };
+
+    testSglangCredentials = {
+      expr = {
+        arguments = containsAll [
+          "--config=/run/llmhop/credentials/serverConfig"
+          "--ssl-keyfile=/run/llmhop/credentials/tlsKey"
+        ] sglangWorker.containerConfig.Exec;
+        load = sglangWorker.serviceConfig.LoadCredential;
+      };
+      expected = {
+        arguments = true;
+        load = [
+          "serverConfig:${serverConfig}"
+          "tlsKey:${tlsKey}"
+        ];
+      };
+    };
+
+    testNativeCredentials = {
+      expr = {
+        load = nativeVllmWorker.serviceConfig.LoadCredential;
+        encrypted = nativeVllmWorker.serviceConfig.LoadCredentialEncrypted;
+        paths = containsAll [
+          "/run/credentials/vllm-test.service/apiKeys"
+          "/run/credentials/vllm-test.service/serverConfig"
+          "/run/credentials/vllm-test.service/tlsKey"
+        ] nativeVllmWorker.serviceConfig.ExecStart;
+      };
+      expected = {
+        load = [
+          "manual:/run/manual"
+          "apiKeys:${apiKeys}"
+          "serverConfig:${serverConfig}"
+        ];
+        encrypted = [ "tlsKey:${tlsKey}" ];
+        paths = true;
+      };
+    };
+
   };
 
   units = pkgs.symlinkJoin {

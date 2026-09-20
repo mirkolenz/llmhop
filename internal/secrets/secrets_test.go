@@ -65,14 +65,35 @@ func TestExpand(t *testing.T) {
 			want: "secret",
 		},
 		{
-			name: "file via CREDENTIALS_DIRECTORY",
+			name: "cred by name",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				writeFile(t, dir, "v")
 				t.Setenv("CREDENTIALS_DIRECTORY", dir)
-				return "${file:tok}"
+				return "${cred:tok}"
 			},
 			want: "v",
+		},
+		{
+			name: "cred without credentials directory",
+			setup: func(t *testing.T) string {
+				t.Setenv("CREDENTIALS_DIRECTORY", "")
+				return "${cred:tok}"
+			},
+			wantErr: true,
+		},
+		{
+			name: "cred rejects a path",
+			setup: func(t *testing.T) string {
+				t.Setenv("CREDENTIALS_DIRECTORY", t.TempDir())
+				return "${cred:sub/tok}"
+			},
+			wantErr: true,
+		},
+		{
+			name:    "file rejects a relative path",
+			input:   "${file:tok}",
+			wantErr: true,
 		},
 		{
 			name: "file preserves internal whitespace, trims trailing",

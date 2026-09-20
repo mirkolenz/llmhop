@@ -8,12 +8,18 @@ let
   cfg = config.services.llmhop.vllm-quadlet;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) renderCliArgsShell sortedModels;
+  inherit (llmhopLib)
+    credentialDirectory
+    renderCliArgsShell
+    resolveCredentialRefs
+    sortedModels
+    ;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
     mkModelSubmodule
     mkOptions
+    mkStartupOrdering
     mkWorker
     ;
 
@@ -26,9 +32,19 @@ let
   models = sortedModels cfg;
 
   mkContainer =
-    i: model:
+    index: model:
+    let
+      settings = {
+        served-model-name = model.name;
+        host = "0.0.0.0";
+        port = workerPort;
+      }
+      // cfg.modelSettings
+      // model.settings;
+    in
     lib.nameValuePair "vllm-${model.name}" (mkWorker {
       inherit cfg;
+      inherit (model) credentials;
       overrides = model.quadlet;
       healthPort = workerPort;
       containerConfig =
@@ -39,24 +55,17 @@ let
         // {
           PublishPort = [ "127.0.0.1:${toString model.port}:${toString workerPort}" ];
           Exec = "${lib.escapeShellArg model.model} ${
-            renderArgs (
-              {
-                served-model-name = model.name;
-                host = "0.0.0.0";
-                port = workerPort;
-              }
-              // cfg.modelSettings
-              // model.settings
-            )
+            renderArgs (resolveCredentialRefs credentialDirectory model.credentials settings)
           }";
         };
-      # Chain ascending so each worker finishes GPU-memory profiling before the next starts.
-      unitConfig = {
-        After =
-          lib.optional (cfg.startupOrdering && i > 0)
-            "${
-              config.virtualisation.quadlet.containers."vllm-${(lib.elemAt models (i - 1)).name}".serviceName
-            }.service";
+      unitConfig = mkStartupOrdering {
+        inherit
+          config
+          cfg
+          models
+          index
+          ;
+        prefix = "vllm";
       };
     });
 in

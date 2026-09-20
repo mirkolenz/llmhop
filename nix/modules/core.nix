@@ -24,7 +24,12 @@ let
     else
       configFile;
 
-  inherit (import ./lib.nix lib) mkRegistryAssertion systemd;
+  inherit (import ./lib.nix lib)
+    credentialsOption
+    mergeCredentialServiceConfig
+    mkRegistryAssertion
+    systemd
+    ;
 in
 {
   imports = [
@@ -68,21 +73,15 @@ in
       description = "Whether to open `port` in the host firewall.";
     };
 
-    credentials = lib.mkOption {
-      type = with lib.types; attrsOf path;
-      default = { };
-      example = lib.literalExpression ''
-        { client_token = "/run/secrets/llmhop-token"; }
-      '';
+    credentials = credentialsOption // {
       description = ''
-        Files handed to the service through systemd's `LoadCredential=`, keyed
-        by the name they are exposed under. Reference them from `settings` as
-        `''${file:<name>}`: relative paths resolve against
-        `$CREDENTIALS_DIRECTORY`, a per-unit tmpfs readable only by this
-        service, so secrets never enter the world-readable Nix store.
+        Credentials granted to llmhop through systemd. Reference them from
+        `settings` as `''${cred:<name>}`, the same spelling the model backends
+        use: llmhop reads its own config, so the reference expands to the
+        credential's contents rather than to its path.
 
-        Any path works, including agenix/sops-nix outputs and manually managed
-        files.
+        A path uses `LoadCredential=`. The attribute form can select
+        `LoadCredentialEncrypted=` for a `systemd-creds` encrypted source.
       '';
     };
 
@@ -171,28 +170,30 @@ in
         # Tighter than the worker baseline: `@resources` syscalls are blocked
         # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited baseline
         # for the sd_notify datagram; the proxy itself speaks IP only.
-        serviceConfig = systemd.hardenedServiceConfig // {
-          # Pairs with the binary's sd_notify call: the unit reaches `active`
-          # only once the port accepts connections, so anything ordered after
-          # llmhop can assume it answers.
-          Type = "notify";
-          ExecStart = utils.escapeSystemdExecArgs [
-            (lib.getExe cfg.package)
-            "-config"
-            validatedConfigFile
-          ];
-          LoadCredential = lib.mapAttrsToList (name: path: "${name}:${path}") cfg.credentials;
-          Restart = "on-failure";
-          RestartSec = 5;
-          DynamicUser = true;
-          PrivateDevices = true;
-          UMask = "0077";
-          SystemCallFilter = [
-            "@system-service"
-            "~@privileged"
-            "~@resources"
-          ];
-        };
+        serviceConfig = mergeCredentialServiceConfig (
+          systemd.hardenedServiceConfig
+          // {
+            # Pairs with the binary's sd_notify call: the unit reaches `active`
+            # only once the port accepts connections, so anything ordered after
+            # llmhop can assume it answers.
+            Type = "notify";
+            ExecStart = utils.escapeSystemdExecArgs [
+              (lib.getExe cfg.package)
+              "-config"
+              validatedConfigFile
+            ];
+            Restart = "on-failure";
+            RestartSec = 5;
+            DynamicUser = true;
+            PrivateDevices = true;
+            UMask = "0077";
+            SystemCallFilter = [
+              "@system-service"
+              "~@privileged"
+              "~@resources"
+            ];
+          }
+        ) cfg.credentials;
       };
     })
   ];

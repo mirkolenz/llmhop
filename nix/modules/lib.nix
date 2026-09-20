@@ -12,6 +12,111 @@ let
   # `qwen3.6-…`-style version suffixes work.
   modelLabel = types.strMatching "[[:alnum:]][[:alnum:].-]*";
 
+  credentialNamePattern = "[[:alnum:]_][[:alnum:]_.-]*";
+  credentialReferencePrefix = "\${cred:";
+  credentialDirectory = "/run/llmhop/credentials";
+
+  credentialType = types.either types.path (
+    types.submodule {
+      options = {
+        source = mkOption {
+          type = types.path;
+          description = "File or socket from which systemd loads the credential.";
+        };
+        encrypted = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Whether to load and decrypt the source with `LoadCredentialEncrypted=`.";
+        };
+      };
+    }
+  );
+
+  credentialsOption = mkOption {
+    type = types.attrsOf credentialType;
+    default = { };
+    example = lib.literalExpression ''
+      {
+        apiKeys = "/run/secrets/api-keys";
+        tlsKey = {
+          source = "/etc/credstore.encrypted/tls-key";
+          encrypted = true;
+        };
+      }
+    '';
+    description = ''
+      Credentials granted exclusively to this service through systemd.
+      A path uses `LoadCredential=`. The attribute form can select
+      `LoadCredentialEncrypted=` for a `systemd-creds` encrypted source.
+
+      Reference the resulting read-only file from `settings` as
+      `''${cred:<name>}`. The module resolves the reference to the native or
+      container credential path without copying its contents to the Nix store
+      or command line.
+    '';
+  };
+
+  normalizeCredential =
+    name: value:
+    if builtins.match credentialNamePattern name == null then
+      throw "invalid systemd credential name `${name}`"
+    else if value ? source then
+      value
+    else
+      {
+        source = value;
+        encrypted = false;
+      };
+
+  # Append this workload's `LoadCredential=`/`LoadCredentialEncrypted=` entries
+  # to whatever `serviceConfig` already declares.
+  mergeCredentialServiceConfig =
+    serviceConfig: credentials:
+    let
+      normalized = lib.mapAttrs normalizeCredential credentials;
+      render =
+        encrypted:
+        lib.mapAttrsToList (name: value: "${name}:${toString value.source}") (
+          lib.filterAttrs (_: value: value.encrypted == encrypted) normalized
+        );
+      append = key: entries: lib.toList (serviceConfig.${key} or [ ]) ++ entries;
+    in
+    serviceConfig
+    // lib.optionalAttrs (credentials != { }) {
+      LoadCredential = append "LoadCredential" (render false);
+      LoadCredentialEncrypted = append "LoadCredentialEncrypted" (render true);
+    };
+
+  # Rewrite every `${cred:<name>}` reference in a settings tree to the path the
+  # credential is mounted at, so secrets reach the server as a file name rather
+  # than a value on the command line.
+  resolveCredentialRefs =
+    directory: credentials:
+    let
+      names = lib.attrNames credentials;
+      references = map (name: "${credentialReferencePrefix}${name}}") names;
+      paths = map (name: "${directory}/${name}") names;
+      resolve =
+        value:
+        if builtins.isString value then
+          let
+            resolved = lib.replaceStrings references paths value;
+          in
+          if lib.hasInfix credentialReferencePrefix resolved then
+            throw "unknown credential reference in `${value}`"
+          else
+            resolved
+        else if builtins.isList value then
+          map resolve value
+        else if builtins.isAttrs value && !lib.isDerivation value then
+          lib.mapAttrs (_: resolve) value
+        else
+          value;
+    in
+    resolve;
+
+  systemdCredentialDirectory = unit: "/run/credentials/${unit}.service";
+
   # ─── CLI rendering (private) ─────────────────────────────────────────
 
   # How each backend's parser reads the two `settings` shapes that have no
@@ -162,8 +267,9 @@ let
         example = "/etc/${backend}/.env";
         description = ''
           File in `KEY=VALUE` format forwarded to every service.
-          Use for secrets managed by sops-nix/agenix, e.g. a file containing
-          `HF_TOKEN=<token>` to access gated Hugging Face repositories.
+          Use only for upstream features that require environment variables,
+          such as `HF_TOKEN` for gated Hugging Face repositories. Environment
+          variables are not systemd credentials and are visible to every model.
           Loaded before `services.llmhop.${backend}.models.<name>.environmentFile`, so
           per-model files override these entries.
         '';
@@ -337,9 +443,11 @@ let
         description = ''
           File in `KEY=VALUE` format forwarded to this model's service.
           Loaded after `services.llmhop.${backend}.environmentFile`, so its entries
-          override global ones. Must be readable by the user systemd reads it as.
+          override global ones. Use `credentials` for file-capable secret
+          settings. Must be readable by the user systemd reads it as.
         '';
       };
+      credentials = credentialsOption;
     };
 
   # Defaults applied to every worker, scoped by the systemd unit-file section
@@ -487,8 +595,11 @@ let
     NEO_CACHE_DIR = "${cacheBase}/neo";
   };
 
+  # Enabled subset of any `attrsOf { enable; ... }` workload collection.
+  enabled = lib.filterAttrs (_: w: w.enable);
+
   # Enabled-model subset shared by registry helpers and backend iteration.
-  enabledModels = cfg: lib.filterAttrs (_: m: m.enable) cfg.models;
+  enabledModels = cfg: enabled cfg.models;
 
   # Enabled models sorted by ascending `port`. Quadlet backends use this for
   # both unit-emission order and the deterministic `After=` startup chain.
@@ -589,17 +700,69 @@ let
           fit one of the dedicated `*Config` options.
         '';
       };
+      credentialMountOptions = mkOption {
+        type = with types; listOf str;
+        default = [ ];
+        example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+        description = ''
+          Podman volume options appended to this container's systemd credential
+          mount. Use an `idmap` mapping when `[Container] User=` selects a
+          non-root identity. The mount is always read-only.
+        '';
+      };
     };
+
+  quadletMountSuffix =
+    options: lib.optionalString (options != [ ]) ":${lib.concatStringsSep "," options}";
+
+  # Image reference and pull policy for one container. Digest-locked images use
+  # `Pull=missing`; tag-tracking ones use `Pull=newer`.
+  mkQuadletImageArgs =
+    {
+      image,
+      defaultTag,
+      workload,
+      label,
+    }:
+    {
+      Image = resolveImageRef {
+        inherit image defaultTag label;
+        inherit (workload) tag digest;
+      };
+      Pull = if workload.digest != null then "missing" else "newer";
+    };
+
+  # `[Container]` fields every workload of a quadlet backend shares: the cache
+  # bind-mount, the env var pointing the runtime at it, and the global/per-
+  # workload environment layers.
+  mkQuadletContainerRuntime = cfg: workload: {
+    Volume = [
+      "${cfg.cache.directory}:${cfg.cache.containerDirectory}${quadletMountSuffix cfg.cache.mountOptions}"
+    ];
+    EnvironmentFile =
+      lib.optional (cfg.environmentFile != null) cfg.environmentFile
+      ++ lib.optional (workload.environmentFile != null) workload.environmentFile;
+    Environment = {
+      HF_HOME = cfg.cache.containerDirectory;
+    }
+    // cfg.environment
+    // workload.environment;
+  };
 in
 {
   inherit
+    credentialDirectory
+    credentialsOption
+    enabled
     enabledModels
     sortedModels
-    resolveImageRef
     identityConfig
+    mergeCredentialServiceConfig
     renderCliArgs
     renderCliArgsShell
+    resolveCredentialRefs
     settingsRendering
+    systemdCredentialDirectory
     ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
@@ -627,6 +790,7 @@ in
   # ─── Quadlet (container-based) ───────────────────────────────────────
 
   quadlet = {
+    mkContainerRuntime = mkQuadletContainerRuntime;
     mkObjectOptions = mkQuadletObjectOptions;
 
     # Top-level options for a quadlet-based backend. Spread under
@@ -849,11 +1013,6 @@ in
       { name, ... }:
       {
         options = (baseModelOptions { inherit backend serviceName name; }) // {
-          model = mkOption {
-            type = types.str;
-            example = "Qwen/Qwen2.5-7B-Instruct";
-            description = "Hugging Face repo id (or local path) passed to the model server.";
-          };
           tag = mkOption {
             type = with types; nullOr str;
             default = null;
@@ -896,6 +1055,11 @@ in
             '';
           };
           quadlet = mkQuadletObjectOptions { description = "this model container"; };
+          model = mkOption {
+            type = types.str;
+            example = "Qwen/Qwen2.5-7B-Instruct";
+            description = "Hugging Face repo id (or local path) passed to the model server.";
+          };
         };
       };
 
@@ -911,15 +1075,16 @@ in
         serviceConfig ? { },
         unitConfig ? { },
         containerConfig ? { },
+        credentials ? { },
         overrides ? { },
       }:
-      {
-        uid = if cfg.quadlet.user == null then null else cfg.quadlet.user.uid;
-        # `Restart = "always"` overrides quadlet-nix's `on-failure` default:
-        # vLLM/sglang catch an EngineCore death, shut the API server down
-        # gracefully, and exit 0, so `on-failure` would leave a crashed worker
-        # dead. `StartLimitBurst` (shared unit config) still breaks crash loops.
-        serviceConfig =
+      let
+        credentialMountOptions = [
+          "ro"
+        ]
+        ++ cfg.quadlet.credentialMountOptions
+        ++ overrides.credentialMountOptions;
+        mergedServiceConfig =
           sharedServiceConfig
           // {
             Restart = "always";
@@ -928,15 +1093,7 @@ in
           // serviceConfig
           // cfg.quadlet.serviceConfig
           // overrides.serviceConfig;
-        unitConfig = sharedUnitConfig // unitConfig // cfg.quadlet.unitConfig // overrides.unitConfig;
-        quadletConfig = cfg.quadlet.quadletConfig // overrides.quadletConfig;
-        extraConfig = lib.recursiveUpdate cfg.quadlet.extraConfig overrides.extraConfig;
-        # `[Container]` defaults: minimal hardening (podman handles the rest)
-        # plus an HTTP `/health` probe. The rootfs stays writable — ML runtimes
-        # scatter JIT/compile caches across version-dependent HOME paths, so an
-        # immutable rootfs would need an ever-growing tmpfs allow-list. `/tmp` is
-        # a tmpfs for fast scratch (torch inductor's `/tmp/torchinductor_root`).
-        containerConfig = {
+        mergedContainerConfig = {
           NoNewPrivileges = true;
           DropCapability = "all";
           Tmpfs = [ "/tmp" ];
@@ -949,45 +1106,73 @@ in
         // containerConfig
         // cfg.quadlet.containerConfig
         // overrides.containerConfig;
+      in
+      {
+        uid = if cfg.quadlet.user == null then null else cfg.quadlet.user.uid;
+        # `Restart = "always"` overrides quadlet-nix's `on-failure` default:
+        # vLLM/sglang catch an EngineCore death, shut the API server down
+        # gracefully, and exit 0, so `on-failure` would leave a crashed worker
+        # dead. `StartLimitBurst` (shared unit config) still breaks crash loops.
+        serviceConfig = mergeCredentialServiceConfig mergedServiceConfig credentials;
+        unitConfig = sharedUnitConfig // unitConfig // cfg.quadlet.unitConfig // overrides.unitConfig;
+        quadletConfig = cfg.quadlet.quadletConfig // overrides.quadletConfig;
+        extraConfig = lib.recursiveUpdate cfg.quadlet.extraConfig overrides.extraConfig;
+        # `[Container]` defaults: minimal hardening (podman handles the rest)
+        # plus an HTTP readiness probe. The rootfs stays writable — ML runtimes
+        # scatter JIT/compile caches across version-dependent HOME paths, so an
+        # immutable rootfs would need an ever-growing tmpfs allow-list. `/tmp` is
+        # a tmpfs for fast scratch (torch inductor's `/tmp/torchinductor_root`).
+        containerConfig =
+          mergedContainerConfig
+          // lib.optionalAttrs (credentials != { }) {
+            Volume = lib.toList (mergedContainerConfig.Volume or [ ]) ++ [
+              "%d:${credentialDirectory}${quadletMountSuffix credentialMountOptions}"
+            ];
+          };
       };
 
+    mkImageArgs = mkQuadletImageArgs;
+
     # Common Quadlet `containerConfig` fields for a model worker: image,
-    # pull policy, GPU CDI device, HF cache bind-mount, env, shm, ulimits.
+    # pull policy, GPU CDI device, cache bind-mount, env, shm, ulimits.
     # Backend-specific extras (`PublishPort`, `Exec`, ...) spread on top.
-    #
-    # Digest-locked images use `Pull=missing`; tag-tracking ones use
-    # `Pull=newer`. EnvironmentFile is global then per model.
     mkContainerArgs =
       {
         backend,
         cfg,
         model,
       }:
-      let
-        mountOptions = lib.optionalString (
-          cfg.cache.mountOptions != [ ]
-        ) ":${lib.concatStringsSep "," cfg.cache.mountOptions}";
-      in
-      {
-        Image = resolveImageRef {
-          inherit (cfg) image;
-          inherit (model) tag digest;
-          defaultTag = cfg.tag;
-          label = "services.llmhop.${backend}.models.${model.name}";
-        };
-        Pull = if model.digest != null then "missing" else "newer";
+      mkQuadletContainerRuntime cfg model
+      // mkQuadletImageArgs {
+        inherit (cfg) image;
+        defaultTag = cfg.tag;
+        workload = model;
+        label = "services.llmhop.${backend}.models.${model.name}";
+      }
+      // {
         AddDevice = model.devices;
-        Volume = [ "${cfg.cache.directory}:${cfg.cache.containerDirectory}${mountOptions}" ];
-        EnvironmentFile =
-          lib.optional (cfg.environmentFile != null) cfg.environmentFile
-          ++ lib.optional (model.environmentFile != null) model.environmentFile;
-        Environment = {
-          HF_HOME = cfg.cache.containerDirectory;
-        }
-        // cfg.environment
-        // model.environment;
         ShmSize = model.shmSize;
         Ulimit = "host";
+      };
+
+    # `[Unit] After=` for the ascending startup chain: each container waits on
+    # its lower-port predecessor so GPU-memory profiling never overlaps.
+    mkStartupOrdering =
+      {
+        config,
+        cfg,
+        models,
+        prefix,
+        index,
+      }:
+      {
+        After =
+          lib.optional (cfg.startupOrdering && index > 0)
+            "${
+              config.virtualisation.quadlet.containers."${prefix}-${
+                (lib.elemAt models (index - 1)).name
+              }".serviceName
+            }.service";
       };
 
     # Cross-cutting NixOS config produced by every quadlet backend:
@@ -1096,7 +1281,7 @@ in
       # `{ serviceConfig, unitConfig }` with the shared baseline plus full
       # systemd-exec(5) hardening merged in and lifecycle settings enforced last.
       #
-      # `llmhop-notify` keeps the unit activating until `/health` answers and
+      # `llmhop-notify` keeps the unit activating until its readiness path answers and
       # propagates server failures that happen while the model is loading.
       mkWorker =
         {
@@ -1104,15 +1289,17 @@ in
           pkgs,
           utils,
           healthPort,
+          healthPath ? "/health",
           execStart,
           serviceConfig ? { },
           unitConfig ? { },
+          credentials ? { },
         }:
         {
           # `[Service]` defaults: worker-scale timing, universal hardening, the
           # per-unit file-descriptor limit, and a `bind()` lockdown that pairs
           # with the caller-provided `SocketBindAllow` for the worker's listener.
-          serviceConfig =
+          serviceConfig = mergeCredentialServiceConfig (
             sharedServiceConfig
             // hardenedServiceConfig
             // {
@@ -1128,10 +1315,13 @@ in
                   (notifyExe pkgs)
                   "-port"
                   (toString healthPort)
+                  "-health-path"
+                  healthPath
                 ]
                 ++ execStart
               );
-            };
+            }
+          ) credentials;
           unitConfig = sharedUnitConfig // unitConfig;
         };
 
@@ -1177,43 +1367,45 @@ in
           '';
         };
 
-      # One systemd service for a uv/wheel-based GPU Python worker, shared by the
-      # native vLLM and SGLang backends. Layers the GPU-on-NixOS specifics (cache
-      # redirection, driver libs, W^X relaxation, MEMLOCK), the dedicated-user
-      # layout, and the startup chain (`previous` is the preceding model, or null
-      # for the first) on top of the `mkWorker` hardening baseline; only the
-      # `execStart` argv and an optional per-backend `extraEnvironment cacheBase`
-      # differ. Expects `cfg` to carry `openFilesLimit`, `startupOrdering`,
-      # `environment`, `environmentFile`. Returns a `nameValuePair`.
-      mkUvWorker =
+      # One systemd unit for any uv/wheel-based Python service of a backend:
+      # the dedicated-user layout, the cache root every runtime is redirected
+      # into, the toolchain these JIT-compiling runtimes look up the FHS way,
+      # the host driver libraries prebuilt wheels `dlopen` by name, and the
+      # `mkWorker` hardening and readiness baseline.
+      #
+      # `workload` is anything carrying `name`, `port`, `environment`,
+      # `environmentFile`, `credentials`, `serviceConfig` and `unitConfig`, so
+      # model workers and whatever auxiliary services a backend adds share one
+      # body. `mkUvWorker` extends this with the GPU access and startup-chain
+      # specifics a model worker additionally needs.
+      #
+      # Expects `cfg` to carry `openFilesLimit`, `user`, `group`, `environment`
+      # and `environmentFile`. Returns a `nameValuePair`.
+      mkUvService =
         {
-          serviceName,
+          unitName,
+          description,
+          subdir,
           cfg,
           pkgs,
           utils,
-          model,
-          previous,
+          workload,
           execStart,
-          extraEnvironment,
+          healthPath ? "/health",
+          after ? [ ],
+          environment ? (_cacheBase: { }),
+          serviceConfig ? { },
         }:
         let
-          subdir = "${serviceName}/${model.name}";
           # CacheDirectory root, owned by `cfg.user`; see `gpuCacheEnvironment`.
           cacheBase = "/var/cache/${subdir}";
         in
-        lib.nameValuePair "${serviceName}-${model.name}" (
+        lib.nameValuePair unitName (
           {
-            description = "${serviceName} server for ${model.name}";
+            inherit description;
             wantedBy = [ "multi-user.target" ];
             wants = [ "network-online.target" ];
-            # Chain ascending so each worker finishes GPU-memory profiling before
-            # the next starts (booting two on one device races to OOM). This is
-            # only meaningful because `mkWorker` holds the unit in `activating`
-            # until the server reports itself ready.
-            after = [
-              "network-online.target"
-            ]
-            ++ lib.optional (cfg.startupOrdering && previous != null) "${serviceName}-${previous.name}.service";
+            after = [ "network-online.target" ] ++ after;
             # A toolchain on `PATH`, because these runtimes compile at runtime and
             # look one up the FHS way. Triton builds its CUDA driver shim on the
             # first kernel launch and searches `$CC`, then `gcc`/`clang` on `PATH`;
@@ -1255,23 +1447,23 @@ in
               TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
             }
             // gpuCacheEnvironment cacheBase
-            // extraEnvironment cacheBase
-            // ncclEnvironment
+            // environment cacheBase
             // cfg.environment
-            // model.environment;
+            // workload.environment;
           }
           // mkWorker {
             inherit (cfg) openFilesLimit;
-            inherit pkgs utils execStart;
-            healthPort = model.port;
+            inherit
+              pkgs
+              utils
+              execStart
+              healthPath
+              ;
+            inherit (workload) credentials;
+            healthPort = workload.port;
             serviceConfig = {
-              # The frameworks trap SIGINT to drain the engine, then exit 0, so
-              # `on-failure` would leave a crashed worker dead; `always` revives it
-              # while `StartLimitBurst` (shared unit config) still breaks loops.
-              KillSignal = "SIGINT";
-              Restart = "always";
-              TasksMax = 4096;
               UMask = "0077";
+              Restart = "on-failure";
 
               # A real user, not `DynamicUser`: the `/var/lib/private` layout it
               # implies makes systemd hand `State`/`CacheDirectory` over as
@@ -1280,21 +1472,73 @@ in
               # that cache and `dlopen` them back.
               User = cfg.user;
               Group = cfg.group;
-              StateDirectory = subdir;
               CacheDirectory = subdir;
-              WorkingDirectory = "/var/lib/${subdir}";
+              WorkingDirectory = cacheBase;
+              SocketBindAllow = "tcp:${toString workload.port}";
 
               EnvironmentFile =
                 lib.optional (cfg.environmentFile != null) cfg.environmentFile
-                ++ lib.optional (model.environmentFile != null) model.environmentFile;
+                ++ lib.optional (workload.environmentFile != null) workload.environmentFile;
             }
-            # GPU relaxations, then NCCL/RCCL's, then the per-model escape hatch.
-            // gpuServiceConfig
-            // ncclServiceConfig
-            // model.serviceConfig;
-            inherit (model) unitConfig;
+            // serviceConfig
+            # Last, so the per-workload escape hatch wins over every default.
+            // workload.serviceConfig;
+            inherit (workload) unitConfig;
           }
         );
+
+      # `mkUvService` for a model worker: GPU device access, the NCCL/RCCL
+      # environment, its own `StateDirectory` for non-regenerable state, and the
+      # ascending startup chain (`previous` is the preceding model, or null for
+      # the first). Only the `execStart` argv and an optional per-backend
+      # `extraEnvironment cacheBase` differ between backends.
+      mkUvWorker =
+        {
+          serviceName,
+          cfg,
+          pkgs,
+          utils,
+          model,
+          previous,
+          execStart,
+          extraEnvironment,
+        }:
+        let
+          subdir = "${serviceName}/${model.name}";
+        in
+        mkUvService {
+          inherit
+            subdir
+            cfg
+            pkgs
+            utils
+            execStart
+            ;
+          unitName = "${serviceName}-${model.name}";
+          description = "${serviceName} server for ${model.name}";
+          workload = model;
+          # Chain ascending so each worker finishes GPU-memory profiling before
+          # the next starts (booting two on one device races to OOM). This is
+          # only meaningful because `mkWorker` holds the unit in `activating`
+          # until the server reports itself ready.
+          after = lib.optional (
+            cfg.startupOrdering && previous != null
+          ) "${serviceName}-${previous.name}.service";
+          environment = cacheBase: extraEnvironment cacheBase // ncclEnvironment;
+          serviceConfig = {
+            # The frameworks trap SIGINT to drain the engine, then exit 0, so
+            # `on-failure` would leave a crashed worker dead; `always` revives it
+            # while `StartLimitBurst` (shared unit config) still breaks loops.
+            KillSignal = "SIGINT";
+            Restart = "always";
+            TasksMax = 4096;
+            StateDirectory = subdir;
+            WorkingDirectory = "/var/lib/${subdir}";
+          }
+          # GPU relaxations, then NCCL/RCCL's.
+          // gpuServiceConfig
+          // ncclServiceConfig;
+        };
     in
     {
       # Top-level options for a systemd-service backend. Just the shared base —
@@ -1413,6 +1657,7 @@ in
         hardenedServiceConfig
         sharedUnitConfig
         mkWorker
+        mkUvService
         ncclServiceConfig
         ncclEnvironment
         gpuServiceConfig
@@ -1420,9 +1665,10 @@ in
         ;
 
       # All worker units for a uv/wheel-based GPU Python backend: enabled models
-      # sorted by ascending `port`, each rendered by `mkUvWorker` with its
-      # `execStart` argv derived from the model. Returns a `systemd.services`
-      # attrset.
+      # sorted by ascending `port`, each rendered by `mkUvWorker`. Owning the
+      # unit name also lets this own the credential directory derived from it,
+      # so `execStart` receives settings with every `${cred:…}` already resolved
+      # and backends never spell a credential path themselves.
       mkUvServices =
         {
           serviceName,
@@ -1438,6 +1684,9 @@ in
         lib.listToAttrs (
           lib.imap0 (
             index: model:
+            let
+              directory = systemdCredentialDirectory "${serviceName}-${model.name}";
+            in
             mkUvWorker {
               inherit
                 serviceName
@@ -1449,7 +1698,9 @@ in
                 ;
               # Ascending chain: each worker waits on its lower-port predecessor.
               previous = if index > 0 then lib.elemAt models (index - 1) else null;
-              execStart = execStart model;
+              execStart = execStart model (
+                resolveCredentialRefs directory model.credentials (cfg.modelSettings // model.settings)
+              );
             }
           ) models
         );
@@ -1460,9 +1711,19 @@ in
       # one per service from `DynamicUser`, while the uv backends, which cannot
       # (see `mkUvWorker`), merge in `identityConfig` alongside this.
       mkConfig =
-        { backend, cfg }:
+        {
+          backend,
+          cfg,
+          extras ? { },
+          extraUnits ? { },
+        }:
         mkSharedConfig {
-          inherit backend cfg;
+          inherit
+            backend
+            cfg
+            extras
+            extraUnits
+            ;
           serviceName = backend;
         };
     };

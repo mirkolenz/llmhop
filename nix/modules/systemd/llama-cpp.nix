@@ -9,7 +9,12 @@ let
   cfg = config.services.llmhop.llama-cpp;
 
   llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) enabledModels renderCliArgs;
+  inherit (llmhopLib)
+    enabledModels
+    renderCliArgs
+    resolveCredentialRefs
+    systemdCredentialDirectory
+    ;
   inherit (llmhopLib.systemd)
     mkConfig
     mkModelSubmodule
@@ -28,6 +33,7 @@ let
     let
       subdir = "llama-cpp/${model.name}";
       cacheBase = "/var/cache/${subdir}";
+      credentialDir = systemdCredentialDirectory "llama-cpp-${model.name}";
     in
     lib.nameValuePair "llama-cpp-${model.name}" (
       {
@@ -49,17 +55,20 @@ let
         # llama-server serves `/health` as 503 while the model loads, 200 once it
         # can generate, so the unit only goes active when it is servable.
         healthPort = model.port;
+        inherit (model) credentials;
         execStart = [
           (lib.getExe' cfg.package "llama-server")
         ]
         ++ renderArgs (
-          {
-            host = "127.0.0.1";
-            port = model.port;
-            alias = model.name;
-          }
-          // cfg.modelSettings
-          // model.settings
+          resolveCredentialRefs credentialDir model.credentials (
+            {
+              host = "127.0.0.1";
+              port = model.port;
+              alias = model.name;
+            }
+            // cfg.modelSettings
+            // model.settings
+          )
         );
         serviceConfig = {
           KillSignal = "SIGINT";

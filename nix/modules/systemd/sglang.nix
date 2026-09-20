@@ -83,7 +83,7 @@ in
           serviceName = "sglang";
           inherit cfg pkgs utils;
           execStart =
-            model:
+            model: settings:
             [
               (lib.getExe' model.package "python")
               "-m"
@@ -96,8 +96,7 @@ in
                 host = "127.0.0.1";
                 port = model.port;
               }
-              // cfg.modelSettings
-              // model.settings
+              // settings
             );
         };
       }

@@ -17,6 +17,7 @@ let
     settingsRendering
     systemdCredentialDirectory
     unitConfigOption
+    withManagedSettings
     ;
 
   unitName = detector: "vllm-detector-${detector.name}";
@@ -25,11 +26,10 @@ let
   # instead of binding loopback directly.
   detectorSettings =
     host: port: detector:
-    {
+    withManagedSettings {
       inherit (detector) tokenizer;
       inherit host port;
-    }
-    // detector.settings;
+    } detector.settings;
 
   # The upstream script serves no health endpoint, so readiness comes from
   # FastAPI's `/openapi.json`.
@@ -70,6 +70,8 @@ let
         Arguments passed to vLLM's upstream watermark detector server.
         Its current interface supports `key`, `prf`, `context-width`, and
         `p-value-threshold`.
+        `tokenizer`, `host` and `port` are derived from the options of the same
+        name and always win over entries set here.
         ${settingsRendering "vllm"}
       '';
     };

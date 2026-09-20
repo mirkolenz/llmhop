@@ -8,7 +8,7 @@
 let
   cfg = config.services.llmhop.llama-cpp;
 
-  inherit (import ../lib.nix lib) renderCliArgs systemd;
+  inherit (import ../lib.nix lib) renderCliArgs systemd withManagedSettings;
 in
 {
   options.services.llmhop.llama-cpp = systemd.mkOptions { backend = "llama-cpp"; } // {
@@ -83,12 +83,11 @@ in
             model: settings:
             [ (lib.getExe' cfg.package "llama-server") ]
             ++ renderCliArgs "llama-cpp" (
-              {
+              withManagedSettings {
                 host = "127.0.0.1";
                 port = model.port;
                 alias = model.name;
-              }
-              // settings
+              } settings
             );
         };
       }

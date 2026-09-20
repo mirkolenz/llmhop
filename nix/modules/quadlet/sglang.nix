@@ -15,6 +15,7 @@ let
     settingsRendering
     sortedModels
     quadlet
+    withManagedSettings
     ;
 
   # The Rust SGL Model Gateway's clap `SetTrue` flags negate the same way
@@ -26,15 +27,20 @@ let
 
   models = sortedModels cfg;
 
-  # The gateway calls /get_model_info on each `worker-urls` entry and uses
-  # the worker's `--served-model-name` as the routing key. Host networking
-  # lets it reach workers at their published loopback ports without a
-  # dedicated podman network.
-  gatewaySettings = {
+  # Listeners derived from the gateway options, so `settings` cannot move them
+  # off the registered ports.
+  gatewayListeners = {
     host = cfg.gateway.bindAddress;
     port = cfg.gateway.port;
     prometheus-host = if cfg.gateway.enableMetrics then cfg.gateway.bindAddress else null;
     prometheus-port = if cfg.gateway.enableMetrics then cfg.gateway.metricsPort else null;
+  };
+
+  # The gateway calls /get_model_info on each `worker-urls` entry and uses
+  # the worker's `--served-model-name` as the routing key. Host networking
+  # lets it reach workers at their published loopback ports without a
+  # dedicated podman network. Both stay overridable through `settings`.
+  gatewayDefaults = {
     enable-igw = true;
     worker-urls = map (m: "http://127.0.0.1:${toString m.port}") models;
   };
@@ -66,7 +72,7 @@ let
           Environment = cfg.gateway.environment;
           Exec = renderArgs (
             resolveCredentialRefs credentialDirectory cfg.gateway.credentials (
-              gatewaySettings // cfg.gateway.settings
+              withManagedSettings gatewayListeners (gatewayDefaults // cfg.gateway.settings)
             )
           );
         };
@@ -220,7 +226,9 @@ in
             Additional CLI flags forwarded to `sgl-model-gateway`.
             ${settingsRendering "sglang-quadlet"}
             `--worker-urls` is rendered from the enabled models, so setting it here
-            replaces the generated list.
+            replaces the generated list. The listener flags (`host`, `port`,
+            `prometheus-host`, `prometheus-port`) come from the options of the
+            same name and always win over entries set here.
           '';
         };
 

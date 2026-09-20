@@ -146,7 +146,12 @@ let
         tokenizer = "example/test";
         port = 21002;
         script = detectorScript;
-        settings.key = 42;
+        settings = {
+          key = 42;
+          # Must not reach the command line: it would expose the
+          # unauthenticated detector beyond loopback.
+          host = "0.0.0.0";
+        };
       };
     };
   };
@@ -336,6 +341,8 @@ let
           "--key"
           "42"
         ] nativeVllmDetector.serviceConfig.ExecStart;
+        # `settings.host` must not displace the managed loopback address.
+        exposed = containsAll [ "0.0.0.0" ] nativeVllmDetector.serviceConfig.ExecStart;
         registered = nativeVllm.services.llmhop.portsRegistry."vllm.detectors.watermark";
         # An auxiliary service, so no GPU access and no state directory, and a
         # plain `on-failure` rather than the worker's `always`.
@@ -345,6 +352,7 @@ let
       };
       expected = {
         command = true;
+        exposed = false;
         registered = 21002;
         restart = "on-failure";
         state = false;

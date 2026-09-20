@@ -8,7 +8,12 @@
 let
   cfg = config.services.llmhop.sglang;
 
-  inherit (import ../lib.nix lib) identityConfig renderCliArgs systemd;
+  inherit (import ../lib.nix lib)
+    identityConfig
+    renderCliArgs
+    systemd
+    withManagedSettings
+    ;
 in
 {
   options.services.llmhop.sglang =
@@ -84,13 +89,12 @@ in
               "sglang.launch_server"
             ]
             ++ renderCliArgs "sglang" (
-              {
+              withManagedSettings {
                 model-path = model.model;
                 served-model-name = model.name;
                 host = "127.0.0.1";
                 port = model.port;
-              }
-              // settings
+              } settings
             );
         };
       }

@@ -230,6 +230,12 @@ let
     in
     attrs: lib.escapeShellArgs (render attrs);
 
+  # Merge the flags llmhop derives from its own options (bind address,
+  # registered port, routing name) onto the user's `settings`. `managed` wins,
+  # so an override can neither move a server off loopback nor off the port the
+  # readiness probe and llmhop route to.
+  withManagedSettings = managed: settings: settings // managed;
+
   # ─── Option builders (private) ───────────────────────────────────────
 
   # Top-level options every backend exposes, regardless of kind.
@@ -414,7 +420,8 @@ let
           CLI flags forwarded to the model server for this model.
           ${settingsRendering backend}
           Merged with `services.llmhop.${backend}.modelSettings`; per-model entries
-          take precedence.
+          take precedence. The flags llmhop derives from the model options
+          (its served name, bind address and port) always win over both.
         '';
       };
       environment = mkOption {
@@ -1042,6 +1049,7 @@ in
     sortedModels
     systemdCredentialDirectory
     unitConfigOption
+    withManagedSettings
     ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
@@ -1398,7 +1406,7 @@ in
                   ++ [
                     (renderArgs (
                       resolveCredentialRefs credentialDirectory model.credentials (
-                        settings model // cfg.modelSettings // model.settings
+                        withManagedSettings (settings model) (cfg.modelSettings // model.settings)
                       )
                     ))
                   ]

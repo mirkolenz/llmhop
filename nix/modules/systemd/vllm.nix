@@ -13,6 +13,7 @@ let
     identityConfig
     renderCliArgs
     systemd
+    withManagedSettings
     ;
   detector = import ../detector.nix lib;
 
@@ -112,12 +113,11 @@ in
                 model.model
               ]
               ++ renderCliArgs "vllm" (
-                {
+                withManagedSettings {
                   served-model-name = model.name;
                   host = "127.0.0.1";
                   port = model.port;
-                }
-                // settings
+                } settings
               );
           }
           // lib.listToAttrs (

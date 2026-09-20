@@ -156,6 +156,28 @@ let
     };
   };
 
+  # A native backend and its quadlet twin, with distinct model names so no unit
+  # name collides and only the backend-level rule can reject them.
+  twins = mkSystem {
+    vllm = {
+      enable = true;
+      uid = 504;
+      package = pkgs.writeShellScriptBin "vllm" "exit 0";
+      models.native = {
+        model = "example/test";
+        port = 22001;
+      };
+    };
+    vllm-quadlet = {
+      enable = true;
+      tag = "latest";
+      models.container = {
+        model = "example/test";
+        port = 22002;
+      };
+    };
+  };
+
   invalidCredential = mkConfig { models.test.credentials."tls/key" = tlsKey; };
 
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
@@ -322,6 +344,11 @@ let
         encrypted = [ "tlsKey:${tlsKey}" ];
         paths = true;
       };
+    };
+
+    testTwinBackends = {
+      expr = lib.any (assertion: !assertion.assertion) twins.assertions;
+      expected = true;
     };
 
     testInvalidCredentialName = {

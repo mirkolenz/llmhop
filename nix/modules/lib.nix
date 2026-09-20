@@ -1461,6 +1461,15 @@ in
               assertion = config.virtualisation.quadlet.enable;
               message = "services.llmhop.${backend} requires virtualisation.quadlet.enable.";
             }
+            {
+              # The unit registry only catches twins that also share a model
+              # name. They collide at the backend level regardless: both emit
+              # `${serviceName}-<model>` units and both own
+              # `${cfg.cache.directory}`, which this backend hands to its own
+              # (possibly root-owned) account with mode 0700.
+              assertion = !config.services.llmhop.${serviceName}.enable;
+              message = "services.llmhop.${backend} and services.llmhop.${serviceName} are mutually exclusive: they emit the same `${serviceName}-<model>` unit names and share the `${serviceName}` cache directory.";
+            }
           ];
 
           systemd.tmpfiles.settings."10-${serviceName}" = lib.optionalAttrs cfg.cache.manage {

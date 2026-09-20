@@ -31,9 +31,20 @@ let
     }
   );
 
+  # A credential name becomes a systemd credential ID, which systemd renders as
+  # a plain file name under `$CREDENTIALS_DIRECTORY`. Anything carrying a path
+  # separator or exceeding 255 characters is rejected by systemd itself, so it
+  # is caught here rather than at rebuild or service start. The credential
+  # passes through unchanged, so the check composes with `mapAttrs`.
+  checkCredentialName =
+    name:
+    lib.throwIfNot (lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}" name != null)
+      "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters.";
+
   credentialsOption = mkOption {
     type = types.attrsOf credentialType;
     default = { };
+    apply = lib.mapAttrs checkCredentialName;
     example = lib.literalExpression ''
       {
         apiKeys = "/run/secrets/api-keys";

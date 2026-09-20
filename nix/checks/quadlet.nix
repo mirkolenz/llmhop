@@ -151,6 +151,8 @@ let
     };
   };
 
+  invalidCredential = mkConfig { models.test.credentials."tls/key" = tlsKey; };
+
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
   rootfulDetector = rootful.virtualisation.quadlet.containers.vllm-detector-watermark;
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
@@ -315,6 +317,14 @@ let
         encrypted = [ "tlsKey:${tlsKey}" ];
         paths = true;
       };
+    };
+
+    testInvalidCredentialName = {
+      expr =
+        (lib.tryEval (
+          lib.deepSeq invalidCredential.virtualisation.quadlet.containers.vllm-test.serviceConfig null
+        )).success;
+      expected = false;
     };
 
     testNativeDetector = {

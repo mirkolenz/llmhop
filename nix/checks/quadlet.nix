@@ -107,6 +107,21 @@ let
     };
   };
 
+  llamaCpp = mkSystem {
+    llama-cpp-quadlet = {
+      enable = true;
+      tag = "server";
+      models.test = {
+        port = 20001;
+        credentials.apiKeys = apiKeys;
+        settings = {
+          hf-repo = "example/test";
+          api-key-file = "\${cred:apiKeys}";
+        };
+      };
+    };
+  };
+
   nativeVllm = mkSystem {
     vllm = {
       enable = true;
@@ -134,6 +149,7 @@ let
 
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
+  llamaCppWorker = llamaCpp.virtualisation.quadlet.containers.llama-cpp-test;
   sglangGateway = sglang.virtualisation.quadlet.containers.sglang-gateway;
   sglangWorker = sglang.virtualisation.quadlet.containers.sglang-test;
   nativeVllmWorker = nativeVllm.systemd.services.vllm-test;
@@ -255,6 +271,26 @@ let
       };
     };
 
+    testLlamaCpp = {
+      expr = {
+        inherit (llamaCppWorker.containerConfig) Image PublishPort;
+        arguments = containsAll [
+          "--api-key-file=/run/llmhop/credentials/apiKeys"
+          "--hf-repo=example/test"
+        ] llamaCppWorker.containerConfig.Exec;
+        volumes = lib.all (volume: lib.elem volume llamaCppWorker.containerConfig.Volume) [
+          "/var/cache/llama-cpp:/root/.cache/llama.cpp"
+          "%d:/run/llmhop/credentials:ro"
+        ];
+      };
+      expected = {
+        arguments = true;
+        Image = "ghcr.io/ggml-org/llama.cpp:server";
+        PublishPort = [ "127.0.0.1:20001:8080" ];
+        volumes = true;
+      };
+    };
+
     testNativeCredentials = {
       expr = {
         load = nativeVllmWorker.serviceConfig.LoadCredential;
@@ -281,12 +317,15 @@ let
   units = pkgs.symlinkJoin {
     name = "llmhop-quadlet-test-units";
     paths =
-      rootful.virtualisation.quadlet.generatedUnits ++ rootless.virtualisation.quadlet.generatedUnits;
+      rootful.virtualisation.quadlet.generatedUnits
+      ++ rootless.virtualisation.quadlet.generatedUnits
+      ++ llamaCpp.virtualisation.quadlet.generatedUnits;
   };
 
   result = pkgs.runCommand "llmhop-quadlet-tests" { } ''
     test -e ${units}/lib/systemd/system/vllm-test.service
     test -e ${units}/lib/systemd/user/vllm-test.service
+    test -e ${units}/lib/systemd/system/llama-cpp-test.service
     touch $out
   '';
 in

@@ -743,7 +743,7 @@ let
       lib.optional (cfg.environmentFile != null) cfg.environmentFile
       ++ lib.optional (workload.environmentFile != null) workload.environmentFile;
     Environment = {
-      HF_HOME = cfg.cache.containerDirectory;
+      ${cfg.cache.environmentVariable} = cfg.cache.containerDirectory;
     }
     // cfg.environment
     // workload.environment;
@@ -807,6 +807,8 @@ in
         config,
         defaultImage,
         defaultCacheDir,
+        defaultContainerCacheDir ? "/root/.cache/huggingface",
+        defaultCacheEnvVar ? "HF_HOME",
         tagExample ? "latest",
       }:
       let
@@ -926,8 +928,16 @@ in
           };
           containerDirectory = mkOption {
             type = types.str;
-            default = "/root/.cache/huggingface";
+            default = defaultContainerCacheDir;
             description = "Path at which the cache is mounted inside every model container.";
+          };
+          environmentVariable = mkOption {
+            type = types.str;
+            default = defaultCacheEnvVar;
+            description = ''
+              Environment variable set on every container to point its runtime
+              at `containerDirectory`.
+            '';
           };
           mountOptions = mkOption {
             type = with types; listOf str;
@@ -1006,61 +1016,66 @@ in
       {
         backend,
         cfg,
+        hasModel ? true,
       }:
       let
         serviceName = quadletServiceName backend;
       in
       { name, ... }:
       {
-        options = (baseModelOptions { inherit backend serviceName name; }) // {
-          tag = mkOption {
-            type = with types; nullOr str;
-            default = null;
-            description = ''
-              Tag of the container image used for this model.
-              Mutually exclusive with `digest`.
-            '';
+        options =
+          (baseModelOptions { inherit backend serviceName name; })
+          // {
+            tag = mkOption {
+              type = with types; nullOr str;
+              default = null;
+              description = ''
+                Tag of the container image used for this model.
+                Mutually exclusive with `digest`.
+              '';
+            };
+            digest = mkOption {
+              type = with types; nullOr str;
+              default = null;
+              example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
+              description = ''
+                Immutable digest of the container image (e.g. `sha256:…`).
+                Mutually exclusive with `tag`.
+              '';
+            };
+            devices = mkOption {
+              type = with types; listOf str;
+              default = cfg.devices;
+              defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
+              example = [ "nvidia.com/gpu=0" ];
+              description = ''
+                Devices exposed to this model's container — passed verbatim as
+                Quadlet `AddDevice=` lines. Replaces (does not extend)
+                `services.llmhop.${backend}.devices` for this model.
+                Use to pin a model to specific device indices
+                (e.g. `[ "nvidia.com/gpu=0" ]`).
+              '';
+            };
+            shmSize = mkOption {
+              type = types.str;
+              default = "32g";
+              example = "64g";
+              description = ''
+                Size of the container's private `/dev/shm` tmpfs.
+                PyTorch and friends use shared memory for NCCL/tensor-parallel inference;
+                upstream recommends 32g (or `--ipc=host`). A private tmpfs is preferred for
+                isolation: raise the value for larger models or higher tensor-parallel sizes.
+              '';
+            };
+            quadlet = mkQuadletObjectOptions { description = "this model container"; };
+          }
+          // lib.optionalAttrs hasModel {
+            model = mkOption {
+              type = types.str;
+              example = "Qwen/Qwen2.5-7B-Instruct";
+              description = "Hugging Face repo id (or local path) passed to the model server.";
+            };
           };
-          digest = mkOption {
-            type = with types; nullOr str;
-            default = null;
-            example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
-            description = ''
-              Immutable digest of the container image (e.g. `sha256:…`).
-              Mutually exclusive with `tag`.
-            '';
-          };
-          devices = mkOption {
-            type = with types; listOf str;
-            default = cfg.devices;
-            defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
-            example = [ "nvidia.com/gpu=0" ];
-            description = ''
-              Devices exposed to this model's container — passed verbatim as
-              Quadlet `AddDevice=` lines. Replaces (does not extend)
-              `services.llmhop.${backend}.devices` for this model.
-              Use to pin a model to specific device indices
-              (e.g. `[ "nvidia.com/gpu=0" ]`).
-            '';
-          };
-          shmSize = mkOption {
-            type = types.str;
-            default = "32g";
-            example = "64g";
-            description = ''
-              Size of the container's private `/dev/shm` tmpfs.
-              PyTorch and friends use shared memory for NCCL/tensor-parallel inference;
-              upstream recommends 32g (or `--ipc=host`). A private tmpfs is preferred for
-              isolation: raise the value for larger models or higher tensor-parallel sizes.
-            '';
-          };
-          quadlet = mkQuadletObjectOptions { description = "this model container"; };
-          model = mkOption {
-            type = types.str;
-            example = "Qwen/Qwen2.5-7B-Instruct";
-            description = "Hugging Face repo id (or local path) passed to the model server.";
-          };
-        };
       };
 
     # Render a Quadlet container worker fragment. The optional host user

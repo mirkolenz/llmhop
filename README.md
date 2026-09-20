@@ -170,8 +170,8 @@ The module and the binary are deliberately coupled in four places:
 
 The NixOS module is split into two exports.
 `nixosModules.default` ships the reverse proxy and the native systemd backends (llama.cpp, and vLLM and SGLang from prebuilt wheels), with no dependency on quadlet-nix, so it stays compatible with non-NixOS deployers such as [system-manager](https://github.com/numtide/system-manager).
-`nixosModules.quadlet` includes all of that and additionally provides the container variants of vLLM and SGLang, pulling in the quadlet-nix dependency they require.
-Import the latter only if you need `vllm-quadlet` or `sglang-quadlet`.
+`nixosModules.quadlet` includes all of that and additionally provides the container variants of llama.cpp, vLLM, and SGLang, pulling in the quadlet-nix dependency they require.
+Import the latter only if you need `llama-cpp-quadlet`, `vllm-quadlet`, or `sglang-quadlet`.
 
 ### Inference backends
 
@@ -184,7 +184,7 @@ Cold starts download weights and profile the GPU, so that wait can be long: `Tim
 The container variants get the same guarantee from their `Notify=healthy` health check.
 
 llama.cpp runs as a native, hardened systemd system unit under `DynamicUser`, and the default `vllm` and `sglang` backends run the same way from prebuilt wheels, except under a dedicated system user (see [below](#native-vllm-and-sglang-from-prebuilt-wheels)).
-vLLM and SGLang can instead run as Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `vllm-quadlet` and `sglang-quadlet` options.
+All three engines can instead run as Podman containers through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), via the suffixed `llama-cpp-quadlet`, `vllm-quadlet`, and `sglang-quadlet` options.
 They are rootful system units by default, matching Quadlet itself and requiring no host UID configuration.
 Set `quadlet.user` to run them as rootless systemd user units instead.
 The module can create a dedicated lingering account, or target an account managed elsewhere.
@@ -242,6 +242,19 @@ services.llmhop.vllm-quadlet = {
   models."qwen3-8b" = {
     model = "Qwen/Qwen3-8B";
     port = 18001;
+  };
+};
+```
+
+llama.cpp uses the same interface, but selects one of the upstream server image variants and configures the model through llama-server flags:
+
+```nix
+services.llmhop.llama-cpp-quadlet = {
+  enable = true;
+  tag = "server-cuda";
+  models."qwen3-8b" = {
+    port = 18001;
+    settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
   };
 };
 ```
@@ -455,7 +468,7 @@ Each model defaults to the backend's `package` but can pin its own with `models.
 
 Because a unit only goes active once it is healthy, `startupOrdering` (on by default) is effective here: workers boot one at a time in ascending `port` order, each finishing its GPU-memory profiling before the next begins, which is what keeps two models sharing a device from racing into an OOM.
 
-The container variants live under `services.llmhop.vllm-quadlet` and `sglang-quadlet`.
+The container variants live under `services.llmhop.llama-cpp-quadlet`, `vllm-quadlet`, and `sglang-quadlet`.
 A backend's native and container variants emit the same `<backend>-<model>` units and are therefore mutually exclusive, so enable at most one variant per backend.
 
 ### Inference server credentials

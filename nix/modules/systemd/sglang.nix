@@ -8,20 +8,11 @@
 let
   cfg = config.services.llmhop.sglang;
 
-  llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib) identityConfig renderCliArgs;
-  inherit (llmhopLib.systemd)
-    mkConfig
-    mkUvModelSubmodule
-    mkUvOptions
-    mkUvServices
-    ;
-
-  renderArgs = renderCliArgs "sglang";
+  inherit (import ../lib.nix lib) identityConfig renderCliArgs systemd;
 in
 {
   options.services.llmhop.sglang =
-    mkUvOptions {
+    systemd.mkUvOptions {
       backend = "sglang";
       inherit cfg;
       displayName = "SGLang";
@@ -33,12 +24,14 @@ in
 
       models = lib.mkOption {
         type = lib.types.attrsOf (
-          lib.types.submodule (mkUvModelSubmodule {
-            backend = "sglang";
-            inherit cfg;
-            modelArgument = "`--model-path`";
-            modelExample = "Qwen/Qwen3-8B";
-          })
+          lib.types.submodule (
+            systemd.mkUvModelSubmodule {
+              backend = "sglang";
+              inherit cfg;
+              modelArgument = "`--model-path`";
+              modelExample = "Qwen/Qwen3-8B";
+            }
+          )
         );
         default = { };
         example = lib.literalExpression ''
@@ -65,11 +58,12 @@ in
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
-      (mkConfig {
+      (systemd.mkConfig {
         backend = "sglang";
         inherit cfg;
       })
-      # The workers run as a real user rather than `DynamicUser`; see `mkUvWorker`.
+      # The workers run as a real user rather than `DynamicUser`; see the module
+      # internals documentation.
       (identityConfig {
         backend = "sglang";
         inherit cfg;
@@ -79,7 +73,7 @@ in
         # supplies only its launcher. `python -m sglang.launch_server` is the entry
         # point present in every SGLang wheel (a top-level `sglang` console script
         # is not), so it is the robust choice for a from-wheel virtual environment.
-        systemd.services = mkUvServices {
+        systemd.services = systemd.mkUvServices {
           serviceName = "sglang";
           inherit cfg pkgs utils;
           execStart =
@@ -89,7 +83,7 @@ in
               "-m"
               "sglang.launch_server"
             ]
-            ++ renderArgs (
+            ++ renderCliArgs "sglang" (
               {
                 model-path = model.model;
                 served-model-name = model.name;

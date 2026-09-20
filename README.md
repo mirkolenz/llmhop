@@ -230,6 +230,19 @@ services.llmhop = {
 
 See the [options reference](https://mirkolenz.github.io/llmhop/) for the full list of per-backend options.
 
+#### Settings rendering
+
+`modelSettings` and `settings` are rendered into the model server's own CLI flags.
+Values keep their Nix type: strings, paths and store paths are passed verbatim, and anything else is serialised to JSON, so `0.6` stays `0.6` and an attribute set becomes the JSON object that options like vLLM's `--speculative-config` parse.
+
+- `true` collapses to `--<key>`.
+- `null` and empty lists are dropped.
+- llama.cpp and vLLM render `false` as `--no-<key>`, because their parsers register a negated twin for every boolean. A flag with no such twin (an on-only one, or a tri-state one taking `on|off|auto`) has to be omitted or given its value explicitly rather than set to `false`.
+- SGLang drops `false` instead, since its CLI pairs `--enable-X` with `--disable-X` rather than auto-negating. Write the negated key explicitly, for example `disable-radix-cache = true;`.
+- vLLM and SGLang hand every element of a list to one flag (`--<key> a b`), which is what most of their multi-value options take. The few that expect a repeated flag have to be written out one value at a time.
+- llama.cpp repeats the flag once per element (`--<key> a --<key> b`), all its hand-rolled parser understands.
+
+
 #### Quadlet execution and user namespaces
 
 The Quadlet backends separate the host account that invokes Podman from the identity used inside each container.
@@ -275,6 +288,14 @@ services.llmhop.vllm-quadlet.quadlet.user = {
   group = "inference";
   gid = 503;
   home = "/var/lib/inference";
+};
+```
+
+The subordinate ID ranges are NixOS-allocated by default.
+Pick them yourself through the native user options, which merge with what the module sets:
+
+```nix
+users.users.inference = {
   autoSubUidGidRange = false;
   subUidRanges = [
     {

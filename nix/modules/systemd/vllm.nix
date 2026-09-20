@@ -8,63 +8,19 @@
 let
   cfg = config.services.llmhop.vllm;
 
-  llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib)
+  inherit (import ../lib.nix lib)
     enabled
     identityConfig
     renderCliArgs
-    resolveCredentialRefs
-    systemdCredentialDirectory
-    vllmDetectorOptions
-    vllmDetectorRegistry
-    vllmDetectorSettings
-    vllmDetectorUnit
+    systemd
     ;
-  inherit (llmhopLib.systemd)
-    mkConfig
-    mkUvModelSubmodule
-    mkUvOptions
-    mkUvService
-    mkUvServices
-    ;
-
-  renderArgs = renderCliArgs "vllm";
+  detector = import ../detector.nix lib;
 
   detectors = enabled cfg.detectors;
-
-  # An auxiliary service rather than a model worker: no GPU device access, no
-  # `StateDirectory`, and readiness from FastAPI's `/openapi.json` because the
-  # upstream script serves no health endpoint.
-  mkDetectorService =
-    detector:
-    let
-      unitName = vllmDetectorUnit detector;
-    in
-    mkUvService {
-      inherit
-        unitName
-        cfg
-        pkgs
-        utils
-        ;
-      description = "vLLM watermark detector ${detector.name}";
-      subdir = "vllm/detector-${detector.name}";
-      workload = detector;
-      healthPath = "/openapi.json";
-      execStart = [
-        (lib.getExe' detector.package "python")
-        detector.script
-      ]
-      ++ renderArgs (
-        resolveCredentialRefs (systemdCredentialDirectory unitName) detector.credentials (
-          vllmDetectorSettings "127.0.0.1" detector.port detector
-        )
-      );
-    };
 in
 {
   options.services.llmhop.vllm =
-    mkUvOptions {
+    systemd.mkUvOptions {
       backend = "vllm";
       inherit cfg;
       displayName = "vLLM";
@@ -75,12 +31,14 @@ in
 
       models = lib.mkOption {
         type = lib.types.attrsOf (
-          lib.types.submodule (mkUvModelSubmodule {
-            backend = "vllm";
-            inherit cfg;
-            modelArgument = "the `vllm serve` positional argument";
-            modelExample = "Qwen/Qwen2.5-7B-Instruct";
-          })
+          lib.types.submodule (
+            systemd.mkUvModelSubmodule {
+              backend = "vllm";
+              inherit cfg;
+              modelArgument = "the `vllm serve` positional argument";
+              modelExample = "Qwen/Qwen2.5-7B-Instruct";
+            }
+          )
         );
         default = { };
         example = lib.literalExpression ''
@@ -110,34 +68,7 @@ in
           lib.types.submodule (
             { name, ... }:
             {
-              options = vllmDetectorOptions name // {
-                script = lib.mkOption {
-                  type = lib.types.path;
-                  example = lib.literalExpression ''
-                    inputs.vllm-src + "/examples/basic/online_serving/watermark_detection_server.py"
-                  '';
-                  description = ''
-                    Path to vLLM's upstream `watermark_detection_server.py`.
-                    Pin it to the same revision as the package used by this detector.
-                  '';
-                };
-                package = lib.mkOption {
-                  type = lib.types.package;
-                  default = cfg.package;
-                  defaultText = lib.literalExpression "config.services.llmhop.vllm.package";
-                  description = "vLLM Python environment used by this detector.";
-                };
-                serviceConfig = lib.mkOption {
-                  type = with lib.types; attrsOf anything;
-                  default = { };
-                  description = "Additional `[Service]` settings for this detector.";
-                };
-                unitConfig = lib.mkOption {
-                  type = with lib.types; attrsOf anything;
-                  default = { };
-                  description = "Additional `[Unit]` settings for this detector.";
-                };
-              };
+              options = detector.nativeOptions cfg name;
             }
           )
         );
@@ -148,14 +79,15 @@ in
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
-      (mkConfig (
+      (systemd.mkConfig (
         {
           backend = "vllm";
           inherit cfg;
         }
-        // vllmDetectorRegistry detectors
+        // detector.registry detectors
       ))
-      # The workers run as a real user rather than `DynamicUser`; see `mkUvWorker`.
+      # The workers run as a real user rather than `DynamicUser`; see the module
+      # internals documentation.
       (identityConfig {
         backend = "vllm";
         inherit cfg;
@@ -165,10 +97,10 @@ in
         # supplies only its `vllm serve <model>` invocation (a real `bin/vllm`
         # console script) and its own cache-root env vars.
         systemd.services =
-          mkUvServices {
+          systemd.mkUvServices {
             serviceName = "vllm";
             inherit cfg pkgs utils;
-            extraEnvironment = cacheBase: {
+            environment = cacheBase: {
               VLLM_CACHE_ROOT = "${cacheBase}/vllm";
               OUTLINES_CACHE_DIR = "${cacheBase}/outlines";
             };
@@ -179,7 +111,7 @@ in
                 "serve"
                 model.model
               ]
-              ++ renderArgs (
+              ++ renderCliArgs "vllm" (
                 {
                   served-model-name = model.name;
                   host = "127.0.0.1";
@@ -188,7 +120,15 @@ in
                 // settings
               );
           }
-          // lib.mapAttrs' (_: mkDetectorService) detectors;
+          // lib.listToAttrs (
+            map (
+              d:
+              detector.mkNativeService {
+                inherit cfg pkgs utils;
+                detector = d;
+              }
+            ) (lib.attrValues detectors)
+          );
       }
     ]
   );

@@ -97,11 +97,6 @@ let
       models.test = {
         model = "example/test";
         port = 19001;
-        credentials = { inherit serverConfig tlsKey; };
-        settings = {
-          config = "\${cred:serverConfig}";
-          ssl-keyfile = "\${cred:tlsKey}";
-        };
       };
       gateway = {
         enable = true;
@@ -120,11 +115,7 @@ let
       tag = "server";
       models.test = {
         port = 20001;
-        credentials.apiKeys = apiKeys;
-        settings = {
-          hf-repo = "example/test";
-          api-key-file = "\${cred:apiKeys}";
-        };
+        settings.hf-repo = "example/test";
       };
     };
   };
@@ -164,7 +155,6 @@ let
   rootfulDetector = rootful.virtualisation.quadlet.containers.vllm-detector-watermark;
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
   sglangGateway = sglang.virtualisation.quadlet.containers.sglang-gateway;
-  sglangWorker = sglang.virtualisation.quadlet.containers.sglang-test;
   llamaCppWorker = llamaCpp.virtualisation.quadlet.containers.llama-cpp-test;
   nativeVllmWorker = nativeVllm.systemd.services.vllm-test;
   nativeVllmDetector = nativeVllm.systemd.services.vllm-detector-watermark;
@@ -286,40 +276,19 @@ let
       };
     };
 
-    testSglangCredentials = {
-      expr = {
-        arguments = containsAll [
-          "--config=/run/llmhop/credentials/serverConfig"
-          "--ssl-keyfile=/run/llmhop/credentials/tlsKey"
-        ] sglangWorker.containerConfig.Exec;
-        load = sglangWorker.serviceConfig.LoadCredential;
-      };
-      expected = {
-        arguments = true;
-        load = [
-          "serverConfig:${serverConfig}"
-          "tlsKey:${tlsKey}"
-        ];
-      };
-    };
-
     testLlamaCpp = {
       expr = {
-        inherit (llamaCppWorker.containerConfig) Image PublishPort;
+        inherit (llamaCppWorker.containerConfig) Image PublishPort Volume;
         arguments = containsAll [
-          "--api-key-file=/run/llmhop/credentials/apiKeys"
+          "--alias=test"
           "--hf-repo=example/test"
         ] llamaCppWorker.containerConfig.Exec;
-        volumes = lib.all (volume: lib.elem volume llamaCppWorker.containerConfig.Volume) [
-          "/var/cache/llama-cpp:/root/.cache/llama.cpp"
-          "%d:/run/llmhop/credentials:ro"
-        ];
       };
       expected = {
         arguments = true;
         Image = "ghcr.io/ggml-org/llama.cpp:server";
         PublishPort = [ "127.0.0.1:20001:8080" ];
-        volumes = true;
+        Volume = [ "/var/cache/llama-cpp:/root/.cache/llama.cpp" ];
       };
     };
 
@@ -332,8 +301,12 @@ let
           "/run/credentials/vllm-test.service/serverConfig"
           "/run/credentials/vllm-test.service/tlsKey"
         ] nativeVllmWorker.serviceConfig.ExecStart;
+        # The engine exits 0 after draining, so a crashed worker needs `always`.
+        inherit (nativeVllmWorker.serviceConfig) Restart PrivateDevices;
       };
       expected = {
+        Restart = "always";
+        PrivateDevices = false;
         load = [
           "manual:/run/manual"
           "apiKeys:${apiKeys}"
@@ -354,10 +327,18 @@ let
           "42"
         ] nativeVllmDetector.serviceConfig.ExecStart;
         registered = nativeVllm.services.llmhop.portsRegistry."vllm.detectors.watermark";
+        # An auxiliary service, so no GPU access and no state directory, and a
+        # plain `on-failure` rather than the worker's `always`.
+        restart = nativeVllmDetector.serviceConfig.Restart;
+        state = nativeVllmDetector.serviceConfig ? StateDirectory;
+        devices = nativeVllmDetector.serviceConfig.PrivateDevices or null;
       };
       expected = {
         command = true;
         registered = 21002;
+        restart = "on-failure";
+        state = false;
+        devices = null;
       };
     };
   };

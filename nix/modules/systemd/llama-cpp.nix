@@ -8,117 +8,26 @@
 let
   cfg = config.services.llmhop.llama-cpp;
 
-  llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib)
-    enabledModels
-    renderCliArgs
-    resolveCredentialRefs
-    systemdCredentialDirectory
-    ;
-  inherit (llmhopLib.systemd)
-    mkConfig
-    mkModelSubmodule
-    mkOptions
-    mkWorker
-    ncclServiceConfig
-    ncclEnvironment
-    gpuServiceConfig
-    gpuCacheEnvironment
-    ;
-
-  renderArgs = renderCliArgs "llama-cpp";
-
-  mkService =
-    model:
-    let
-      subdir = "llama-cpp/${model.name}";
-      cacheBase = "/var/cache/${subdir}";
-      credentialDir = systemdCredentialDirectory "llama-cpp-${model.name}";
-    in
-    lib.nameValuePair "llama-cpp-${model.name}" (
-      {
-        description = "llama.cpp server for ${model.name}";
-        wantedBy = [ "multi-user.target" ];
-        wants = [ "network-online.target" ];
-        after = [ "network-online.target" ];
-        environment = {
-          LLAMA_CACHE = cacheBase;
-        }
-        // gpuCacheEnvironment cacheBase
-        // ncclEnvironment
-        // cfg.environment
-        // model.environment;
-      }
-      // mkWorker {
-        inherit (cfg) openFilesLimit;
-        inherit pkgs utils;
-        # llama-server serves `/health` as 503 while the model loads, 200 once it
-        # can generate, so the unit only goes active when it is servable.
-        healthPort = model.port;
-        inherit (model) credentials;
-        execStart = [
-          (lib.getExe' cfg.package "llama-server")
-        ]
-        ++ renderArgs (
-          resolveCredentialRefs credentialDir model.credentials (
-            {
-              host = "127.0.0.1";
-              port = model.port;
-              alias = model.name;
-            }
-            // cfg.modelSettings
-            // model.settings
-          )
-        );
-        serviceConfig = {
-          KillSignal = "SIGINT";
-          Restart = "on-failure";
-          TasksMax = 4096;
-          UMask = "0077";
-
-          # DynamicUser + per-unit StateDirectory/CacheDirectory pin the
-          # ephemeral UID across restarts and own writable paths under
-          # `ProtectSystem = "strict"`. The `parent/leaf` form shares
-          # `/var/{lib,cache}/llama-cpp/` across models — only the leaf
-          # is owned by the DynamicUser; parents stay root-owned.
-          DynamicUser = true;
-          StateDirectory = subdir;
-          CacheDirectory = subdir;
-          WorkingDirectory = "/var/lib/${subdir}";
-
-          EnvironmentFile =
-            lib.optional (cfg.environmentFile != null) cfg.environmentFile
-            ++ lib.optional (model.environmentFile != null) model.environmentFile;
-        }
-        # GPU relaxations, then NCCL/RCCL's — which also cover llama-server's own
-        # listener, denied by `SocketBindDeny = "any"` otherwise — then the
-        # per-model escape hatch.
-        // gpuServiceConfig
-        // ncclServiceConfig
-        // model.serviceConfig;
-        inherit (model) unitConfig;
-      }
-    );
+  inherit (import ../lib.nix lib) renderCliArgs systemd;
 in
 {
-  options.services.llmhop.llama-cpp = mkOptions { backend = "llama-cpp"; } // {
+  options.services.llmhop.llama-cpp = systemd.mkOptions { backend = "llama-cpp"; } // {
     enable = lib.mkEnableOption "llama.cpp model serving via systemd, fronted by llmhop";
 
     package = lib.mkPackageOption pkgs "llama-cpp" { };
 
     models = lib.mkOption {
       type = lib.types.attrsOf (
-        lib.types.submodule {
-          imports = [ (mkModelSubmodule { backend = "llama-cpp"; }) ];
-          options.port = lib.mkOption {
-            type = lib.types.port;
-            description = ''
+        lib.types.submodule (
+          systemd.mkModelSubmodule {
+            backend = "llama-cpp";
+            portDescription = ''
               Loopback host port that llama-server binds to. Must be unique per
               enabled model; the gateway (llmhop) reaches each backend at
               `http://127.0.0.1:<port>`.
             '';
-          };
-        }
+          }
+        )
       );
       default = { };
       example = lib.literalExpression ''
@@ -155,12 +64,33 @@ in
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
-      (mkConfig {
+      (systemd.mkConfig {
         backend = "llama-cpp";
         inherit cfg;
       })
       {
-        systemd.services = lib.mapAttrs' (_: mkService) (enabledModels cfg);
+        # llama.cpp compiles nothing at runtime, so it keeps `DynamicUser`: the
+        # `parent/leaf` State/CacheDirectory form shares `/var/{lib,cache}/llama-cpp/`
+        # across models with only the leaf owned by the ephemeral UID.
+        systemd.services = systemd.mkServices {
+          serviceName = "llama-cpp";
+          inherit cfg pkgs utils;
+          environment = cacheBase: { LLAMA_CACHE = cacheBase; };
+          serviceConfig.DynamicUser = true;
+          # llama-server serves `/health` as 503 while the model loads, 200 once
+          # it can generate, so the unit only goes active when it is servable.
+          execStart =
+            model: settings:
+            [ (lib.getExe' cfg.package "llama-server") ]
+            ++ renderCliArgs "llama-cpp" (
+              {
+                host = "127.0.0.1";
+                port = model.port;
+                alias = model.name;
+              }
+              // settings
+            );
+        };
       }
     ]
   );

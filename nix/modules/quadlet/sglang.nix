@@ -7,24 +7,14 @@
 let
   cfg = config.services.llmhop.sglang-quadlet;
 
-  llmhopLib = import ../lib.nix lib;
-  inherit (llmhopLib)
+  inherit (import ../lib.nix lib)
     credentialDirectory
     credentialsOption
     renderCliArgsShell
     resolveCredentialRefs
     settingsRendering
     sortedModels
-    ;
-  inherit (llmhopLib.quadlet)
-    mkConfig
-    mkContainerArgs
-    mkImageArgs
-    mkModelSubmodule
-    mkObjectOptions
-    mkOptions
-    mkStartupOrdering
-    mkWorker
+    quadlet
     ;
 
   # The Rust SGL Model Gateway's clap `SetTrue` flags negate the same way
@@ -34,56 +24,13 @@ let
   # Internal port every worker binds to inside its container.
   workerPort = 30000;
 
-  # Sort by port so the After= chain is deterministic across rebuilds.
   models = sortedModels cfg;
-
-  mkContainer =
-    index: model:
-    let
-      settings = {
-        model-path = model.model;
-        served-model-name = model.name;
-        host = "0.0.0.0";
-        port = workerPort;
-      }
-      // cfg.modelSettings
-      // model.settings;
-    in
-    lib.nameValuePair "sglang-${model.name}" (mkWorker {
-      inherit cfg;
-      inherit (model) credentials;
-      overrides = model.quadlet;
-      healthPort = workerPort;
-      containerConfig =
-        (mkContainerArgs {
-          backend = "sglang-quadlet";
-          inherit cfg model;
-        })
-        // {
-          PublishPort = [ "127.0.0.1:${toString model.port}:${toString workerPort}" ];
-          # Override the image's default entrypoint with the `sglang serve` CLI.
-          Entrypoint = lib.toJSON [
-            "sglang"
-            "serve"
-          ];
-          Exec = renderArgs (resolveCredentialRefs credentialDirectory model.credentials settings);
-        };
-      unitConfig = mkStartupOrdering {
-        inherit
-          config
-          cfg
-          models
-          index
-          ;
-        prefix = "sglang";
-      };
-    });
 
   # The gateway calls /get_model_info on each `worker-urls` entry and uses
   # the worker's `--served-model-name` as the routing key. Host networking
   # lets it reach workers at their published loopback ports without a
   # dedicated podman network.
-  gatewayBaseSettings = {
+  gatewaySettings = {
     host = cfg.gateway.bindAddress;
     port = cfg.gateway.port;
     prometheus-host = if cfg.gateway.enableMetrics then cfg.gateway.bindAddress else null;
@@ -92,58 +39,58 @@ let
     worker-urls = map (m: "http://127.0.0.1:${toString m.port}") models;
   };
 
-  gatewayExec = renderArgs (
-    resolveCredentialRefs credentialDirectory cfg.gateway.credentials (
-      gatewayBaseSettings // cfg.gateway.settings
-    )
-  );
-
   workerServices = map (
     m: "${config.virtualisation.quadlet.containers."sglang-${m.name}".serviceName}.service"
   ) models;
 
-  mkGatewayContainer = lib.nameValuePair "sglang-gateway" (mkWorker {
-    inherit cfg;
-    inherit (cfg.gateway) credentials;
-    overrides = cfg.gateway.quadlet;
-    healthPort = cfg.gateway.port;
-    healthStartPeriod = "5m";
-    containerConfig =
-      mkImageArgs {
-        inherit (cfg.gateway) image;
-        defaultTag = "latest";
-        workload = cfg.gateway;
-        label = "services.llmhop.sglang-quadlet.gateway";
-      }
-      // {
-        # Host networking lets the gateway reach each worker at
-        # `127.0.0.1:<model.port>` and binds its own listeners directly on
-        # `bindAddress`, so no `PublishPort` is required.
-        Network = "host";
-        EnvironmentFile = lib.optional (cfg.gateway.environmentFile != null) cfg.gateway.environmentFile;
-        Environment = cfg.gateway.environment;
-        Exec = gatewayExec;
+  mkGatewayContainer = lib.nameValuePair "sglang-gateway" (
+    quadlet.mkWorker {
+      inherit cfg;
+      inherit (cfg.gateway) credentials;
+      overrides = cfg.gateway.quadlet;
+      healthPort = cfg.gateway.port;
+      healthStartPeriod = "5m";
+      containerConfig =
+        quadlet.mkImageArgs {
+          inherit (cfg.gateway) image;
+          defaultTag = "latest";
+          workload = cfg.gateway;
+          label = "services.llmhop.sglang-quadlet.gateway";
+        }
+        // {
+          # Host networking lets the gateway reach each worker at
+          # `127.0.0.1:<model.port>` and binds its own listeners directly on
+          # `bindAddress`, so no `PublishPort` is required.
+          Network = "host";
+          EnvironmentFile = lib.optional (cfg.gateway.environmentFile != null) cfg.gateway.environmentFile;
+          Environment = cfg.gateway.environment;
+          Exec = renderArgs (
+            resolveCredentialRefs credentialDirectory cfg.gateway.credentials (
+              gatewaySettings // cfg.gateway.settings
+            )
+          );
+        };
+      # The gateway is a stateless Rust binary — short timing overrides the
+      # worker-scale defaults baked into `mkWorker`.
+      serviceConfig = {
+        TimeoutStartSec = 600;
+        RestartSec = 10;
       };
-    # The gateway is a stateless Rust binary — short timing overrides the
-    # worker-scale defaults baked into `mkWorker`.
-    serviceConfig = {
-      TimeoutStartSec = 600;
-      RestartSec = 10;
-    };
-    unitConfig = {
-      StartLimitBurst = 5;
-      StartLimitIntervalSec = 600;
-      # Requires=+After= paired with Notify=healthy on workers gives us
-      # `depends_on: service_healthy` — the gateway starts only after every
-      # worker answers /health, so /get_model_info discovery succeeds.
-      After = workerServices;
-      Requires = workerServices;
-    };
-  });
+      unitConfig = {
+        StartLimitBurst = 5;
+        StartLimitIntervalSec = 600;
+        # Requires=+After= paired with Notify=healthy on workers gives us
+        # `depends_on: service_healthy` — the gateway starts only after every
+        # worker answers /health, so /get_model_info discovery succeeds.
+        After = workerServices;
+        Requires = workerServices;
+      };
+    }
+  );
 in
 {
   options.services.llmhop.sglang-quadlet =
-    mkOptions {
+    quadlet.mkOptions {
       backend = "sglang-quadlet";
       inherit cfg config;
       defaultImage = "docker.io/lmsysorg/sglang";
@@ -154,22 +101,17 @@ in
 
       models = lib.mkOption {
         type = lib.types.attrsOf (
-          lib.types.submodule {
-            imports = [
-              (mkModelSubmodule {
-                backend = "sglang-quadlet";
-                inherit cfg;
-              })
-            ];
-            options.port = lib.mkOption {
-              type = lib.types.port;
-              description = ''
+          lib.types.submodule (
+            quadlet.mkModelSubmodule {
+              backend = "sglang-quadlet";
+              inherit cfg;
+              portDescription = ''
                 Loopback host port forwarded to the container's SGLang API.
                 Must be unique per model and must not collide with `gateway.port` /
                 `gateway.metricsPort` when the gateway is enabled.
               '';
-            };
-          }
+            }
+          )
         );
         default = { };
         example = lib.literalExpression ''
@@ -282,13 +224,13 @@ in
           '';
         };
 
-        quadlet = mkObjectOptions { description = "the gateway container"; };
+        quadlet = quadlet.mkObjectOptions { description = "the gateway container"; };
       };
     };
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
-      (mkConfig {
+      (quadlet.mkConfig {
         backend = "sglang-quadlet";
         inherit cfg config pkgs;
         extras =
@@ -300,9 +242,23 @@ in
         extraUnits = lib.optionalAttrs cfg.gateway.enable { gateway = "sglang-gateway"; };
       })
       {
-        virtualisation.quadlet.containers = lib.listToAttrs (
-          (lib.imap0 mkContainer models) ++ lib.optional cfg.gateway.enable mkGatewayContainer
-        );
+        virtualisation.quadlet.containers =
+          quadlet.mkModelContainers {
+            backend = "sglang-quadlet";
+            inherit cfg config workerPort;
+            # Override the image's default entrypoint with the `sglang serve` CLI.
+            containerConfig.Entrypoint = lib.toJSON [
+              "sglang"
+              "serve"
+            ];
+            settings = model: {
+              model-path = model.model;
+              served-model-name = model.name;
+              host = "0.0.0.0";
+              port = workerPort;
+            };
+          }
+          // lib.listToAttrs (lib.optional cfg.gateway.enable mkGatewayContainer);
       }
     ]
   );

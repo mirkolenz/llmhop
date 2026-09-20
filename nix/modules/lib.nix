@@ -95,7 +95,7 @@ let
       paths = map (name: "${directory}/${name}") names;
       resolve =
         value:
-        if builtins.isString value then
+        if lib.isString value then
           let
             resolved = lib.replaceStrings references paths value;
           in
@@ -103,9 +103,9 @@ let
             throw "unknown credential reference in `${value}`"
           else
             resolved
-        else if builtins.isList value then
+        else if lib.isList value then
           map resolve value
-        else if builtins.isAttrs value && !lib.isDerivation value then
+        else if lib.isAttrs value && !lib.isDerivation value then
           lib.mapAttrs (_: resolve) value
         else
           value;
@@ -153,7 +153,7 @@ let
   );
 
   # Strings, paths and derivations render verbatim, everything else through JSON.
-  cliValue = value: if lib.isStringLike value then toString value else builtins.toJSON value;
+  cliValue = value: if lib.isStringLike value then toString value else lib.toJSON value;
 
   # One-sentence dialect summary appended to every `settings` description.
   settingsRendering =

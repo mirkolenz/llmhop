@@ -80,7 +80,7 @@ let
     };
   };
 in
-builtins.seq (lib.debug.throwTestFailures {
+lib.seq (lib.debug.throwTestFailures {
   inherit failures;
   description = "CLI rendering tests";
 }) emptyFile

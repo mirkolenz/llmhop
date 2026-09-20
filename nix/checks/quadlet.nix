@@ -11,11 +11,11 @@ let
   detectorScript = pkgs.writeText "watermark_detection_server.py" "";
   serverConfig = pkgs.writeText "server.yaml" "api-key: secret";
   tlsKey = pkgs.writeText "tls-key" "encrypted-placeholder";
-  # Not `lib.hasInfix`: it compiles the needle into a regex, and `builtins.match`
+  # Not `lib.hasInfix`: it compiles the needle into a regex, and `lib.match`
   # rejects patterns carrying store-path context. Literal replacement has no
   # such restriction, so store paths can be matched directly.
   containsAll =
-    values: string: lib.all (value: builtins.replaceStrings [ value ] [ "" ] string != string) values;
+    values: string: lib.all (value: lib.replaceStrings [ value ] [ "" ] string != string) values;
 
   mkSystem =
     llmhopConfig:
@@ -162,7 +162,7 @@ let
   failures = lib.runTests {
     testUnknownCredentialReference = {
       expr =
-        (builtins.tryEval (llmhopLib.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"))
+        (lib.tryEval (llmhopLib.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"))
         .success;
       expected = false;
     };
@@ -359,7 +359,7 @@ let
     touch $out
   '';
 in
-builtins.seq (lib.debug.throwTestFailures {
+lib.seq (lib.debug.throwTestFailures {
   inherit failures;
   description = "Quadlet module tests";
 }) result

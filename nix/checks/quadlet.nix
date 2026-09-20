@@ -8,6 +8,7 @@
 let
   llmhopLib = import ../modules/lib.nix lib;
   apiKeys = pkgs.writeText "api-keys" "secret";
+  detectorScript = pkgs.writeText "watermark_detection_server.py" "";
   serverConfig = pkgs.writeText "server.yaml" "api-key: secret";
   tlsKey = pkgs.writeText "tls-key" "encrypted-placeholder";
   # Not `lib.hasInfix`: it compiles the needle into a regex, and `builtins.match`
@@ -75,6 +76,12 @@ let
       };
       quadlet.containerConfig.User = "1000";
       quadlet.credentialMountOptions = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+    };
+    detectors.watermark = {
+      tokenizer = "example/test";
+      port = 18002;
+      script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
+      settings.key = 42;
     };
   };
 
@@ -144,15 +151,23 @@ let
         };
         serviceConfig.LoadCredential = [ "manual:/run/manual" ];
       };
+      detectors.watermark = {
+        tokenizer = "example/test";
+        port = 21002;
+        script = detectorScript;
+        settings.key = 42;
+      };
     };
   };
 
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
+  rootfulDetector = rootful.virtualisation.quadlet.containers.vllm-detector-watermark;
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
-  llamaCppWorker = llamaCpp.virtualisation.quadlet.containers.llama-cpp-test;
   sglangGateway = sglang.virtualisation.quadlet.containers.sglang-gateway;
   sglangWorker = sglang.virtualisation.quadlet.containers.sglang-test;
+  llamaCppWorker = llamaCpp.virtualisation.quadlet.containers.llama-cpp-test;
   nativeVllmWorker = nativeVllm.systemd.services.vllm-test;
+  nativeVllmDetector = nativeVllm.systemd.services.vllm-detector-watermark;
 
   failures = lib.runTests {
     testUnknownCredentialReference = {
@@ -204,6 +219,23 @@ let
         "--ssl-keyfile=/run/llmhop/credentials/tlsKey"
       ] rootfulWorker.containerConfig.Exec;
       expected = true;
+    };
+
+    testDetector = {
+      expr = {
+        arguments = containsAll [
+          "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py"
+          "--key=42"
+          "--tokenizer=example/test"
+        ] rootfulDetector.containerConfig.Exec;
+        port = rootfulDetector.containerConfig.PublishPort;
+        registered = rootful.services.llmhop.portsRegistry."vllm-quadlet.detectors.watermark";
+      };
+      expected = {
+        arguments = true;
+        port = [ "127.0.0.1:18002:8000" ];
+        registered = 18002;
+      };
     };
 
     testRootlessScope = {
@@ -312,6 +344,22 @@ let
       };
     };
 
+    testNativeDetector = {
+      expr = {
+        command = containsAll [
+          "${detectorScript}"
+          "-health-path"
+          "/openapi.json"
+          "--key"
+          "42"
+        ] nativeVllmDetector.serviceConfig.ExecStart;
+        registered = nativeVllm.services.llmhop.portsRegistry."vllm.detectors.watermark";
+      };
+      expected = {
+        command = true;
+        registered = 21002;
+      };
+    };
   };
 
   units = pkgs.symlinkJoin {
@@ -324,6 +372,7 @@ let
 
   result = pkgs.runCommand "llmhop-quadlet-tests" { } ''
     test -e ${units}/lib/systemd/system/vllm-test.service
+    test -e ${units}/lib/systemd/system/vllm-detector-watermark.service
     test -e ${units}/lib/systemd/user/vllm-test.service
     test -e ${units}/lib/systemd/system/llama-cpp-test.service
     touch $out

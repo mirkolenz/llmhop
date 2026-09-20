@@ -450,6 +450,77 @@ let
       credentials = credentialsOption;
     };
 
+  vllmDetectorOptions = name: {
+    enable = mkEnableOption "watermark detector ${name}" // {
+      default = true;
+    };
+    name = mkOption {
+      type = modelLabel;
+      default = name;
+      description = "Name used for the `vllm-detector-<name>` systemd unit.";
+    };
+    tokenizer = mkOption {
+      type = types.str;
+      example = "Qwen/Qwen3-8B";
+      description = ''
+        Tokenizer used to encode candidate text. It must exactly match the
+        tokenizer used for watermarked generation.
+      '';
+    };
+    port = mkOption {
+      type = types.port;
+      description = "Loopback port on which the upstream detector serves `/detect`.";
+    };
+    settings = mkOption {
+      type = with types; attrsOf anything;
+      default = { };
+      example = {
+        key = 42;
+        context-width = 4;
+      };
+      description = ''
+        Arguments passed to vLLM's upstream watermark detector server.
+        Its current interface supports `key`, `prf`, `context-width`, and
+        `p-value-threshold`.
+        ${settingsRendering "vllm"}
+      '';
+    };
+    environment = mkOption {
+      type = with types; attrsOf str;
+      default = { };
+      description = "Additional environment variables for this detector.";
+    };
+    environmentFile = mkOption {
+      type = with types; nullOr path;
+      default = null;
+      description = "Additional environment file for this detector.";
+    };
+    credentials = credentialsOption;
+  };
+
+  vllmDetectorUnit = detector: "vllm-detector-${detector.name}";
+
+  # Base CLI settings every detector shares; `host` differs because the
+  # container publishes its port instead of binding loopback directly.
+  vllmDetectorSettings =
+    host: port: detector:
+    {
+      inherit (detector) tokenizer;
+      inherit host port;
+    }
+    // detector.settings;
+
+  # Registry entries folded into `mkConfig` so detector ports and unit names
+  # take part in the global uniqueness checks alongside models.
+  vllmDetectorRegistry = detectors: {
+    extras = lib.mapAttrs' (
+      name: detector: lib.nameValuePair "detectors.${name}" detector.port
+    ) detectors;
+    extraUnits = lib.mapAttrs' (
+      name: detector: lib.nameValuePair "detectors.${name}" (vllmDetectorUnit detector)
+    ) detectors;
+  };
+
   # Defaults applied to every worker, scoped by the systemd unit-file section
   # they belong to. Worker helpers merge these into the corresponding *Config
   # attribute before layering caller overrides on top.
@@ -763,6 +834,10 @@ in
     resolveCredentialRefs
     settingsRendering
     systemdCredentialDirectory
+    vllmDetectorOptions
+    vllmDetectorRegistry
+    vllmDetectorSettings
+    vllmDetectorUnit
     ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
@@ -1390,9 +1465,9 @@ in
       #
       # `workload` is anything carrying `name`, `port`, `environment`,
       # `environmentFile`, `credentials`, `serviceConfig` and `unitConfig`, so
-      # model workers and whatever auxiliary services a backend adds share one
-      # body. `mkUvWorker` extends this with the GPU access and startup-chain
-      # specifics a model worker additionally needs.
+      # model workers and auxiliary services (watermark detectors, and whatever
+      # a backend adds next) share one body. `mkUvWorker` extends this with the
+      # GPU access and startup-chain specifics a model worker additionally needs.
       #
       # Expects `cfg` to carry `openFilesLimit`, `user`, `group`, `environment`
       # and `environmentFile`. Returns a `nameValuePair`.

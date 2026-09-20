@@ -10,14 +10,22 @@ let
   llmhopLib = import ../lib.nix lib;
   inherit (llmhopLib)
     credentialDirectory
+    enabled
     renderCliArgsShell
     resolveCredentialRefs
     sortedModels
+    vllmDetectorOptions
+    vllmDetectorRegistry
+    vllmDetectorSettings
+    vllmDetectorUnit
     ;
   inherit (llmhopLib.quadlet)
     mkConfig
     mkContainerArgs
+    mkContainerRuntime
+    mkImageArgs
     mkModelSubmodule
+    mkObjectOptions
     mkOptions
     mkStartupOrdering
     mkWorker
@@ -30,6 +38,38 @@ let
 
   # Sort by port so the After= chain is deterministic across rebuilds.
   models = sortedModels cfg;
+
+  detectors = enabled cfg.detectors;
+  detectorPort = 8000;
+
+  mkDetectorContainer =
+    detector:
+    let
+      settings = vllmDetectorSettings "0.0.0.0" detectorPort detector;
+    in
+    lib.nameValuePair (vllmDetectorUnit detector) (mkWorker {
+      inherit cfg;
+      inherit (detector) credentials;
+      overrides = detector.quadlet;
+      healthPort = detectorPort;
+      healthPath = "/openapi.json";
+      containerConfig =
+        mkContainerRuntime cfg detector
+        // mkImageArgs {
+          inherit (cfg) image;
+          defaultTag = cfg.tag;
+          workload = detector;
+          label = "services.llmhop.vllm-quadlet.detectors.${detector.name}";
+        }
+        // {
+          PublishPort = [ "127.0.0.1:${toString detector.port}:${toString detectorPort}" ];
+          Entrypoint = lib.toJSON [ "python" ];
+          Exec = "${lib.escapeShellArg detector.script} ${
+            renderArgs (resolveCredentialRefs credentialDirectory detector.credentials settings)
+          }";
+        };
+      serviceConfig.Restart = "on-failure";
+    });
 
   mkContainer =
     index: model:
@@ -119,16 +159,54 @@ in
           Enabled entries are sorted by ascending `port`.
         '';
       };
+
+      detectors = lib.mkOption {
+        type = lib.types.attrsOf (
+          lib.types.submodule (
+            { name, ... }:
+            {
+              options = vllmDetectorOptions name // {
+                script = lib.mkOption {
+                  type = lib.types.str;
+                  example = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
+                  description = ''
+                    Path inside the selected image to vLLM's upstream
+                    `watermark_detection_server.py`.
+                  '';
+                };
+                tag = lib.mkOption {
+                  type = with lib.types; nullOr str;
+                  default = null;
+                  description = "Container image tag for this detector.";
+                };
+                digest = lib.mkOption {
+                  type = with lib.types; nullOr str;
+                  default = null;
+                  description = "Immutable container image digest for this detector.";
+                };
+                quadlet = mkObjectOptions { description = "this detector container"; };
+              };
+            }
+          )
+        );
+        default = { };
+        description = "Standalone watermark detection containers.";
+      };
     };
 
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
-      (mkConfig {
-        backend = "vllm-quadlet";
-        inherit cfg config pkgs;
-      })
+      (mkConfig (
+        {
+          backend = "vllm-quadlet";
+          inherit cfg config pkgs;
+        }
+        // vllmDetectorRegistry detectors
+      ))
       {
-        virtualisation.quadlet.containers = lib.listToAttrs (lib.imap0 mkContainer models);
+        virtualisation.quadlet.containers = lib.listToAttrs (
+          (lib.imap0 mkContainer models) ++ map mkDetectorContainer (lib.attrValues detectors)
+        );
       }
     ]
   );

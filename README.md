@@ -538,6 +538,69 @@ services.llmhop.sglang.models.test.settings.api-key = "development-only";
 
 Such values enter the world-readable Nix store and should not be used for production secrets.
 
+### vLLM watermark detection
+
+Recent vLLM revisions include watermark generation and detector primitives, but the OpenAI server does not expose the detector as an endpoint.
+Both vLLM modules can run the upstream example server as a named detector service next to their model workers.
+The script is explicit so its revision stays under the deployer's control.
+
+For a native service, pin the vLLM source beside the uv workspace and pass the upstream script path:
+
+```nix
+services.llmhop.vllm = {
+  detectors.production = {
+    script = inputs.vllm-src + "/examples/basic/online_serving/watermark_detection_server.py";
+    tokenizer = "Qwen/Qwen3-8B";
+    port = 18100;
+    settings = {
+      key = 123456789;
+      context-width = 4;
+      p-value-threshold = 0.01;
+    };
+  };
+};
+```
+
+`mkUvEnv` supplies Python, vLLM, and the server dependencies, but it cannot supply this script automatically.
+The vLLM wheel intentionally contains only the `vllm` packages and excludes `examples/`.
+Pin `inputs.vllm-src` to the same release or revision selected by the uv workspace.
+
+The official vLLM image includes the examples under `/vllm-workspace`, so the Quadlet declaration names that image path explicitly:
+
+```nix
+services.llmhop.vllm-quadlet = {
+  tag = "latest";
+  detectors.production = {
+    script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
+    tokenizer = "Qwen/Qwen3-8B";
+    port = 18100;
+    settings.key = 123456789;
+  };
+};
+```
+
+The tokenizer, key, context width, and PRF must match the generation configuration.
+Only arguments supported by the selected upstream script may be placed in `settings`.
+
+Each detector is a separate `vllm-detector-<name>` service with the upstream `POST /detect` endpoint.
+Readiness uses FastAPI's `/openapi.json` endpoint.
+
+```json
+{"text":"candidate text"}
+```
+
+The response contains `score`, `p_value`, `num_scored_tokens`, and `is_watermarked`.
+Detectors are registered for host port collision checking, but are not exposed as llmhop inference models.
+They do not receive a GPU device in Quadlet mode.
+They bind only to host loopback.
+
+The upstream example currently has no authentication, config file, or key-file option.
+Its `--key` value therefore enters the Nix store and process arguments, so this integration is not suitable for a secret production watermark key until upstream adds a file-based option.
+llmhop does not wrap or patch the script to hide that limitation.
+
+The selected script and package or image must come from a vLLM revision containing `vllm.v1.watermarking`.
+SGLang and llama.cpp workers can coexist with the detector, but they only produce detectable text if they implement the same watermark generation algorithm and parameters.
+
 ### Secrets
 
 The generated config file lives in the world-readable Nix store, so secrets should never be placed in `services.llmhop.settings` directly.

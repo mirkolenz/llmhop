@@ -17,12 +17,13 @@ import (
 
 func main() {
 	port := flag.Int("port", 0, "loopback port the supervised server listens on")
+	healthPath := flag.String("health-path", "/health", "HTTP path used for readiness checks")
 	flag.Parse()
 
 	argv := flag.Args()
 
 	if *port == 0 || len(argv) == 0 {
-		log.Fatal("usage: llmhop-notify -port <port> -- <command> [args...]")
+		log.Fatal("usage: llmhop-notify -port <port> [-health-path <path>] -- <command> [args...]")
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -33,7 +34,7 @@ func main() {
 	}
 
 	go func() {
-		if err := systemd.ReadyWhenHealthy("http://127.0.0.1:"+strconv.Itoa(*port)+"/health", time.Second); err != nil {
+		if err := systemd.ReadyWhenHealthy("http://127.0.0.1:"+strconv.Itoa(*port)+*healthPath, time.Second); err != nil {
 			log.Fatalf("readiness: %v", err)
 		}
 	}()

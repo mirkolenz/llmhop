@@ -10,7 +10,9 @@
 }:
 {
   workspaceRoot,
-  python ? pkgs.python3,
+  # Defaults to the lowest interpreter the lock's `requires-python` allows, the
+  # same one uv resolves against, so the version is stated once.
+  python ? null,
   sourcePreference ? "wheel",
   # Globs of unresolved `DT_NEEDED` entries that do not fail the build. Most of
   # them are unresolvable on purpose (the host driver, sibling wheels that only
@@ -38,6 +40,28 @@
 }:
 let
   uvLock = lib.importTOML (workspaceRoot + "/uv.lock");
+
+  pep440 = pyproject-nix.lib.pep440;
+
+  allowedByLock = pyproject-nix.lib.util.filterPythonInterpreters {
+    requires-python = pep440.parseVersionConds uvLock.requires-python;
+    inherit (pkgs) pythonInterpreters;
+  };
+
+  olderFirst =
+    a: b:
+    pep440.compareVersions (pep440.parseVersion a.pythonVersion) (pep440.parseVersion b.pythonVersion)
+    < 0;
+
+  # uv resolves against the lowest interpreter the lock admits, so building
+  # against any other one would test something the lock never solved for.
+  interpreter =
+    if python != null then
+      python
+    else
+      lib.throwIf (allowedByLock == [ ])
+        "mkUvEnv: nixpkgs has no CPython satisfying `requires-python = \"${uvLock.requires-python}\"`; pass `python` explicitly."
+        (lib.head (lib.sort olderFirst allowedByLock));
 
   workspace = uv2nix.lib.workspace.loadWorkspace { inherit workspaceRoot uvLock; };
 
@@ -67,16 +91,18 @@ let
       })
     );
 
-  pythonSet = (pkgs.callPackage pyproject-nix.build.packages { inherit python; }).overrideScope (
-    lib.composeManyExtensions (
-      [
-        pyproject-build-systems.overlays.wheel
-        projectOverlay
-      ]
-      ++ lib.optional pkgs.stdenv.hostPlatform.isElf wheelOverlay
-      ++ overlays
-    )
-  );
+  pythonSet =
+    (pkgs.callPackage pyproject-nix.build.packages { python = interpreter; }).overrideScope
+      (
+        lib.composeManyExtensions (
+          [
+            pyproject-build-systems.overlays.wheel
+            projectOverlay
+          ]
+          ++ lib.optional pkgs.stdenv.hostPlatform.isElf wheelOverlay
+          ++ overlays
+        )
+      );
 
   # Pinned by version rather than by name alone, so a lock that forks a package
   # across versions yields the entry the environment actually installs.
@@ -102,5 +128,6 @@ in
     inherit venvIgnoreCollisions;
     passthru = (old.passthru or { }) // {
       inherit sdists;
+      python = interpreter;
     };
   })

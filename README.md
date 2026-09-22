@@ -388,6 +388,9 @@ services.llmhop.vllm = {
 };
 ```
 
+The interpreter follows from `requires-python`: `mkUvEnv` builds against the lowest one the lock admits, which is what uv resolved against, so nothing names a Python version twice.
+Pass `python` to override that, and read the choice back from `passthru.python`.
+
 `mkUvEnv` installs the wheels, so no GPU or C++ toolchain runs at build time, and patches them for NixOS by baking the GPU driver runpath into the closure.
 The driver itself is host state, so enable `hardware.graphics` and your vendor configuration (`hardware.nvidia`, the `amdgpu` kernel driver, ...) as usual.
 `services.llmhop.sglang` works identically, launched via `python -m sglang.launch_server`.

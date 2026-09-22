@@ -132,15 +132,8 @@ testers.nixosTest {
     with subtest("unknown model is rejected after auth"):
         machine.fail(curl({"model": "unknown"}, token="client-secret"))
 
+    # Credential wiring is an evaluation-time property, asserted in `eval`.
     with subtest("a loading model holds its unit in activating"):
-        load_credential = machine.succeed(
-            "systemctl show llama-cpp-fake-model -p LoadCredential --value"
-        )
-        assert "apiKeys:" in load_credential, load_credential
-        exec_start = machine.succeed(
-            "systemctl show llama-cpp-fake-model -p ExecStart --value"
-        )
-        assert "/run/credentials/llama-cpp-fake-model.service/apiKeys" in exec_start, exec_start
         machine.succeed("systemctl start --no-block llama-cpp-fake-model")
         state = machine.get_unit_info("llama-cpp-fake-model")["ActiveState"]
         assert state == "activating", f"unexpected state: {state}"

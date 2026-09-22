@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.1.0](https://github.com/mirkolenz/llmhop/compare/v2.0.3...v2.1.0) (2026-09-22)
+
+### Features
+
+* address systemd credentials by name ([a750301](https://github.com/mirkolenz/llmhop/commit/a750301aedddc4ebd3de53a97a0cab9225d41232))
+* hide unlisted backends from the model catalog ([086673a](https://github.com/mirkolenz/llmhop/commit/086673ae054b354d62646f5680995cc9e945f56c))
+* **nix:** add mkCudaHome for runtime jit compilers ([aa6f185](https://github.com/mirkolenz/llmhop/commit/aa6f18534dc4d9b9bc5ee4e3f9516e8e3721a30e))
+* **nix:** derive cuda package set from uv.lock ([a9de83c](https://github.com/mirkolenz/llmhop/commit/a9de83c0b298f194d3d454b282e7180f7b2a0c92))
+* **nixos:** add llama.cpp quadlet backend ([1f1fa46](https://github.com/mirkolenz/llmhop/commit/1f1fa46d7fbc148f790c99ad09a879960cedf5ef))
+* **nixos:** default the watermark detector script to locked vllm sdist ([60a410d](https://github.com/mirkolenz/llmhop/commit/60a410d65c86f5f96030ed6b296a727ecf77b473))
+* **nixos:** fail build on unresolved shared libraries ([66ccd29](https://github.com/mirkolenz/llmhop/commit/66ccd29420431809169fa0f5ef91f45dc26b3f7b))
+* **nixos:** route watermark detectors through llmhop ([8f65a0c](https://github.com/mirkolenz/llmhop/commit/8f65a0c523fd497e79b48b04da78a43f2cca7026))
+* **nixos:** select python interpreter from uv.lock ([e82353f](https://github.com/mirkolenz/llmhop/commit/e82353f72dd3190064611be4310b960b048a706f))
+* **nixos:** serve vllm watermark detectors ([e3090a2](https://github.com/mirkolenz/llmhop/commit/e3090a21578fd0845df4acc77857fd221edd6a36))
+* **nixos:** support rootful and configurable quadlets ([7db4526](https://github.com/mirkolenz/llmhop/commit/7db4526906390b665805a64bf8719b16b1278887))
+* **notify:** allow configuring readiness path ([0283f48](https://github.com/mirkolenz/llmhop/commit/0283f48ed57190868622272ad2931e183939b73a))
+
+### Bug Fixes
+
+* **nixos:** give module-managed flags precedence over settings ([4084801](https://github.com/mirkolenz/llmhop/commit/40848013a655a2326302df4b65aad365a9dbcb93))
+* **nixos:** key llmhop models by their routing name ([3d101bc](https://github.com/mirkolenz/llmhop/commit/3d101bc6f89f3f9d7a4825a0466d2ca94f9c5055))
+* **nixos:** reject native backend and its quadlet twin ([7b7c0a9](https://github.com/mirkolenz/llmhop/commit/7b7c0a93ef68a43f73a3b0d2c54850f27f640a5a))
+* **nixos:** require key for watermark detectors ([cf33a8e](https://github.com/mirkolenz/llmhop/commit/cf33a8e225b452d7711b12aa2ca272ea16be1add))
+* **nixos:** validate systemd credential names ([f605f53](https://github.com/mirkolenz/llmhop/commit/f605f5366f5b060a1c2d8a00ca661ae24eaee7fb))
+
 ## [2.0.3](https://github.com/mirkolenz/llmhop/compare/v2.0.2...v2.0.3) (2026-08-31)
 
 ### Bug Fixes

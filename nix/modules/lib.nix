@@ -633,13 +633,14 @@ let
   workerUrl = port: "http://127.0.0.1:${toString port}";
 
   # Cross-cutting NixOS fragment every backend emits: its llmhop models and its
-  # contributions to the registries `core.nix` asserts on. Registry keys are the
-  # owning option path, so a collision names what to change.
+  # contributions to the three registries `core.nix` asserts on. Registry keys
+  # are the owning option path, so a collision names what to change.
   #
   # `auxiliaries` covers everything a backend runs that is not a model, as
-  # `{ <label> = { port, unit ? null }; }`. One entry per service rather than
-  # one map per registry, so a label cannot go missing from a dimension it
-  # belongs to.
+  # `{ <label> = { port, unit ? null, model ? null }; }`. One entry per service
+  # rather than one map per registry, so a label cannot go missing from a
+  # dimension it belongs to. `model` is the llmhop routing key, registered
+  # `unlisted` so the service shares llmhop's auth but stays out of the catalog.
   mkSharedConfig =
     {
       backend,
@@ -656,14 +657,24 @@ let
         // lib.mapAttrs' (label: aux: lib.nameValuePair "${backend}.${label}" (auxValue aux)) (
           lib.filterAttrs (_: aux: auxValue aux != null) auxiliaries
         );
+      routed = lib.filterAttrs (_: aux: aux.model or null != null) auxiliaries;
     in
     {
       services.llmhop = {
         # Keyed by `name`, not the attribute: that is what the worker advertises
         # and what clients send, and the two differ when `name` is set.
-        settings.models = lib.mapAttrs' (_: m: lib.nameValuePair m.name { url = workerUrl m.port; }) models;
+        settings.models =
+          lib.mapAttrs' (_: m: lib.nameValuePair m.name { url = workerUrl m.port; }) models
+          // lib.mapAttrs' (
+            _: aux:
+            lib.nameValuePair aux.model {
+              url = workerUrl aux.port;
+              unlisted = true;
+            }
+          ) routed;
         portsRegistry = mkRegistry (m: m.port) (aux: aux.port);
         unitsRegistry = mkRegistry (m: "${serviceName}-${m.name}") (aux: aux.unit or null);
+        modelsRegistry = mkRegistry (m: m.name) (aux: aux.model or null);
       };
     };
 

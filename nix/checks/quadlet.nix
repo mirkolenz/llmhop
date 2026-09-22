@@ -178,6 +178,24 @@ let
     };
   };
 
+  # Both would land on the same `settings.models` entry and misroute silently.
+  collidingRoutingKey = mkSystem {
+    vllm-quadlet = {
+      enable = true;
+      tag = "latest";
+      models.shared = {
+        model = "example/test";
+        port = 23001;
+      };
+      detectors.shared = {
+        tokenizer = "example/test";
+        port = 23002;
+        script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
+        settings.key = 42;
+      };
+    };
+  };
+
   # Without `--key` the script dies at startup, so evaluation must reject it.
   detectorWithoutKey = mkConfig {
     detectors.watermark = {
@@ -258,11 +276,20 @@ let
         ] rootfulDetector.containerConfig.Exec;
         port = rootfulDetector.containerConfig.PublishPort;
         registered = rootful.services.llmhop.portsRegistry."vllm-quadlet.detectors.watermark";
+        # Reachable through llmhop, so it shares the proxy's auth tokens, but
+        # kept out of the OpenAI catalog: it serves `/detect`, not completions.
+        routed = rootful.services.llmhop.settings.models.watermark;
+        routingKey = rootful.services.llmhop.modelsRegistry."vllm-quadlet.detectors.watermark";
       };
       expected = {
         arguments = true;
         port = [ "127.0.0.1:18002:8000" ];
         registered = 18002;
+        routed = {
+          url = "http://127.0.0.1:18002";
+          unlisted = true;
+        };
+        routingKey = "watermark";
       };
     };
 
@@ -368,6 +395,11 @@ let
       expected = false;
     };
 
+    testRoutingKeyCollision = {
+      expr = lib.any (assertion: !assertion.assertion) collidingRoutingKey.assertions;
+      expected = true;
+    };
+
     testInvalidCredentialName = {
       expr =
         (lib.tryEval (
@@ -388,6 +420,7 @@ let
         # `settings.host` must not displace the managed loopback address.
         exposed = containsAll [ "0.0.0.0" ] nativeVllmDetector.serviceConfig.ExecStart;
         registered = nativeVllm.services.llmhop.portsRegistry."vllm.detectors.watermark";
+        routed = nativeVllm.services.llmhop.settings.models.watermark;
         # An auxiliary service, so no GPU access and no state directory, and a
         # plain `on-failure` rather than the worker's `always`.
         restart = nativeVllmDetector.serviceConfig.Restart;
@@ -398,6 +431,10 @@ let
         command = true;
         exposed = false;
         registered = 21002;
+        routed = {
+          url = "http://127.0.0.1:21002";
+          unlisted = true;
+        };
         restart = "on-failure";
         state = false;
         devices = null;

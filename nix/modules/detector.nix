@@ -51,7 +51,12 @@ let
     name = mkOption {
       type = modelLabel;
       default = name;
-      description = "Name used for the `vllm-detector-<name>` systemd unit.";
+      description = ''
+        Canonical identifier for this detector. Used for the
+        `vllm-detector-<name>` systemd unit and as the routing key clients send
+        in the `model` field to reach `POST /detect`. Shares one namespace with
+        every backend's model names, so a collision fails evaluation.
+      '';
     };
     tokenizer = mkOption {
       type = types.str;
@@ -101,13 +106,15 @@ in
 {
   inherit unitName;
 
-  # Folded into `mkConfig`, so each detector joins the global uniqueness checks.
+  # Folded into `mkConfig`, so each detector joins the global uniqueness checks
+  # and llmhop reverse-proxies `/detect` to it.
   registry = detectors: {
     auxiliaries = lib.mapAttrs' (
       name: d:
       lib.nameValuePair "detectors.${name}" {
         inherit (d) port;
         unit = unitName d;
+        model = d.name;
       }
     ) detectors;
   };

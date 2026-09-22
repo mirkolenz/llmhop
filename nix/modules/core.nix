@@ -117,6 +117,20 @@ in
       '';
     };
 
+    modelsRegistry = lib.mkOption {
+      type = with lib.types; attrsOf str;
+      default = { };
+      internal = true;
+      description = ''
+        Internal registry of llmhop routing keys claimed by models and by the
+        auxiliaries routed through llmhop, keyed like `portsRegistry`. Two
+        owners of one key would collapse into a single `settings.models` entry
+        and misroute silently, so the global uniqueness assertion rejects it
+        and names both owners. Written by `lib.nix:mkSharedConfig`; do not set
+        directly.
+      '';
+    };
+
     unitsRegistry = lib.mkOption {
       type = with lib.types; attrsOf str;
       default = { };
@@ -142,6 +156,10 @@ in
         (mkRegistryAssertion {
           registry = cfg.unitsRegistry;
           resource = "systemd unit";
+        })
+        (mkRegistryAssertion {
+          registry = cfg.modelsRegistry;
+          resource = "llmhop routing key";
         })
       ];
     }

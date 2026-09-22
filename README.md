@@ -607,21 +607,35 @@ services.llmhop.vllm-quadlet = {
 ```
 
 The tokenizer, key, context width, and PRF must match the generation configuration.
+`key`, `prf` and `context-width` therefore sit in `settings`, next to the generation-side flags they have to agree with, and `key` is required.
+`tokenizer`, `host` and `port` are options of their own, since llmhop owns the last two.
 Only arguments supported by the selected upstream script may be placed in `settings`.
 
-Each detector is a separate `vllm-detector-<name>` service with the upstream `POST /detect` endpoint.
+Each detector is a separate `vllm-detector-<name>` service serving the upstream `POST /detect` endpoint.
 Readiness uses FastAPI's `/openapi.json` endpoint.
+They do not receive a GPU device in Quadlet mode.
 
-```json
-{"text":"candidate text"}
+#### Routing detectors through llmhop
+
+Like the model workers, a detector binds only to host loopback and is registered with llmhop, so clients reach it at llmhop's own address under llmhop's bearer tokens rather than on a second, unauthenticated port.
+The attribute name is the routing key, so it shares one namespace with every backend's model names and a collision fails evaluation.
+
+Detectors are registered `unlisted`, so they never appear in `GET /v1/models`.
+Select one the same way a model is selected, by naming it in the request body:
+
+```sh
+curl https://llmhop.example.com/detect \
+  -H "Authorization: Bearer $LLMHOP_TOKEN" \
+  -d '{"model":"production","text":"candidate text"}'
 ```
 
 The response contains `score`, `p_value`, `num_scored_tokens`, and `is_watermarked`.
-Detectors are registered for host port collision checking, but are not exposed as llmhop inference models.
-They do not receive a GPU device in Quadlet mode.
-They bind only to host loopback.
+The extra `model` key is ignored by the upstream request model, which is a plain pydantic `BaseModel`.
 
-The upstream example currently has no authentication, config file, or key-file option.
+This puts llmhop's authentication in front of a script that has none of its own.
+The detector itself is still unauthenticated on its loopback port, exactly like every model worker, so anything else on the host can reach it directly.
+
+The upstream example also has no config file or key-file option.
 Its `--key` value therefore enters the Nix store and process arguments, so this integration is not suitable for a secret production watermark key until upstream adds a file-based option.
 llmhop does not wrap or patch the script to hide that limitation.
 

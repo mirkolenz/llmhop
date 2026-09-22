@@ -3,7 +3,7 @@
 # multi-value flags, which is exactly what is easy to break unnoticed.
 {
   lib,
-  emptyFile,
+  mkEvalCheck,
 }:
 let
   inherit (import ../modules/lib.nix lib) renderCliArgs renderCliArgsShell;
@@ -24,7 +24,10 @@ let
     };
   };
 
-  failures = lib.runTests {
+in
+mkEvalCheck {
+  description = "CLI rendering tests";
+  tests = {
     # Values-style parser: one flag for the whole list, `false` negated via
     # `--no-`, floats and attribute sets kept exact, `null` and `[ ]` dropped.
     testValuesDialect = {
@@ -79,8 +82,4 @@ let
       expected = "'--port=30000' --worker-urls http://a http://b";
     };
   };
-in
-lib.seq (lib.debug.throwTestFailures {
-  inherit failures;
-  description = "CLI rendering tests";
-}) emptyFile
+}

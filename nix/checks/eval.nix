@@ -1,5 +1,6 @@
 {
   lib,
+  mkEvalCheck,
   nixosSystem,
   pkgs,
   self,
@@ -16,6 +17,29 @@ let
   # such restriction, so store paths can be matched directly.
   containsAll =
     values: string: lib.all (value: lib.replaceStrings [ value ] [ "" ] string != string) values;
+
+  # Evaluation is what rejects a misconfiguration, so these two say what the
+  # tests are really asking: whether it got through.
+  evaluates = expr: (lib.tryEval (lib.deepSeq expr null)).success;
+
+  accepts = system: lib.all (assertion: assertion.assertion) system.assertions;
+
+  # Both backends render the same credentials through the same helpers, so they
+  # are stated once and asserted on twice.
+  credentialed = {
+    credentials = {
+      inherit apiKeys serverConfig;
+      tlsKey = {
+        source = tlsKey;
+        encrypted = true;
+      };
+    };
+    settings = {
+      config = "\${cred:serverConfig}";
+      api-key-file = "\${cred:apiKeys}";
+      ssl-keyfile = "\${cred:tlsKey}";
+    };
+  };
 
   mkSystem =
     llmhopConfig:
@@ -61,19 +85,7 @@ let
       unitConfig.StartLimitBurst = 7;
       quadletConfig.DefaultDependencies = false;
     };
-    models.test = {
-      credentials = {
-        inherit apiKeys serverConfig;
-        tlsKey = {
-          source = tlsKey;
-          encrypted = true;
-        };
-      };
-      settings = {
-        config = "\${cred:serverConfig}";
-        api-key-file = "\${cred:apiKeys}";
-        ssl-keyfile = "\${cred:tlsKey}";
-      };
+    models.test = credentialed // {
       quadlet.containerConfig.User = "1000";
       quadlet.credentialMountOptions = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
     };
@@ -124,21 +136,9 @@ let
       enable = true;
       uid = 504;
       package = pkgs.writeShellScriptBin "vllm" "exit 0";
-      models.test = {
+      models.test = credentialed // {
         model = "example/test";
         port = 21001;
-        credentials = {
-          inherit apiKeys serverConfig;
-          tlsKey = {
-            source = tlsKey;
-            encrypted = true;
-          };
-        };
-        settings = {
-          config = "\${cred:serverConfig}";
-          api-key-file = "\${cred:apiKeys}";
-          ssl-keyfile = "\${cred:tlsKey}";
-        };
         serviceConfig.LoadCredential = [ "manual:/run/manual" ];
       };
       detectors.watermark = {
@@ -212,11 +212,9 @@ let
   nativeVllmWorker = nativeVllm.systemd.services.vllm-test;
   nativeVllmDetector = nativeVllm.systemd.services.vllm-detector-watermark;
 
-  failures = lib.runTests {
+  tests = {
     testUnknownCredentialReference = {
-      expr =
-        (lib.tryEval (llmhopLib.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"))
-        .success;
+      expr = evaluates (llmhopLib.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}");
       expected = false;
     };
 
@@ -380,28 +378,22 @@ let
     };
 
     testTwinBackends = {
-      expr = lib.any (assertion: !assertion.assertion) twins.assertions;
-      expected = true;
+      expr = accepts twins;
+      expected = false;
     };
 
     testDetectorWithoutKey = {
-      expr =
-        (lib.tryEval (
-          lib.deepSeq detectorWithoutKey.virtualisation.quadlet.containers.vllm-detector-watermark.containerConfig.Exec null
-        )).success;
+      expr = evaluates detectorWithoutKey.virtualisation.quadlet.containers.vllm-detector-watermark.containerConfig.Exec;
       expected = false;
     };
 
     testRoutingKeyCollision = {
-      expr = lib.any (assertion: !assertion.assertion) collidingRoutingKey.assertions;
-      expected = true;
+      expr = accepts collidingRoutingKey;
+      expected = false;
     };
 
     testInvalidCredentialName = {
-      expr =
-        (lib.tryEval (
-          lib.deepSeq invalidCredential.virtualisation.quadlet.containers.vllm-test.serviceConfig null
-        )).success;
+      expr = evaluates invalidCredential.virtualisation.quadlet.containers.vllm-test.serviceConfig;
       expected = false;
     };
 
@@ -455,7 +447,8 @@ let
     touch $out
   '';
 in
-lib.seq (lib.debug.throwTestFailures {
-  inherit failures;
+mkEvalCheck {
   description = "Module evaluation tests";
-}) result
+  output = result;
+  inherit tests;
+}

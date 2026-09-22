@@ -27,6 +27,9 @@
       config,
       ...
     }:
+    let
+      mkEvalCheck = pkgs.callPackage ./checks/lib.nix { };
+    in
     {
       treefmt = {
         projectRootFile = "flake.nix";
@@ -39,13 +42,13 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        cli = pkgs.callPackage ./checks/cli.nix { };
+        cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
         inherit (config.packages) docker;
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
         eval = pkgs.callPackage ./checks/eval.nix {
-          inherit self;
+          inherit self mkEvalCheck;
           inherit (inputs.nixpkgs.lib) nixosSystem;
         };
       };

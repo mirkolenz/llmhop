@@ -440,14 +440,14 @@ let
   };
 
   units = pkgs.symlinkJoin {
-    name = "llmhop-quadlet-test-units";
+    name = "llmhop-generated-units";
     paths =
       rootful.virtualisation.quadlet.generatedUnits
       ++ rootless.virtualisation.quadlet.generatedUnits
       ++ llamaCpp.virtualisation.quadlet.generatedUnits;
   };
 
-  result = pkgs.runCommand "llmhop-quadlet-tests" { } ''
+  result = pkgs.runCommand "llmhop-eval-tests" { } ''
     test -e ${units}/lib/systemd/system/vllm-test.service
     test -e ${units}/lib/systemd/system/vllm-detector-watermark.service
     test -e ${units}/lib/systemd/user/vllm-test.service
@@ -457,5 +457,5 @@ let
 in
 lib.seq (lib.debug.throwTestFailures {
   inherit failures;
-  description = "Quadlet module tests";
+  description = "Module evaluation tests";
 }) result

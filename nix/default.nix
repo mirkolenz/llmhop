@@ -43,8 +43,8 @@
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
         inherit (config.packages) docker;
-        module = pkgs.callPackage ./checks/module.nix { inherit self; };
-        quadlet = pkgs.callPackage ./checks/quadlet.nix {
+        vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
+        eval = pkgs.callPackage ./checks/eval.nix {
           inherit self;
           inherit (inputs.nixpkgs.lib) nixosSystem;
         };

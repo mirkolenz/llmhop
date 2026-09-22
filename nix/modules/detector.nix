@@ -41,6 +41,21 @@ let
   # FastAPI's `/openapi.json`.
   healthPath = "/openapi.json";
 
+  scriptPath = "examples/basic/online_serving/watermark_detection_server.py";
+
+  # The wheel ships only the importable `vllm` packages, so the example server
+  # comes out of the sdist that the same uv lock pins, which `mkUvEnv` exposes.
+  # Extracting it here fails the build rather than the unit when the pinned
+  # release predates the watermark detector.
+  defaultNativeScript =
+    pkgs: package:
+    pkgs.runCommand (lib.baseNameOf scriptPath) { } ''
+      tar -xzOf ${
+        package.sdists.vllm
+          or (throw "services.llmhop: `package` was not built by `mkUvEnv`, or its uv lock pins no `vllm` sdist, so the watermark detector script cannot be derived. Set `script` explicitly.")
+      } --wildcards "*/${scriptPath}" > "$out"
+    '';
+
   # Internal port the container binds to; the host port is published onto it.
   containerPort = 8000;
 
@@ -119,53 +134,60 @@ in
     ) detectors;
   };
 
-  nativeOptions =
-    cfg: name:
-    baseOptions name
-    // {
-      script = mkOption {
-        type = types.path;
-        example = lib.literalExpression ''
-          inputs.vllm-src + "/examples/basic/online_serving/watermark_detection_server.py"
-        '';
-        description = ''
-          Path to vLLM's upstream `watermark_detection_server.py`.
-          Pin it to the same revision as the package used by this detector.
-        '';
+  mkNativeSubmodule =
+    { cfg, pkgs }:
+    { name, config, ... }:
+    {
+      options = baseOptions name // {
+        script = mkOption {
+          type = types.path;
+          default = defaultNativeScript pkgs config.package;
+          defaultText = lib.literalMD "`${scriptPath}` from the sdist of the `vllm` release that `package` locks";
+          description = ''
+            Path to vLLM's upstream `watermark_detection_server.py`.
+            It defaults to the copy in the sdist of the `vllm` release pinned by
+            this detector's `package`, so the script and the runtime follow one
+            another from a single `uv lock`.
+            Set it to use a script from elsewhere, such as a vendored or patched
+            one.
+          '';
+        };
+        package = mkOption {
+          type = types.package;
+          default = cfg.package;
+          defaultText = lib.literalExpression "config.services.llmhop.vllm.package";
+          description = "vLLM Python environment used by this detector.";
+        };
+        serviceConfig = serviceConfigOption { serviceName = "vllm-detector"; };
+        unitConfig = unitConfigOption { serviceName = "vllm-detector"; };
       };
-      package = mkOption {
-        type = types.package;
-        default = cfg.package;
-        defaultText = lib.literalExpression "config.services.llmhop.vllm.package";
-        description = "vLLM Python environment used by this detector.";
-      };
-      serviceConfig = serviceConfigOption { serviceName = "vllm-detector"; };
-      unitConfig = unitConfigOption { serviceName = "vllm-detector"; };
     };
 
-  quadletOptions =
-    name:
-    baseOptions name
-    // {
-      script = mkOption {
-        type = types.str;
-        example = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
-        description = ''
-          Path inside the selected image to vLLM's upstream
-          `watermark_detection_server.py`.
-        '';
+  mkQuadletSubmodule =
+    { name, ... }:
+    {
+      options = baseOptions name // {
+        script = mkOption {
+          type = types.str;
+          default = "/vllm-workspace/${scriptPath}";
+          description = ''
+            Path inside the selected image to vLLM's upstream
+            `watermark_detection_server.py`.
+            The default is where the official vLLM image keeps its examples.
+          '';
+        };
+        tag = mkOption {
+          type = with types; nullOr str;
+          default = null;
+          description = "Container image tag for this detector.";
+        };
+        digest = mkOption {
+          type = with types; nullOr str;
+          default = null;
+          description = "Immutable container image digest for this detector.";
+        };
+        quadlet = llmhopLib.quadlet.mkObjectOptions { description = "this detector container"; };
       };
-      tag = mkOption {
-        type = with types; nullOr str;
-        default = null;
-        description = "Container image tag for this detector.";
-      };
-      digest = mkOption {
-        type = with types; nullOr str;
-        default = null;
-        description = "Immutable container image digest for this detector.";
-      };
-      quadlet = llmhopLib.quadlet.mkObjectOptions { description = "this detector container"; };
     };
 
   # An auxiliary service rather than a model worker: no GPU device access and

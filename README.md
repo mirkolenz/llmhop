@@ -569,14 +569,11 @@ Such values enter the world-readable Nix store and should not be used for produc
 
 Recent vLLM revisions include watermark generation and detector primitives, but the OpenAI server does not expose the detector as an endpoint.
 Both vLLM modules can run the upstream example server as a named detector service next to their model workers.
-The script is explicit so its revision stays under the deployer's control.
-
-For a native service, pin the vLLM source beside the uv workspace and pass the upstream script path:
+A native service needs nothing beyond the workspace it already builds from:
 
 ```nix
 services.llmhop.vllm = {
   detectors.production = {
-    script = inputs.vllm-src + "/examples/basic/online_serving/watermark_detection_server.py";
     tokenizer = "Qwen/Qwen3-8B";
     port = 18100;
     settings = {
@@ -588,17 +585,22 @@ services.llmhop.vllm = {
 };
 ```
 
-`mkUvEnv` supplies Python, vLLM, and the server dependencies, but it cannot supply this script automatically.
-The vLLM wheel intentionally contains only the `vllm` packages and excludes `examples/`.
-Pin `inputs.vllm-src` to the same release or revision selected by the uv workspace.
+The vLLM wheel intentionally contains only the `vllm` packages and excludes `examples/`, so `mkUvEnv` cannot install the script alongside the interpreter.
+It instead exposes `passthru.sdists`, the source archive of every package the workspace locks one for, fetched from the URL and hash the lock already records.
+`script` defaults to the copy extracted from `sdists.vllm`, so one `uv lock` moves the runtime and the script together and they cannot drift apart, and a release predating the watermark detector fails the build rather than the unit.
 
-The official vLLM image includes the examples under `/vllm-workspace`, so the Quadlet declaration names that image path explicitly:
+Override `script` to use a vendored or patched copy, or when the environment comes from somewhere other than `mkUvEnv`:
+
+```nix
+services.llmhop.vllm.detectors.production.script = ./watermark_detection_server.py;
+```
+
+The official vLLM image includes the examples under `/vllm-workspace`, which is where the Quadlet default points:
 
 ```nix
 services.llmhop.vllm-quadlet = {
   tag = "latest";
   detectors.production = {
-    script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
     tokenizer = "Qwen/Qwen3-8B";
     port = 18100;
     settings.key = 123456789;
@@ -639,7 +641,7 @@ The upstream example also has no config file or key-file option.
 Its `--key` value therefore enters the Nix store and process arguments, so this integration is not suitable for a secret production watermark key until upstream adds a file-based option.
 llmhop does not wrap or patch the script to hide that limitation.
 
-The selected script and package or image must come from a vLLM revision containing `vllm.v1.watermarking`.
+The selected script and package or image must come from a vLLM revision containing `vllm.v1.watermarking`, which no release before 0.30.0 has.
 SGLang and llama.cpp workers can coexist with the detector, but they only produce detectable text if they implement the same watermark generation algorithm and parameters.
 
 ### Secrets

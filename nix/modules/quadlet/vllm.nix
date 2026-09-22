@@ -61,14 +61,7 @@ in
       };
 
       detectors = lib.mkOption {
-        type = lib.types.attrsOf (
-          lib.types.submodule (
-            { name, ... }:
-            {
-              options = detector.quadletOptions name;
-            }
-          )
-        );
+        type = lib.types.attrsOf (lib.types.submodule detector.mkQuadletSubmodule);
         default = { };
         description = "Standalone watermark detection containers.";
       };

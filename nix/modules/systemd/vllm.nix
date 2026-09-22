@@ -65,14 +65,7 @@ in
       };
 
       detectors = lib.mkOption {
-        type = lib.types.attrsOf (
-          lib.types.submodule (
-            { name, ... }:
-            {
-              options = detector.nativeOptions cfg name;
-            }
-          )
-        );
+        type = lib.types.attrsOf (lib.types.submodule (detector.mkNativeSubmodule { inherit cfg pkgs; }));
         default = { };
         description = "Standalone watermark detection services.";
       };

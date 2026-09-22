@@ -80,7 +80,6 @@ let
     detectors.watermark = {
       tokenizer = "example/test";
       port = 18002;
-      script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
       settings.key = 42;
     };
   };
@@ -190,7 +189,6 @@ let
       detectors.shared = {
         tokenizer = "example/test";
         port = 23002;
-        script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
         settings.key = 42;
       };
     };
@@ -201,7 +199,6 @@ let
     detectors.watermark = {
       tokenizer = "example/test";
       port = 23003;
-      script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
     };
   };
 

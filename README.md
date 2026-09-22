@@ -395,6 +395,32 @@ Pass `python` to override that, and read the choice back from `passthru.python`.
 The driver itself is host state, so enable `hardware.graphics` and your vendor configuration (`hardware.nvidia`, the `amdgpu` kernel driver, ...) as usual.
 `services.llmhop.sglang` works identically, launched via `python -m sglang.launch_server`.
 
+#### Runtime JIT compilers
+
+vLLM and SGLang compile kernels while they serve, through flashinfer, DeepGEMM, tilelang or `torch.compile`.
+Those compilers invoke `nvcc` themselves and look for it on `PATH` or below `/usr/local/cuda` unless `CUDA_HOME` names a prefix, and the CUDA wheels cannot be that prefix: they carry a runtime toolkit, with no `libcudart.so` namelink and no driver stub to link against.
+The flake exposes `mkCudaHome` for the prefix, and the unit takes it through `environment`:
+
+```nix
+services.llmhop.vllm.environment.CUDA_HOME = "${
+  inputs.llmhop.legacyPackages.${pkgs.system}.mkCudaHome {
+    packages = with pkgs.cudaPackages_13_0; [
+      cuda_nvcc
+      cuda_cudart
+      cuda_crt
+      cccl
+      cuda_nvrtc
+      cuda_cuobjdump
+      libcublas
+      libcurand
+    ];
+  }
+}";
+```
+
+The helper owns only the layout: it merges every output but `static`, since `symlinkJoin` links outputs and drops the propagation that would otherwise carry the headers, and it adds the `lib64` and `lib64/stubs` paths that some compilers link against and that only the retired runfile installer ever produced.
+The package list is yours, the same way `buildInputs` is: it follows from which JIT paths your models take, and it has to stay on the CUDA line the wheels were built for.
+
 #### GPUs other than NVIDIA
 
 Nothing in the module is CUDA-specific.

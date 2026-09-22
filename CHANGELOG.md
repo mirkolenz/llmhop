@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.1](https://github.com/mirkolenz/llmhop/compare/v2.1.0...v2.1.1) (2026-09-22)
+
+### Bug Fixes
+
+* **nix:** update packaging of missing libs check ([a52a7e2](https://github.com/mirkolenz/llmhop/commit/a52a7e2d6657ec284e1e1240ffcd229d55db43c2))
+
 ## [2.1.0](https://github.com/mirkolenz/llmhop/compare/v2.0.3...v2.1.0) (2026-09-22)
 
 ### Features

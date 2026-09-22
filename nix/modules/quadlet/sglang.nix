@@ -16,6 +16,7 @@ let
     sortedModels
     quadlet
     withManagedSettings
+    workerUrl
     ;
 
   # The Rust SGL Model Gateway's clap `SetTrue` flags negate the same way
@@ -42,7 +43,7 @@ let
   # dedicated podman network. Both stay overridable through `settings`.
   gatewayDefaults = {
     enable-igw = true;
-    worker-urls = map (m: "http://127.0.0.1:${toString m.port}") models;
+    worker-urls = map (m: workerUrl m.port) models;
   };
 
   workerServices = map (
@@ -241,13 +242,17 @@ in
       (quadlet.mkConfig {
         backend = "sglang-quadlet";
         inherit cfg config pkgs;
-        extras =
-          lib.optionalAttrs cfg.gateway.enable { gateway = cfg.gateway.port; }
+        auxiliaries =
+          lib.optionalAttrs cfg.gateway.enable {
+            gateway = {
+              port = cfg.gateway.port;
+              unit = "sglang-gateway";
+            };
+          }
+          # A second port on the gateway, not its own unit.
           // lib.optionalAttrs (cfg.gateway.enable && cfg.gateway.enableMetrics) {
-            gateway-metrics = cfg.gateway.metricsPort;
+            gateway-metrics.port = cfg.gateway.metricsPort;
           };
-        # `gateway-metrics` is only a second port on the gateway, not its own unit.
-        extraUnits = lib.optionalAttrs cfg.gateway.enable { gateway = "sglang-gateway"; };
       })
       {
         virtualisation.quadlet.containers =

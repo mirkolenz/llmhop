@@ -101,11 +101,15 @@ in
 {
   inherit unitName;
 
-  # Registry entries folded into `mkConfig` so detector ports and unit names
-  # take part in the global uniqueness checks alongside models.
+  # Folded into `mkConfig`, so each detector joins the global uniqueness checks.
   registry = detectors: {
-    extras = lib.mapAttrs' (name: d: lib.nameValuePair "detectors.${name}" d.port) detectors;
-    extraUnits = lib.mapAttrs' (name: d: lib.nameValuePair "detectors.${name}" (unitName d)) detectors;
+    auxiliaries = lib.mapAttrs' (
+      name: d:
+      lib.nameValuePair "detectors.${name}" {
+        inherit (d) port;
+        unit = unitName d;
+      }
+    ) detectors;
   };
 
   nativeOptions =

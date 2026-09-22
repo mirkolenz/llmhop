@@ -629,41 +629,41 @@ let
     else
       throw "${label}: one of `tag`, `digest`, or a default tag must be provided.";
 
-  # Cross-cutting NixOS fragment every backend emits: llmhop model, ports- and
-  # units-registry contributions. Backend extras layer on via `lib.mkMerge`.
+  # Every backend binds the host loopback and llmhop shares the host.
+  workerUrl = port: "http://127.0.0.1:${toString port}";
+
+  # Cross-cutting NixOS fragment every backend emits: its llmhop models and its
+  # contributions to the registries `core.nix` asserts on. Registry keys are the
+  # owning option path, so a collision names what to change.
   #
-  # Both registries are keyed by the option path that owns the entry —
-  # `<backend>.models.<name>` for models, `<backend>.<extraLabel>` for
-  # auxiliaries (gateways, metrics endpoints) — so the global collision
-  # assertions in `core.nix` name the exact options to change, and a model
-  # named after an auxiliary still gets its own entry. `serviceName` is the
-  # prefix of the emitted unit names, which is why two backends sharing one
-  # (a native/quadlet pair) collide.
+  # `auxiliaries` covers everything a backend runs that is not a model, as
+  # `{ <label> = { port, unit ? null }; }`. One entry per service rather than
+  # one map per registry, so a label cannot go missing from a dimension it
+  # belongs to.
   mkSharedConfig =
     {
       backend,
       serviceName,
       cfg,
-      extras ? { },
-      extraUnits ? { },
+      auxiliaries ? { },
     }:
     let
       models = enabledModels cfg;
+      # An auxiliary joins a registry only if it carries that field.
       mkRegistry =
-        modelValue: extraValues:
+        modelValue: auxValue:
         lib.mapAttrs' (name: m: lib.nameValuePair "${backend}.models.${name}" (modelValue m)) models
-        // lib.mapAttrs' (label: lib.nameValuePair "${backend}.${label}") extraValues;
-      portsRegistry = mkRegistry (m: m.port) extras;
-      unitsRegistry = mkRegistry (m: "${serviceName}-${m.name}") extraUnits;
+        // lib.mapAttrs' (label: aux: lib.nameValuePair "${backend}.${label}" (auxValue aux)) (
+          lib.filterAttrs (_: aux: auxValue aux != null) auxiliaries
+        );
     in
     {
       services.llmhop = {
         # Keyed by `name`, not the attribute: that is what the worker advertises
         # and what clients send, and the two differ when `name` is set.
-        settings.models = lib.mapAttrs' (
-          _: m: lib.nameValuePair m.name { url = "http://127.0.0.1:${toString m.port}"; }
-        ) models;
-        inherit portsRegistry unitsRegistry;
+        settings.models = lib.mapAttrs' (_: m: lib.nameValuePair m.name { url = workerUrl m.port; }) models;
+        portsRegistry = mkRegistry (m: m.port) (aux: aux.port);
+        unitsRegistry = mkRegistry (m: "${serviceName}-${m.name}") (aux: aux.unit or null);
       };
     };
 
@@ -1054,6 +1054,7 @@ in
     systemdCredentialDirectory
     unitConfigOption
     withManagedSettings
+    workerUrl
     ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
@@ -1433,17 +1434,15 @@ in
     # the quadlet-enabled assertion, llmhop registration, resource registries,
     # cache directory, and optional rootless account and operator helper.
     #
-    # `extras` / `extraUnits` are labeled attrsets of auxiliary host ports
-    # (e.g. `{ gateway = 30000; }`) and unit names (e.g.
-    # `{ gateway = "sglang-gateway"; }`) folded into the global registries.
+    # `auxiliaries` describes the non-model services this backend runs; see
+    # `mkSharedConfig`.
     mkConfig =
       {
         backend,
         cfg,
         config,
         pkgs,
-        extras ? { },
-        extraUnits ? { },
+        auxiliaries ? { },
       }:
       let
         serviceName = quadletServiceName backend;
@@ -1455,8 +1454,7 @@ in
             backend
             serviceName
             cfg
-            extras
-            extraUnits
+            auxiliaries
             ;
         })
         {
@@ -1678,15 +1676,13 @@ in
       {
         backend,
         cfg,
-        extras ? { },
-        extraUnits ? { },
+        auxiliaries ? { },
       }:
       mkSharedConfig {
         inherit
           backend
           cfg
-          extras
-          extraUnits
+          auxiliaries
           ;
         serviceName = backend;
       };

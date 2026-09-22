@@ -271,3 +271,46 @@ func TestRouterRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestUnlistedModel(t *testing.T) {
+	backend, captured := newBackend(t)
+	h, err := New(&config.Config{Models: map[string]config.Model{
+		"chat":     {URL: backend.URL},
+		"detector": {URL: backend.URL, Unlisted: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("routes like any other backend", func(t *testing.T) {
+		rec := post(t, h, `{"model":"detector","text":"candidate"}`, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d", rec.Code)
+		}
+		if captured.body != `{"model":"detector","text":"candidate"}` {
+			t.Fatalf("got body %q", captured.body)
+		}
+	})
+
+	t.Run("hidden from list, retrieve and health", func(t *testing.T) {
+		var got modelList
+		if err := json.Unmarshal(get(t, h, "/v1/models", "").Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Data) != 1 || got.Data[0].ID != "chat" {
+			t.Fatalf("got catalog %+v", got.Data)
+		}
+
+		if rec := get(t, h, "/v1/models/detector", ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("got status %d", rec.Code)
+		}
+
+		var h2 health
+		if err := json.Unmarshal(get(t, h, "/health", "").Body.Bytes(), &h2); err != nil {
+			t.Fatal(err)
+		}
+		if h2.Models != 1 {
+			t.Fatalf("got %d models", h2.Models)
+		}
+	})
+}

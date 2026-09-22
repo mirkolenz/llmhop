@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 
 	"github.com/mirkolenz/llmhop/internal/secrets"
@@ -16,6 +17,9 @@ import (
 type Model struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers,omitempty"`
+	// Unlisted keeps a backend routable but hides it from the model catalog,
+	// for services that are not inference models, such as a watermark detector.
+	Unlisted bool `json:"unlisted,omitempty"`
 }
 
 type Config struct {
@@ -34,6 +38,22 @@ const DefaultMaxBodyBytes = 100 * 1024 * 1024
 
 // DefaultPort is the port llmhop listens on when the config sets none.
 const DefaultPort = 8080
+
+// Listed returns the sorted names of the models advertised in the catalog.
+// Unlisted backends are omitted, but stay routable by name.
+func (cfg *Config) Listed() []string {
+	names := make([]string, 0, len(cfg.Models))
+
+	for name, model := range cfg.Models {
+		if !model.Unlisted {
+			names = append(names, name)
+		}
+	}
+
+	slices.Sort(names)
+
+	return names
+}
 
 // Listen renders the host and port as a net.Listen address.
 func (cfg *Config) Listen() string {

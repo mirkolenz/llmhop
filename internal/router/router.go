@@ -47,14 +47,17 @@ func New(cfg *config.Config) (http.Handler, error) {
 		tokens[i] = []byte(t)
 	}
 
+	// Shared, so both endpoints reporting the catalog agree on it.
+	listed := cfg.Listed()
+
 	mux := http.NewServeMux()
-	registerModels(mux, cfg)
+	registerModels(mux, listed)
 	mux.HandleFunc("/", proxyHandler(proxies, cfg.MaxBodyBytes))
 
 	// Health sits outside the auth middleware: liveness probes and downstream
 	// load balancers must be able to check the proxy without a token.
 	root := http.NewServeMux()
-	registerHealth(root, cfg)
+	registerHealth(root, len(listed))
 	root.Handle("/", authMiddleware(tokens, mux))
 
 	return root, nil

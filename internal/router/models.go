@@ -2,12 +2,8 @@ package router
 
 import (
 	"fmt"
-	"maps"
 	"net/http"
-	"slices"
 	"time"
-
-	"github.com/mirkolenz/llmhop/internal/config"
 )
 
 // model mirrors the OpenAI model object returned by the retrieve endpoint:
@@ -28,15 +24,14 @@ type modelList struct {
 	Data   []model `json:"data"`
 }
 
-// registerModels wires the read-only OpenAI models API onto mux, serving the
-// list and retrieve endpoints directly from the configured models. The catalog
-// is immutable after startup, so both responses are built once and reused.
-func registerModels(mux *http.ServeMux, cfg *config.Config) {
+// registerModels wires the read-only OpenAI models API onto mux for the
+// catalog names it is given. The catalog is immutable after startup, so both
+// responses are built once and reused.
+func registerModels(mux *http.ServeMux, names []string) {
 	// created is stamped once at startup, mirroring how single-model backends
 	// report their model's availability time.
 	created := time.Now().Unix()
 
-	names := slices.Sorted(maps.Keys(cfg.Models))
 	models := make([]model, len(names))
 	byName := make(map[string]model, len(names))
 	for i, name := range names {

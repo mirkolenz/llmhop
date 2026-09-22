@@ -22,9 +22,12 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 3. The request is forwarded verbatim to the configured backend URL.
 4. Unknown models return `404`.
 
-`GET /v1/models` and `GET /v1/models/{model}` are answered by LLMhop itself from the configured models, never proxied, so the catalog reflects exactly what is routable.
+`GET /v1/models` and `GET /v1/models/{model}` are answered by LLMhop itself from the configured models, never proxied, so the catalog reflects exactly what clients may ask for.
 Everything else is dispatched by its `model` field as above.
 When `authTokens` is set, all routes (the models API included) require a valid bearer token.
+
+A backend marked `"unlisted": true` is routed like any other but left out of both model endpoints.
+That is for services that are not inference models and should not look like one, such as the watermark detector below: they still reach clients through LLMhop's listener, bearer tokens and header injection, but never show up as something to send a completion to.
 
 ### Health
 
@@ -35,6 +38,7 @@ When `authTokens` is set, all routes (the models API included) require a valid b
 ```
 
 The model count lets a downstream check assert that the proxy came up with the catalog it expects, not merely that the process is listening.
+It counts exactly what `GET /v1/models` advertises, so unlisted backends are excluded.
 Under systemd the same guarantee comes for free: LLMhop sends `READY=1` only after the listener is bound, so a `Type=notify` unit stays in `activating` until requests are actually served.
 
 ## Authentication
@@ -70,6 +74,8 @@ Create a `config.json`:
 
 `host` defaults to every interface and `port` to `8080`.
 IPv6 literals are written plain (`"host": "::1"`) and bracketed internally.
+
+Each model additionally takes `"unlisted": true`, which keeps the backend routable by name while hiding it from `GET /v1/models` and `GET /v1/models/{model}`.
 
 ### Secret references
 

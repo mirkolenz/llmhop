@@ -42,6 +42,7 @@
       };
       checks = {
         inherit (config.packages) llmhop;
+        inherit (config.legacyPackages) check-missing-libs;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
@@ -68,8 +69,9 @@
           inherit (config.packages) llmhop;
         };
       };
-      # Auto-discovered from ./pkgs so new builders drop in as files. Each is a
-      # function, not a package: downstream calls it with its own args, e.g.
+      # Auto-discovered from ./pkgs so new builders drop in as files. The
+      # builders are functions rather than packages: downstream calls them with
+      # their own args, e.g.
       #   services.llmhop.vllm.package =
       #     inputs.llmhop.legacyPackages.${system}.mkUvEnv { workspaceRoot = ./vllm-env; };
       legacyPackages =

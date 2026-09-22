@@ -1,0 +1,3 @@
+# `pkgs.writers.writePython3` lints with flake8, whose line limit is 79 rather
+# than ruff's 88, so the formatter follows flake8 for this script.
+line-length = 79

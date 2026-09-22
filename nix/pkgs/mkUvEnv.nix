@@ -156,11 +156,7 @@ let
     else
       "cudaPackages_${lib.replaceStrings [ "." ] [ "_" ] (lib.versions.majorMinor cudaRuntime)}";
 
-  # The script explains itself; `writePython3` lints it at build time, so a
-  # mistake in it surfaces long before the environment finishes building.
-  checkMissingLibs = pkgs.writers.writePython3 "check-missing-libs" { } (
-    lib.readFile ./check-missing-libs.py
-  );
+  checkMissingLibs = pkgs.callPackage ./check-missing-libs/package.nix { };
 in
 (pythonSet.mkVirtualEnv name (if deps == { } then workspace.deps.default else deps)).overrideAttrs
   (old: {

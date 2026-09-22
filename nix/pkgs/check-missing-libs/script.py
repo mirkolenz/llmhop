@@ -46,8 +46,8 @@ def unresolved(library: Path) -> Iterator[str]:
 def missing(root: Path, allowed: Iterable[str]) -> dict[str, Path]:
     """Map each unresolved soname below `root` to one library needing it.
 
-    Sonames matching a glob in `allowed` are left out: the host supplies them at
-    runtime and no build can resolve them.
+    Sonames matching a glob in `allowed` are left out:
+    the host supplies them at runtime and no build can resolve them.
 
     >>> missing(Path("/var/empty"), [])
     {}
@@ -56,9 +56,10 @@ def missing(root: Path, allowed: Iterable[str]) -> dict[str, Path]:
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         libraries = list(shared_libraries(root))
+        results = pool.map(unresolved, libraries)
         found = {
             soname: library
-            for library, sonames in zip(libraries, pool.map(unresolved, libraries))
+            for library, sonames in zip(libraries, results)
             for soname in sonames
         }
 

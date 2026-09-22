@@ -137,6 +137,25 @@ let
     name: pkgs.fetchurl { inherit (lockedSdist name pythonSet.${name}.version) url hash; }
   );
 
+  cudaRuntime = pythonSet."nvidia-cuda-runtime".version or null;
+
+  # nixpkgs' package set for the CUDA line the wheels were built for, named the
+  # way `python.pythonAttr` names an interpreter: an attribute rather than the
+  # set itself, since resolving it here would bind it to this flake's nixpkgs,
+  # with neither the caller's configuration nor their overlays, and build a
+  # second CUDA closure beside the one they already have. Sets nixpkgs has
+  # dropped throw on access with a message of their own, so `pkgs.${...}` needs
+  # no check around it.
+  # Anything compiled against a toolkit has to agree with the runtime the
+  # process ends up loading, and the lock states which that is. Components move
+  # within a line, `libcublas` ahead of `cuda_cudart` for instance, so the
+  # runtime is the anchor rather than any one of them.
+  cudaPackagesAttr =
+    if cudaRuntime == null then
+      throw "mkUvEnv: the lock pins no `nvidia-cuda-runtime`, so the CUDA line cannot be derived; name a `cudaPackages_*` set yourself."
+    else
+      "cudaPackages_${lib.replaceStrings [ "." ] [ "_" ] (lib.versions.majorMinor cudaRuntime)}";
+
   # The script explains itself; `writePython3` lints it at build time, so a
   # mistake in it surfaces long before the environment finishes building.
   checkMissingLibs = pkgs.writers.writePython3 "check-missing-libs" { } (
@@ -150,7 +169,7 @@ in
       ${checkMissingLibs} "$out" ${lib.escapeShellArgs venvIgnoreMissingLibs}
     '';
     passthru = (old.passthru or { }) // {
-      inherit sdists;
+      inherit sdists cudaPackagesAttr;
       python = interpreter;
     };
   })

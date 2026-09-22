@@ -404,7 +404,7 @@ The flake exposes `mkCudaHome` for the prefix, and the unit takes it through `en
 ```nix
 services.llmhop.vllm.environment.CUDA_HOME = "${
   inputs.llmhop.legacyPackages.${pkgs.system}.mkCudaHome {
-    packages = with pkgs.cudaPackages_13_0; [
+    packages = with pkgs.${config.services.llmhop.vllm.package.cudaPackagesAttr}; [
       cuda_nvcc
       cuda_cudart
       cuda_crt
@@ -417,6 +417,11 @@ services.llmhop.vllm.environment.CUDA_HOME = "${
   }
 }";
 ```
+
+The CUDA line is not named a second time: the environment exposes `passthru.cudaPackagesAttr`, the `cudaPackages_*` attribute matching the line its own wheels were built for, taken from the `nvidia-cuda-runtime` the lock resolved.
+It names an attribute rather than holding a package set, the way `python.pythonAttr` does in nixpkgs, so the packages come from your `pkgs`, with your configuration and overlays, rather than from this flake's.
+One `uv lock` therefore moves the wheels and the prefix together, and a CUDA line nixpkgs has not packaged fails evaluation by name.
+Components drift within a line, `libcublas` running ahead of `cuda_cudart`, so the runtime is the anchor rather than any single wheel.
 
 The helper owns only the layout: it merges every output but `static`, since `symlinkJoin` links outputs and drops the propagation that would otherwise carry the headers, and it adds the `lib64` and `lib64/stubs` paths that some compilers link against and that only the retired runfile installer ever produced.
 The package list is yours, the same way `buildInputs` is: it follows from which JIT paths your models take, and it has to stay on the CUDA line the wheels were built for.

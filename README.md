@@ -403,32 +403,36 @@ Runtime kernel caches are redirected into the unit's cache root for every stack 
 
 Only the wheels differ per vendor:
 
-| Stack | Native (uv) backends | Notes |
+| Stack | Native (uv) backends | Wheels |
 | --- | --- | --- |
-| NVIDIA CUDA | vLLM, SGLang | The wheels published on PyPI. |
-| AMD ROCm | vLLM | Official ROCm wheels from v0.14.0 onwards, off a separate index. SGLang's are still landing upstream. |
-| Intel XPU | none | vLLM ships no prebuilt XPU wheels and needs a oneAPI source build, so use `vllm-quadlet` with an Intel image, or llama.cpp built for SYCL or Vulkan. |
+| NVIDIA CUDA | vLLM, SGLang | Published on PyPI, so a plain `vllm==<version>` pin resolves them. |
+| AMD ROCm | vLLM | Published per ROCm release at `https://wheels.vllm.ai/rocm/<version>/<rocm>`. SGLang's are still landing upstream. |
+| Intel XPU | vLLM | Published per release at `https://wheels.vllm.ai/<version>/xpu`, and they need torch's own XPU index alongside. |
 
-A ROCm workspace differs from a CUDA one only in where the wheel comes from:
+The index URLs move with every release, so take them from vLLM's [installation docs](https://docs.vllm.ai/en/latest/getting_started/installation/) rather than from here.
+A non-CUDA workspace differs from a CUDA one only in where the wheel comes from:
 
 ```toml
 # vllm-env/pyproject.toml — the ROCm version is part of both the pin and the index URL.
 [project]
 name = "vllm-env"
 requires-python = "==3.12.*"
-dependencies = [ "vllm==0.15.0+rocm700" ]
+dependencies = [ "vllm==0.30.0" ]
 
 [[tool.uv.index]]
 name = "vllm-rocm"
-url = "https://wheels.vllm.ai/rocm/0.15.0/rocm700"
+url = "https://wheels.vllm.ai/rocm/0.30.0/rocm723"
 explicit = true
 
 [tool.uv.sources]
 vllm = { index = "vllm-rocm" }
 ```
 
-Those wheels carry a matched ROCm and torch build, so the host contributes only the kernel driver.
-Expect a different set of missing native libraries than a CUDA workspace, and use the `ignoreMissingLibs = [ ]` triage below to find them.
+An XPU workspace takes the same shape with the XPU index, plus `https://download.pytorch.org/whl/xpu` for torch.
+Upstream reaches that second index with `--index-strategy unsafe-best-match`, whose lockfile equivalent is `index-strategy = "unsafe-best-match"` under `[tool.uv]`.
+
+These wheels carry a matched ROCm or oneAPI build of torch, so the host contributes only the kernel driver.
+Expect a different set of missing native libraries than a CUDA workspace; the userspace driver of each stack is already in the `venvIgnoreMissingLibs` default.
 
 #### Missing build systems
 
@@ -444,6 +448,24 @@ antlr4-python3-runtime = ["setuptools"]
 
 Re-run `uv lock` afterwards.
 The key is the package name as it appears in `uv.lock`, and the value is whatever its build backend needs (`setuptools`, `cython`, `meson-python`, ...).
+
+#### Versions upstream leaves unconstrained
+
+Some wheels have to move together although none of them depends on the others.
+vLLM's flashinfer payloads are the recurring case: `flashinfer-cubin` and `flashinfer-jit-cache` have to match the `flashinfer-python` that vLLM pins by hand in `requirements/cuda.txt`, and flashinfer refuses to start otherwise.
+
+Pin that package yourself, at the version the other two use, rather than leaving it to vLLM alone:
+
+```toml
+dependencies = [
+  "vllm==0.30.0",
+  "flashinfer-python==0.6.18",     # vLLM pins this exactly, so a bump conflicts here
+  "flashinfer-cubin==0.6.18",
+  "flashinfer-jit-cache==0.6.18",
+]
+```
+
+The next `uv lock` after vLLM moves its pin then fails to resolve, naming both versions, instead of producing a lock that builds and dies on the GPU host.
 
 #### Missing native libraries
 

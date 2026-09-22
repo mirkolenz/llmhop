@@ -14,11 +14,6 @@
   # same one uv resolves against, so the version is stated once.
   python ? null,
   sourcePreference ? "wheel",
-  # Globs of unresolved `DT_NEEDED` entries that do not fail the build. Most of
-  # them are unresolvable on purpose (the host driver, sibling wheels that only
-  # meet each other once the venv merges them, alternative backends), so the
-  # default accepts everything; narrow it to see the whole list.
-  ignoreMissingLibs ? [ "*" ],
   # Merged into the corresponding attribute of every wheel. Which libraries a
   # workspace needs follows from what it locks, so there are no defaults: see
   # the README.
@@ -28,6 +23,23 @@
   # bare `dlopen("libfoo.so")` from Python, as cffi and ctypes do. Nothing names
   # those in the ELF, so `buildInputs` cannot resolve them.
   runtimePaths ? [ ],
+  # Globs of `DT_NEEDED` entries the assembled environment may leave unresolved
+  # because the host supplies them at runtime. The default covers the userspace
+  # driver of each stack vLLM publishes wheels for, none of which any wheel or
+  # nixpkgs package can satisfy at build time. Anything undeclared fails the
+  # build, naming the soname and a file that needs it.
+  venvIgnoreMissingLibs ? [
+    # NVIDIA: the driver, plus the NVML and PTX JIT libraries beside it.
+    "libcuda.so*"
+    "libnvidia-*.so*"
+    # AMD: the ROCm runtime and the thunk it reaches the amdgpu driver through.
+    "libhsa-runtime64.so*"
+    "libhsakmt.so*"
+    "libamdhip64.so*"
+    # Intel: the Level Zero and OpenCL loaders in front of the compute runtime.
+    "libze_loader.so*"
+    "libOpenCL.so*"
+  ],
   # Globs of paths, relative to the environment root, that more than one package
   # installs with differing contents; the first one encountered wins. Wheels
   # routinely leak their in-tree PEP 517 backend into the distribution, so a set
@@ -87,7 +99,9 @@ let
         # names them nowhere in the ELF. auto-patchelf rewrites the runpath to
         # absolute store paths and drops those entries unless asked to keep them.
         autoPatchelfFlags = (old.autoPatchelfFlags or [ ]) ++ [ "--preserve-origin" ];
-        autoPatchelfIgnoreMissingDeps = (old.autoPatchelfIgnoreMissingDeps or [ ]) ++ ignoreMissingLibs;
+        # Deferred unconditionally; `checkMissingLibs` below judges the assembled
+        # environment instead.
+        autoPatchelfIgnoreMissingDeps = [ "*" ];
       })
     );
 
@@ -122,10 +136,19 @@ let
   sdists = lib.genAttrs (lib.filter (name: pythonSet ? ${name}) lockedNames) (
     name: pkgs.fetchurl { inherit (lockedSdist name pythonSet.${name}.version) url hash; }
   );
+
+  # The script explains itself; `writePython3` lints it at build time, so a
+  # mistake in it surfaces long before the environment finishes building.
+  checkMissingLibs = pkgs.writers.writePython3 "check-missing-libs" { } (
+    lib.readFile ./check-missing-libs.py
+  );
 in
 (pythonSet.mkVirtualEnv name (if deps == { } then workspace.deps.default else deps)).overrideAttrs
   (old: {
     inherit venvIgnoreCollisions;
+    postFixup = (old.postFixup or "") + ''
+      ${checkMissingLibs} "$out" ${lib.escapeShellArgs venvIgnoreMissingLibs}
+    '';
     passthru = (old.passthru or { }) // {
       inherit sdists;
       python = interpreter;

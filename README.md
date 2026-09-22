@@ -453,24 +453,15 @@ Which libraries a workspace needs beyond the driver follows from what it locks, 
 
 `buildInputs` covers libraries a wheel names in a `DT_NEEDED` entry.
 They are added to the autoPatchelf search path, so a library only lands in the runpath of a wheel that actually links it and listing one nothing needs is harmless.
-By default an unresolved entry does not fail the build, because most of them are unresolvable on purpose: the host driver, sibling wheels that only meet each other once the venv merges them, and alternative backends where one of several variants is expected to load.
-To see the whole list, narrow `ignoreMissingLibs` for one build:
-
-```nix
-mkUvEnv {
-  workspaceRoot = ./vllm-env;
-  ignoreMissingLibs = [ ];   # accept nothing; every unresolved entry is now an error
-}
-```
-
-Each error names both the library and the wheel that wants it:
+No wheel fails over an unresolved entry on its own, because in isolation it cannot see the siblings it will share a venv with: half of what a wheel misses at that point is another wheel.
+The assembled environment is checked instead, where those have resolved, and every entry still unresolved there fails the build:
 
 ```
-auto-patchelf could not satisfy dependency libtbb.so.12 wanted by
-  /nix/store/...-numba-0.65.0/lib/python3.12/site-packages/numba/np/ufunc/tbbpool...so
+mkUvEnv: unresolved library libtbb.so.12, needed by /nix/store/...-uv-env/lib/python3.12/site-packages/numba/np/ufunc/tbbpool...so
+mkUvEnv: supply these through `buildInputs`, or list them in `venvIgnoreMissingLibs` if the host provides them at runtime.
 ```
 
-Triage that list, then add the ones that are genuinely missing and drop the tightened setting again:
+An entry is either a library nixpkgs should supply, which goes into `buildInputs`:
 
 ```nix
 buildInputs = [
@@ -479,6 +470,16 @@ buildInputs = [
   pkgs.z3.lib            # tilelang's TVM analyzer
 ];
 ```
+
+or one the host provides at runtime and no build can resolve, which goes into `venvIgnoreMissingLibs`:
+
+```nix
+venvIgnoreMissingLibs = [ "libcuda.so*" "libnvidia-*.so*" ];   # NVIDIA's userspace driver
+```
+
+`venvIgnoreMissingLibs` defaults to the userspace driver of every stack vLLM publishes wheels for, NVIDIA, ROCm and XPU alike, since no build can resolve those anywhere.
+Everything else is yours to place, and the first build of a workspace names what it found, as does every later one the moment a wheel starts wanting something new.
+The check uses `ldd`, so it resolves exactly what the loader will, `$ORIGIN` entries included.
 
 `runtimePaths` covers the other kind, reached by a bare `dlopen("libfoo.so")` from Python via cffi or ctypes.
 Nothing announces those in the ELF, so no build ever fails over one and no runpath resolves it; the environment builds cleanly and the import dies:

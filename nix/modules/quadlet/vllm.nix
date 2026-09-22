@@ -22,7 +22,6 @@ in
       inherit cfg config;
       defaultImage = "docker.io/vllm/vllm-openai";
       defaultCacheDir = "/var/cache/vllm";
-      tagExample = "v0.11.0";
     }
     // {
       enable = lib.mkEnableOption "vLLM model serving via Quadlet, fronted by llmhop";

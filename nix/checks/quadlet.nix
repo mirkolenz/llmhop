@@ -178,6 +178,15 @@ let
     };
   };
 
+  # Without `--key` the script dies at startup, so evaluation must reject it.
+  detectorWithoutKey = mkConfig {
+    detectors.watermark = {
+      tokenizer = "example/test";
+      port = 23003;
+      script = "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py";
+    };
+  };
+
   invalidCredential = mkConfig { models.test.credentials."tls/key" = tlsKey; };
 
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
@@ -349,6 +358,14 @@ let
     testTwinBackends = {
       expr = lib.any (assertion: !assertion.assertion) twins.assertions;
       expected = true;
+    };
+
+    testDetectorWithoutKey = {
+      expr =
+        (lib.tryEval (
+          lib.deepSeq detectorWithoutKey.virtualisation.quadlet.containers.vllm-detector-watermark.containerConfig.Exec null
+        )).success;
+      expected = false;
     };
 
     testInvalidCredentialName = {

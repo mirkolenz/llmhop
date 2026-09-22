@@ -23,13 +23,19 @@ let
   unitName = detector: "vllm-detector-${detector.name}";
 
   # `host` differs between the backends: the container publishes its port
-  # instead of binding loopback directly.
+  # instead of binding loopback directly. `key` is required by the script but
+  # belongs in `settings` beside the generation-side flags, so it is checked
+  # here rather than left to fail at unit startup.
   detectorSettings =
     host: port: detector:
-    withManagedSettings {
-      inherit (detector) tokenizer;
-      inherit host port;
-    } detector.settings;
+    lib.throwIfNot (detector.settings ? key)
+      "services.llmhop: watermark detector `${detector.name}` needs `settings.key`, the key used for generation."
+      withManagedSettings
+      {
+        inherit (detector) tokenizer;
+        inherit host port;
+      }
+      detector.settings;
 
   # The upstream script serves no health endpoint, so readiness comes from
   # FastAPI's `/openapi.json`.
@@ -63,15 +69,19 @@ let
       type = with types; attrsOf anything;
       default = { };
       example = {
-        key = 42;
+        key = 123456789;
         context-width = 4;
       };
       description = ''
         Arguments passed to vLLM's upstream watermark detector server.
         Its current interface supports `key`, `prf`, `context-width`, and
-        `p-value-threshold`.
+        `p-value-threshold`. `key` is required, and it, `prf` and
+        `context-width` must match the generation configuration.
         `tokenizer`, `host` and `port` are derived from the options of the same
         name and always win over entries set here.
+
+        `key` has no file-based alternative upstream, so it lands in the Nix
+        store and in the process command line. Treat it as public.
         ${settingsRendering "vllm"}
       '';
     };

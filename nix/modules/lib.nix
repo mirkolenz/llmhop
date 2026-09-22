@@ -658,7 +658,11 @@ let
     in
     {
       services.llmhop = {
-        settings.models = lib.mapAttrs (_: m: { url = "http://127.0.0.1:${toString m.port}"; }) models;
+        # Keyed by `name`, not the attribute: that is what the worker advertises
+        # and what clients send, and the two differ when `name` is set.
+        settings.models = lib.mapAttrs' (
+          _: m: lib.nameValuePair m.name { url = "http://127.0.0.1:${toString m.port}"; }
+        ) models;
         inherit portsRegistry unitsRegistry;
       };
     };

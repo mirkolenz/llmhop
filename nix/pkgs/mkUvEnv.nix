@@ -14,15 +14,18 @@
   # same one uv resolves against, so the version is stated once.
   python ? null,
   sourcePreference ? "wheel",
-  # Merged into the corresponding attribute of every wheel. Which libraries a
-  # workspace needs follows from what it locks, so there are no defaults: see
-  # the README.
+  # Merged into the corresponding attribute of every package but pure wheels.
+  # Which libraries a workspace needs follows from what it locks,
+  # so there are no defaults: see the README.
   nativeBuildInputs ? [ ],
   buildInputs ? [ ],
   # Directories appended to every wheel's runpath, for libraries reached by a
   # bare `dlopen("libfoo.so")` from Python, as cffi and ctypes do. Nothing names
   # those in the ELF, so `buildInputs` cannot resolve them.
   runtimePaths ? [ ],
+  # Wheels tagged for any platform that ship host code all the same, and so
+  # need the ELF fixups that pure wheels skip.
+  hostWheels ? [ ],
   # Globs of `DT_NEEDED` entries the host supplies at runtime, so the assembled
   # environment may leave them unresolved. The default covers the userspace
   # driver of each stack vLLM publishes wheels for, none of which any wheel or
@@ -85,27 +88,50 @@ let
   # Every package the lock resolves, rather than a hand-curated list of the ones
   # known to ship GPU extensions: a wheel growing one, or a new dependency
   # appearing on an upstream bump, would otherwise silently fail to build.
-  # The fixups are no-ops for the pure-Python majority, which ships no ELF files.
   lockedNames = map (package: package.name) uvLock.package;
+
+  checkElf = pkgs.callPackage ./check-elf/package.nix { };
+
+  # A wheel tagged for any platform carries no host code, but may still ship
+  # device code as ELF, such as the thousands of cubins in `flashinfer-cubin`.
+  # Each ELF fixup visits every one of them without anything to patch.
+  # `checkElf` below fails on host code in any of them not in `hostWheels`.
+  isPureWheel =
+    name: attrs: !lib.elem name hostWheels && lib.hasSuffix "-any.whl" (attrs.src.name or "");
+
+  hostElfFixups = old: {
+    nativeBuildInputs =
+      (old.nativeBuildInputs or [ ]) ++ [ pkgs.autoAddDriverRunpath ] ++ nativeBuildInputs;
+    buildInputs = (old.buildInputs or [ ]) ++ buildInputs;
+    appendRunpaths = (old.appendRunpaths or [ ]) ++ runtimePaths;
+    # Wheels reach their sibling libraries through `$ORIGIN`, and dispatch
+    # shims such as `libcudnn.so.9` `dlopen` their backends that way, which
+    # names them nowhere in the ELF. auto-patchelf rewrites the runpath to
+    # absolute store paths and drops those entries unless asked to keep them.
+    autoPatchelfFlags = (old.autoPatchelfFlags or [ ]) ++ [ "--preserve-origin" ];
+    # Deferred unconditionally. `checkElf` below judges the assembled
+    # environment instead, and fails on every entry left unresolved there.
+    autoPatchelfIgnoreMissingDeps = [ "*" ];
+  };
+
+  # uv2nix already sets `dontStrip` for every wheel. The runpath audit only
+  # guards against this build writing its `$TMPDIR` into one, which nothing
+  # here does once patching is off.
+  # The caller's inputs are left out too,
+  # so pure wheels do not rebuild whenever those change.
+  skippedElfFixups = {
+    dontPatchELF = true;
+    dontAutoPatchelf = true;
+    noAuditTmpdir = true;
+  };
 
   wheelOverlay =
     _final: prev:
     lib.genAttrs (lib.filter (name: prev ? ${name}) lockedNames) (
       name:
-      prev.${name}.overrideAttrs (old: {
-        nativeBuildInputs =
-          (old.nativeBuildInputs or [ ]) ++ [ pkgs.autoAddDriverRunpath ] ++ nativeBuildInputs;
-        buildInputs = (old.buildInputs or [ ]) ++ buildInputs;
-        appendRunpaths = (old.appendRunpaths or [ ]) ++ runtimePaths;
-        # Wheels reach their sibling libraries through `$ORIGIN`, and dispatch
-        # shims such as `libcudnn.so.9` `dlopen` their backends that way, which
-        # names them nowhere in the ELF. auto-patchelf rewrites the runpath to
-        # absolute store paths and drops those entries unless asked to keep them.
-        autoPatchelfFlags = (old.autoPatchelfFlags or [ ]) ++ [ "--preserve-origin" ];
-        # Deferred unconditionally. `checkMissingLibs` below judges the assembled
-        # environment instead, and fails on every entry left unresolved there.
-        autoPatchelfIgnoreMissingDeps = [ "*" ];
-      })
+      prev.${name}.overrideAttrs (
+        old: if isPureWheel name old then skippedElfFixups else hostElfFixups old
+      )
     );
 
   pythonSet =
@@ -158,19 +184,24 @@ let
       throw "mkUvEnv: the lock pins no `nvidia-cuda-runtime`, so the CUDA line cannot be derived; name a `cudaPackages_*` set yourself."
     else
       "cudaPackages_${lib.replaceStrings [ "." ] [ "_" ] (lib.versions.majorMinor cudaRuntime)}";
+  unknownHostWheels = lib.subtractLists lockedNames hostWheels;
 
-  checkMissingLibs = pkgs.callPackage ./check-missing-libs/package.nix { };
+  venv =
+    (pythonSet.mkVirtualEnv name (if deps == { } then workspace.deps.default else deps)).overrideAttrs
+      (old: {
+        inherit venvIgnoreCollisions;
+        postFixup = (old.postFixup or "") + ''
+          ${checkElf} "$out" \
+            --drivers ${lib.escapeShellArgs venvDriverLibs} \
+            --optional ${lib.escapeShellArgs venvOptionalLibs} \
+            --host-wheels ${lib.escapeShellArgs hostWheels}
+        '';
+        passthru = (old.passthru or { }) // {
+          inherit sdists cudaPackagesAttr;
+          python = interpreter;
+        };
+      });
 in
-(pythonSet.mkVirtualEnv name (if deps == { } then workspace.deps.default else deps)).overrideAttrs
-  (old: {
-    inherit venvIgnoreCollisions;
-    postFixup = (old.postFixup or "") + ''
-      ${checkMissingLibs} "$out" \
-        --drivers ${lib.escapeShellArgs venvDriverLibs} \
-        --optional ${lib.escapeShellArgs venvOptionalLibs}
-    '';
-    passthru = (old.passthru or { }) // {
-      inherit sdists cudaPackagesAttr;
-      python = interpreter;
-    };
-  })
+lib.throwIf (unknownHostWheels != [ ])
+  "mkUvEnv: `hostWheels` names ${lib.concatStringsSep ", " unknownHostWheels}, which the lock does not resolve."
+  venv

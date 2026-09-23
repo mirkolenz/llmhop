@@ -42,7 +42,7 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        inherit (config.legacyPackages) check-missing-libs;
+        inherit (config.legacyPackages) check-elf;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {

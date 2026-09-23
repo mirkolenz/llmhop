@@ -501,7 +501,7 @@ The next `uv lock` after vLLM moves its pin then fails to resolve, naming both v
 #### Missing native libraries
 
 Wheels are built for manylinux and expect a distro underneath them.
-Which libraries a workspace needs beyond the driver follows from what it locks, so there are no defaults: you supply them per workspace through `buildInputs` and `runtimePaths`, which are merged into every wheel.
+Which libraries a workspace needs beyond the driver follows from what it locks, so there are no defaults: you supply them per workspace through `buildInputs` and `runtimePaths`, which are merged into every wheel but pure `-any` ones.
 `nativeBuildInputs` is accepted alongside them for build-time tooling an sdist needs beyond its Python build backend.
 
 `buildInputs` covers libraries a wheel names in a `DT_NEEDED` entry.
@@ -544,6 +544,13 @@ venvOptionalLibs = [
 ```
 
 The first build of a workspace names what it found, as does every later one the moment a wheel starts wanting something new, or nixpkgs moves a library to a soname the wheels were not built against.
+
+Wheels tagged for any platform skip the ELF fixups, since patching the thousands of cubins in `flashinfer-cubin` would take longer than the rest of the environment.
+Should one ship host code all the same, the environment fails to build and names it, and `hostWheels` gives it the fixups back:
+
+```nix
+hostWheels = [ "some-wheel" ];
+```
 
 `runtimePaths` covers the other kind, reached by a bare `dlopen("libfoo.so")` from Python via cffi or ctypes.
 Nothing announces those in the ELF, so no build ever fails over one and no runpath resolves it; the environment builds cleanly and the import dies:

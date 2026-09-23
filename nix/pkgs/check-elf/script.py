@@ -1,4 +1,4 @@
-"""Report shared libraries of a built environment that nothing resolves.
+"""Check the ELF files of an environment that `mkUvEnv` assembled.
 
 A wheel cannot see the siblings it will share an environment with, so half of
 what it misses on its own is another wheel. Run over the assembled environment
@@ -10,18 +10,27 @@ so the loader finds them by soname among what the process already holds.
 `ldd` sees none of that, and `$ORIGIN/..` leaves a symlinked package for its
 own store path, so a soname that names some file in the environment counts as
 resolved.
+
+Wheels tagged for any platform skip every ELF fixup, so each one is checked
+for host code that would need them. Device code such as cubins is ELF too,
+but for another machine, and passes.
 """
 
 import sys
 from argparse import ArgumentParser
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from csv import reader
 from fnmatch import fnmatch
 from os import environ, stat, walk
 from pathlib import Path
+from re import sub
 from subprocess import run
 
 __all__ = ["main"]
+
+# `e_type` values of code the loader maps: executables and shared objects.
+LOADABLE = {2, 3}
 
 
 def matches(name: str, patterns: Iterable[str]) -> bool:
@@ -103,14 +112,89 @@ def missing(
     }
 
 
+def machine(path: Path) -> int | None:
+    """Return the `e_machine` of a loadable ELF file, or `None` otherwise.
+
+    >>> machine(Path(__file__)) is None
+    True
+    """
+    with path.open("rb") as file:
+        header = file.read(20)
+
+    if header[:4] != b"\x7fELF":
+        return None
+
+    if int.from_bytes(header[16:18], "little") not in LOADABLE:
+        return None
+
+    return int.from_bytes(header[18:20], "little")
+
+
+def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
+    """Yield the name and files of each wheel tagged for any platform.
+
+    Every installed wheel records its tags in `WHEEL` and its files in
+    `RECORD`, relative to the directory holding its metadata.
+    """
+    for info in sorted(root.glob("lib/python*/site-packages/*.dist-info")):
+        wheel, record = info / "WHEEL", info / "RECORD"
+
+        if not wheel.is_file() or not record.is_file():
+            continue
+
+        lines = wheel.read_text().splitlines()
+        tags = [line[5:] for line in lines if line.startswith("Tag: ")]
+
+        if not tags or not all(tag.endswith("-any") for tag in tags):
+            continue
+
+        with record.open(newline="") as file:
+            paths = [info.parent / row[0] for row in reader(file) if row]
+
+        # PEP 503 normalization, as the lock spells the name.
+        name = sub(r"[-_.]+", "-", info.name.split("-")[0]).lower()
+
+        yield name, [path for path in paths if path.is_file()]
+
+
+def host_code(root: Path, exempt: Iterable[str]) -> dict[str, list[Path]]:
+    """Map each pure wheel not in `exempt` to the host code it ships.
+
+    >>> host_code(Path("/var/empty"), [])
+    {}
+    """
+    if (host := machine(Path(sys.executable).resolve())) is None:
+        return {}
+
+    found = {
+        name: [path for path in paths if machine(path) == host]
+        for name, paths in pure_wheels(root)
+        if name not in exempt
+    }
+
+    return {name: paths for name, paths in found.items() if paths}
+
+
 def main() -> int:
-    """Print every unexpected soname with a library needing it."""
+    """Print everything the environment would fail on at runtime."""
     parser = ArgumentParser()
     parser.add_argument("root", type=Path)
     parser.add_argument("--drivers", nargs="*", default=[])
     parser.add_argument("--optional", nargs="*", default=[])
+    parser.add_argument("--host-wheels", nargs="*", default=[])
     args = parser.parse_args()
     errors: list[str] = []
+
+    if hosted := host_code(args.root, args.host_wheels):
+        errors += [
+            f"mkUvEnv: {name} is tagged for any platform but ships {path}"
+            for name, paths in hosted.items()
+            for path in paths
+        ]
+        errors.append(
+            "mkUvEnv: list those wheels in `hostWheels` "
+            "to have them patched like the others."
+        )
 
     if unexpected := missing(args.root, args.drivers, args.optional):
         errors += [

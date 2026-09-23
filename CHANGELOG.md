@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.2](https://github.com/mirkolenz/llmhop/compare/v2.1.1...v2.1.2) (2026-09-23)
+
+### Bug Fixes
+
+* **nix/uv:** don't patch pure wheels ([a15d90b](https://github.com/mirkolenz/llmhop/commit/a15d90b6fc21ccdd6e891d13d554948aade692de))
+* **nix/uv:** make missing links check more robust ([acd31ad](https://github.com/mirkolenz/llmhop/commit/acd31ad93f4d4a05f5848c783b1c9adec66c1cb6))
+* **nix/uv:** split missing lib exceptions into driver and optional ones ([83b4469](https://github.com/mirkolenz/llmhop/commit/83b4469035b65d9b56d4d3eecb32caff74a65689))
+
 ## [2.1.1](https://github.com/mirkolenz/llmhop/compare/v2.1.0...v2.1.1) (2026-09-22)
 
 ### Bug Fixes

@@ -23,12 +23,11 @@
   # bare `dlopen("libfoo.so")` from Python, as cffi and ctypes do. Nothing names
   # those in the ELF, so `buildInputs` cannot resolve them.
   runtimePaths ? [ ],
-  # Globs of `DT_NEEDED` entries the assembled environment may leave unresolved
-  # because the host supplies them at runtime. The default covers the userspace
+  # Globs of `DT_NEEDED` entries the host supplies at runtime, so the assembled
+  # environment may leave them unresolved. The default covers the userspace
   # driver of each stack vLLM publishes wheels for, none of which any wheel or
-  # nixpkgs package can satisfy at build time. Anything undeclared fails the
-  # build, naming the soname and a file that needs it.
-  venvIgnoreMissingLibs ? [
+  # nixpkgs package can satisfy at build time.
+  venvDriverLibs ? [
     # NVIDIA: the driver, plus the NVML and PTX JIT libraries beside it.
     "libcuda.so*"
     "libnvidia-*.so*"
@@ -40,6 +39,10 @@
     "libze_loader.so*"
     "libOpenCL.so*"
   ],
+  # Globs of shared libraries, relative to the environment root, whose
+  # dependencies may stay unresolved because they load on demand only, such as
+  # one of several backend variants or an optional transport plugin.
+  venvOptionalLibs ? [ ],
   # Globs of paths, relative to the environment root, that more than one package
   # installs with differing contents; the first one encountered wins. Wheels
   # routinely leak their in-tree PEP 517 backend into the distribution, so a set
@@ -99,8 +102,8 @@ let
         # names them nowhere in the ELF. auto-patchelf rewrites the runpath to
         # absolute store paths and drops those entries unless asked to keep them.
         autoPatchelfFlags = (old.autoPatchelfFlags or [ ]) ++ [ "--preserve-origin" ];
-        # Deferred unconditionally; `checkMissingLibs` below judges the assembled
-        # environment instead.
+        # Deferred unconditionally. `checkMissingLibs` below judges the assembled
+        # environment instead, and fails on every entry left unresolved there.
         autoPatchelfIgnoreMissingDeps = [ "*" ];
       })
     );
@@ -162,7 +165,9 @@ in
   (old: {
     inherit venvIgnoreCollisions;
     postFixup = (old.postFixup or "") + ''
-      ${checkMissingLibs} "$out" ${lib.escapeShellArgs venvIgnoreMissingLibs}
+      ${checkMissingLibs} "$out" \
+        --drivers ${lib.escapeShellArgs venvDriverLibs} \
+        --optional ${lib.escapeShellArgs venvOptionalLibs}
     '';
     passthru = (old.passthru or { }) // {
       inherit sdists cudaPackagesAttr;

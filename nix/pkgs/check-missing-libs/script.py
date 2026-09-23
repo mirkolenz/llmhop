@@ -13,6 +13,7 @@ resolved.
 """
 
 import sys
+from argparse import ArgumentParser
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from fnmatch import fnmatch
@@ -70,22 +71,26 @@ def unresolved(library: Path) -> Iterator[str]:
             yield line.split("=>")[0].strip()
 
 
-def missing(root: Path, allowed: Iterable[str]) -> dict[str, Path]:
+def missing(
+    root: Path, drivers: Iterable[str], optional: Iterable[str]
+) -> dict[str, Path]:
     """Map each unresolved soname below `root` to one library needing it.
 
-    Left out are the sonames the environment ships itself or `allowed` match.
+    Left out are the sonames the environment ships itself or `drivers` match,
+    and whatever the libraries `optional` matches need.
 
-    >>> missing(Path("/var/empty"), [])
+    >>> missing(Path("/var/empty"), [], [])
     {}
     """
     workers = int(environ.get("NIX_BUILD_CORES", "0")) or None
     libraries = list(shared_libraries(root))
+    checked = [lib for lib in libraries if not matches(str(lib), optional)]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = pool.map(unresolved, (root / lib for lib in libraries))
+        results = pool.map(unresolved, (root / lib for lib in checked))
         found = {
             soname: library
-            for library, sonames in zip(libraries, results)
+            for library, sonames in zip(checked, results)
             for soname in sonames
         }
 
@@ -94,29 +99,35 @@ def missing(root: Path, allowed: Iterable[str]) -> dict[str, Path]:
     return {
         soname: library
         for soname, library in sorted(found.items())
-        if soname not in provided and not matches(soname, allowed)
+        if soname not in provided and not matches(soname, drivers)
     }
 
 
 def main() -> int:
     """Print every unexpected soname with a library needing it."""
-    root, allowed = Path(sys.argv[1]), sys.argv[2:]
-    unexpected = missing(root, allowed)
+    parser = ArgumentParser()
+    parser.add_argument("root", type=Path)
+    parser.add_argument("--drivers", nargs="*", default=[])
+    parser.add_argument("--optional", nargs="*", default=[])
+    args = parser.parse_args()
+    errors: list[str] = []
 
-    for soname, library in unexpected.items():
-        print(
-            f"mkUvEnv: unresolved library {soname}, needed by {library}",
-            file=sys.stderr,
+    if unexpected := missing(args.root, args.drivers, args.optional):
+        errors += [
+            f"mkUvEnv: unresolved library {soname}, needed by {library}"
+            for soname, library in unexpected.items()
+        ]
+        errors.append(
+            "mkUvEnv: supply these through `buildInputs`, list them in "
+            "`venvDriverLibs` if the host provides them, or list the "
+            "libraries needing them in `venvOptionalLibs` if those load on "
+            "demand only."
         )
 
-    if unexpected:
-        print(
-            "mkUvEnv: supply these through `buildInputs`, or list them in "
-            "`venvIgnoreMissingLibs` if the host provides them at runtime.",
-            file=sys.stderr,
-        )
+    for error in errors:
+        print(error, file=sys.stderr)
 
-    return 1 if unexpected else 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

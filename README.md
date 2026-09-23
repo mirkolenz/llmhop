@@ -463,7 +463,7 @@ An XPU workspace takes the same shape with the XPU index, plus `https://download
 Upstream reaches that second index with `--index-strategy unsafe-best-match`, whose lockfile equivalent is `index-strategy = "unsafe-best-match"` under `[tool.uv]`.
 
 These wheels carry a matched ROCm or oneAPI build of torch, so the host contributes only the kernel driver.
-Expect a different set of missing native libraries than a CUDA workspace; the userspace driver of each stack is already in the `venvIgnoreMissingLibs` default.
+Expect a different set of missing native libraries than a CUDA workspace. The userspace driver of each stack is already in the `venvDriverLibs` default.
 
 #### Missing build systems
 
@@ -511,28 +511,39 @@ The assembled environment is checked instead, where those have resolved, and eve
 
 ```
 mkUvEnv: unresolved library libtbb.so.12, needed by lib/python3.12/site-packages/numba/np/ufunc/tbbpool...so
-mkUvEnv: supply these through `buildInputs`, or list them in `venvIgnoreMissingLibs` if the host provides them at runtime.
+mkUvEnv: supply these through `buildInputs`, list them in `venvDriverLibs` if the host provides them, or list the libraries needing them in `venvOptionalLibs` if those load on demand only.
 ```
 
-An entry is either a library nixpkgs should supply, which goes into `buildInputs`:
+A soname that some file in the environment carries counts as resolved, even when `ldd` cannot reach it from the library that needs it.
+Wheels rarely link their siblings through the runpath: torch preloads the CUDA wheels on import, and torchcodec expects torch to be loaded already, so the loader finds both by soname.
+Every other entry is either a library nixpkgs should supply, which goes into `buildInputs`:
 
 ```nix
 buildInputs = [
-  pkgs.ffmpeg-headless   # torchcodec, PyAV
-  pkgs.tbb_2022          # numba's threading layer — plain `tbb` is too old for libtbb.so.12
-  pkgs.z3.lib            # tilelang's TVM analyzer
+  pkgs.ffmpeg_8-headless # torchcodec supports FFmpeg 4 to 8, not the default 9
+  pkgs.tbb_2022          # numba's threading layer, plain `tbb` is too old for libtbb.so.12
 ];
 ```
 
-or one the host provides at runtime and no build can resolve, which goes into `venvIgnoreMissingLibs`:
+or a soname only the host provides at runtime, which goes into `venvDriverLibs`:
 
 ```nix
-venvIgnoreMissingLibs = [ "libcuda.so*" "libnvidia-*.so*" ];   # NVIDIA's userspace driver
+venvDriverLibs = [ "libcuda.so*" "libnvidia-*.so*" ];   # NVIDIA's userspace driver
 ```
 
-`venvIgnoreMissingLibs` defaults to the userspace driver of every stack vLLM publishes wheels for, NVIDIA, ROCm and XPU alike, since no build can resolve those anywhere.
-Everything else is yours to place, and the first build of a workspace names what it found, as does every later one the moment a wheel starts wanting something new.
-The check uses `ldd`, so it resolves exactly what the loader will, `$ORIGIN` entries included.
+`venvDriverLibs` defaults to the userspace driver of every stack vLLM publishes wheels for, NVIDIA, ROCm and XPU alike, since no build can resolve those anywhere.
+Setting it replaces that default.
+
+Or it is a dependency of a library that loads on demand only, which goes into `venvOptionalLibs` as a glob of that library's path relative to the environment root:
+
+```nix
+venvOptionalLibs = [
+  "*/torchcodec/libtorchcodec_*[!8].so"    # variants for the FFmpeg majors not supplied
+  "*/nvshmem_bootstrap_mpi.so.3"           # nvshmem plugins for an MPI launcher
+];
+```
+
+The first build of a workspace names what it found, as does every later one the moment a wheel starts wanting something new, or nixpkgs moves a library to a soname the wheels were not built against.
 
 `runtimePaths` covers the other kind, reached by a bare `dlopen("libfoo.so")` from Python via cffi or ctypes.
 Nothing announces those in the ELF, so no build ever fails over one and no runpath resolves it; the environment builds cleanly and the import dies:

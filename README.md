@@ -510,7 +510,7 @@ No wheel fails over an unresolved entry on its own, because in isolation it cann
 The assembled environment is checked instead, where those have resolved, and every entry still unresolved there fails the build:
 
 ```
-mkUvEnv: unresolved library libtbb.so.12, needed by /nix/store/...-uv-env/lib/python3.12/site-packages/numba/np/ufunc/tbbpool...so
+mkUvEnv: unresolved library libtbb.so.12, needed by lib/python3.12/site-packages/numba/np/ufunc/tbbpool...so
 mkUvEnv: supply these through `buildInputs`, or list them in `venvIgnoreMissingLibs` if the host provides them at runtime.
 ```
 

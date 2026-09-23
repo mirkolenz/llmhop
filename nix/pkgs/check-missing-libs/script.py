@@ -1,40 +1,67 @@
 """Report shared libraries of a built environment that nothing resolves.
 
-A wheel cannot see the siblings it will share a virtual environment with, so
-half of what it misses on its own is another wheel. Run over the assembled
-environment instead, `ldd` resolves every entry the way the loader will,
-`$ORIGIN` included, and what it still calls missing is what the unit would fail
-on at import time.
+A wheel cannot see the siblings it will share an environment with, so half of
+what it misses on its own is another wheel. Run over the assembled environment
+instead, `ldd` resolves every entry the way the loader will, `$ORIGIN`
+included.
+Python packages rarely link their siblings through the runpath though:
+`torch` preloads the CUDA wheels and `torchcodec` expects `torch` imported,
+so the loader finds them by soname among what the process already holds.
+`ldd` sees none of that, and `$ORIGIN/..` leaves a symlinked package for its
+own store path, so a soname that names some file in the environment counts as
+resolved.
 """
 
 import sys
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from fnmatch import fnmatch
-from os import cpu_count, environ, walk
+from os import environ, stat, walk
 from pathlib import Path
 from subprocess import run
 
 __all__ = ["main"]
 
 
+def matches(name: str, patterns: Iterable[str]) -> bool:
+    """Tell whether `name` matches any of the globs in `patterns`.
+
+    >>> matches("libcuda.so.1", ["libcuda.so*"])
+    True
+    """
+    return any(fnmatch(name, pattern) for pattern in patterns)
+
+
 def shared_libraries(root: Path) -> Iterator[Path]:
-    """Yield every shared library below `root`, descending into symlinks.
+    """Yield every shared library below `root` once, relative to it.
 
     A virtual environment is assembled from links, so its packages are reached
-    through symlinked directories rather than copied into place.
+    through symlinked directories rather than copied into place. Directories
+    reached twice, such as through `lib64 -> lib`, are visited once.
     """
-    for directory, _, names in walk(root, followlinks=True):
+    seen: set[tuple[int, int]] = set()
+
+    for directory, dirs, names in walk(root, followlinks=True):
+        info = stat(directory)
+
+        if (key := (info.st_dev, info.st_ino)) in seen:
+            dirs.clear()
+            continue
+
+        seen.add(key)
+        # Deterministic, and `lib` before its `lib64` alias.
+        dirs.sort()
+
         for name in names:
-            if ".so" in name:
-                yield Path(directory) / name
+            if name.endswith(".so") or ".so." in name:
+                yield Path(directory, name).relative_to(root)
 
 
 def unresolved(library: Path) -> Iterator[str]:
     """Yield the sonames `ldd` cannot resolve for one library.
 
     `ldd` rejects everything that is not a dynamic ELF, of which an environment
-    holds plenty; those report nothing rather than failing the run.
+    holds plenty. Those report nothing rather than failing the run.
     """
     result = run(["ldd", library], capture_output=True, text=True, check=False)
 
@@ -46,27 +73,28 @@ def unresolved(library: Path) -> Iterator[str]:
 def missing(root: Path, allowed: Iterable[str]) -> dict[str, Path]:
     """Map each unresolved soname below `root` to one library needing it.
 
-    Sonames matching a glob in `allowed` are left out:
-    the host supplies them at runtime and no build can resolve them.
+    Left out are the sonames the environment ships itself or `allowed` match.
 
     >>> missing(Path("/var/empty"), [])
     {}
     """
-    workers = int(environ.get("NIX_BUILD_CORES", "0")) or cpu_count()
+    workers = int(environ.get("NIX_BUILD_CORES", "0")) or None
+    libraries = list(shared_libraries(root))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        libraries = list(shared_libraries(root))
-        results = pool.map(unresolved, libraries)
+        results = pool.map(unresolved, (root / lib for lib in libraries))
         found = {
             soname: library
             for library, sonames in zip(libraries, results)
             for soname in sonames
         }
 
+    provided = {library.name for library in libraries}
+
     return {
         soname: library
         for soname, library in sorted(found.items())
-        if not any(fnmatch(soname, pattern) for pattern in allowed)
+        if soname not in provided and not matches(soname, allowed)
     }
 
 

@@ -566,6 +566,14 @@ Entries here are appended to the runpath of every wheel rather than a chosen one
 runtimePaths = [ "${pkgs.lib.getLib pkgs.libsndfile}/lib" ];   # soundfile, reached through cffi
 ```
 
+NCCL reaches InfiniBand the same way: it `dlopen`s `libibverbs` by bare name, and when that fails it falls back to TCP sockets without an error.
+A multi-node workspace therefore needs `rdma-core` here, besides `buildInputs` for the nvshmem and cuFile transports that link it:
+
+```nix
+buildInputs = [ pkgs.rdma-core ];                               # nvshmem, cuFile
+runtimePaths = [ "${pkgs.lib.getLib pkgs.rdma-core}/lib" ];     # NCCL
+```
+
 Each model defaults to the backend's `package` but can pin its own with `models.<name>.package`, so a single model can follow a nightly build for a freshly-released architecture while the rest stay on the stable pin.
 
 Because a unit only goes active once it is healthy, `startupOrdering` (on by default) is effective here: workers boot one at a time in ascending `port` order, each finishing its GPU-memory profiling before the next begins, which is what keeps two models sharing a device from racing into an OOM.

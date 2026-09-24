@@ -1,6 +1,6 @@
 // Package systemd implements the sliver of systemd's service protocol llmhop
-// needs: sd_notify(3) readiness, and the exit status a supervising unit reports
-// back to the manager.
+// needs: socket activation, sd_notify(3) readiness, and the exit status a
+// supervising unit reports back to the manager.
 package systemd
 
 import (

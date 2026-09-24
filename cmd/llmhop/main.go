@@ -33,22 +33,38 @@ func main() {
 		return
 	}
 
-	ln, err := net.Listen("tcp", cfg.Listen())
+	listeners, err := systemd.Listeners()
 	if err != nil {
-		log.Fatalf("listen: %v", err)
+		log.Fatalf("socket activation: %v", err)
+	}
+
+	if len(listeners) == 0 {
+		ln, err := net.Listen("tcp", cfg.Listen())
+		if err != nil {
+			log.Fatalf("listen: %v", err)
+		}
+
+		listeners = []net.Listener{ln}
 	}
 
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("listening on %s with %d model(s)", cfg.Listen(), len(cfg.Models))
+
+	for _, ln := range listeners {
+		log.Printf("listening on %s with %d model(s)", ln.Addr(), len(cfg.Models))
+	}
 
 	if err := systemd.Ready(); err != nil {
 		log.Printf("sd_notify: %v", err)
 	}
 
-	if err := srv.Serve(ln); err != nil {
-		log.Fatal(err)
+	errs := make(chan error, len(listeners))
+
+	for _, ln := range listeners {
+		go func() { errs <- srv.Serve(ln) }()
 	}
+
+	log.Fatal(<-errs)
 }

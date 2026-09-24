@@ -12,10 +12,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 
 	"github.com/mirkolenz/llmhop/internal/authz"
 	"github.com/mirkolenz/llmhop/internal/config"
+	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 // New returns an http.Handler that serves the OpenAI models API from the
@@ -25,19 +25,20 @@ import (
 func New(cfg *config.Config) (http.Handler, error) {
 	proxies := make(map[string]*httputil.ReverseProxy, len(cfg.Models))
 	for name, m := range cfg.Models {
-		u, err := url.Parse(m.URL)
+		up, err := upstream.Parse(m.URL)
 		if err != nil {
-			return nil, fmt.Errorf("model %q: invalid url %q: %w", name, m.URL, err)
+			return nil, fmt.Errorf("model %q: %w", name, err)
 		}
 		proxies[name] = &httputil.ReverseProxy{
 			Rewrite: func(r *httputil.ProxyRequest) {
-				r.SetURL(u)
+				r.SetURL(up.URL)
 				r.SetXForwarded()
 
 				for k, v := range m.Headers {
 					r.Out.Header.Set(k, v)
 				}
 			},
+			Transport: up.Transport,
 		}
 	}
 

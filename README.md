@@ -62,6 +62,9 @@ Create a `config.json`:
     "llama-3-8b": {
       "url": "http://localhost:30000"
     },
+    "qwen3-8b": {
+      "url": "unix:///run/llmhop/vllm-qwen3-8b/http.sock"
+    },
     "openai-gpt-4o": {
       "url": "https://api.openai.com",
       "headers": {
@@ -74,6 +77,9 @@ Create a `config.json`:
 
 `host` defaults to every interface and `port` to `8080`.
 IPv6 literals are written plain (`"host": "::1"`) and bracketed internally.
+
+A model `url` is either an absolute `http(s)` URL or `unix:///<socket path>`.
+A socket URL carries no path prefix, so requests go to the root of the server listening on it.
 
 Each model additionally takes `"unlisted": true`, which keeps the backend routable by name while hiding it from `GET /v1/models` and `GET /v1/models/{model}`.
 
@@ -93,7 +99,7 @@ Unresolved references are a hard startup error.
 
 ### Validation
 
-Unknown keys are rejected rather than ignored, so a misspelled `maxBodyBytes` fails loudly instead of silently falling back to its default, and every model `url` must be an absolute `http(s)` URL.
+Unknown keys are rejected rather than ignored, so a misspelled `maxBodyBytes` fails loudly instead of silently falling back to its default, and every model `url` must be an absolute `http(s)` or `unix` URL.
 
 `--check` runs the full startup path (parsing, validation, router construction) and exits without binding a port:
 

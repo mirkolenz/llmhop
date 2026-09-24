@@ -6,15 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"slices"
 	"strconv"
 
 	"github.com/mirkolenz/llmhop/internal/secrets"
+	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 type Model struct {
+	// URL is an absolute http(s) URL or `unix:///<socket path>`.
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers,omitempty"`
 	// Unlisted keeps a backend routable but hides it from the model catalog,
@@ -110,15 +111,8 @@ func (cfg *Config) validate() error {
 	}
 
 	for name, model := range cfg.Models {
-		u, err := url.Parse(model.URL)
-		if err != nil {
-			return fmt.Errorf("models.%s: invalid url %q: %w", name, model.URL, err)
-		}
-
-		// `url.Parse` happily accepts `127.0.0.1:8000` (scheme `127.0.0.1`),
-		// which would only surface as a proxy error per request.
-		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("models.%s: url %q must be an absolute http(s) URL", name, model.URL)
+		if _, err := upstream.Parse(model.URL); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
 		}
 	}
 

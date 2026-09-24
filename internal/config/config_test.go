@@ -73,7 +73,7 @@ func TestLoad(t *testing.T) {
 		{
 			name:    "requires absolute model URLs",
 			body:    `{"models": {"m": {"url": "localhost:8000"}}}`,
-			wantErr: "absolute http(s) URL",
+			wantErr: "absolute http(s) or unix URL",
 		},
 		{
 			name: "defaults applied",

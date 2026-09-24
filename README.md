@@ -171,13 +171,15 @@ Add LLMhop to your flake inputs and import the module into your system configura
 }
 ```
 
-The unit runs under `DynamicUser` with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
+The unit runs as the `llmhop` system user with aggressive sandboxing (`ProtectSystem`, `PrivateTmp`, restricted syscalls and address families, no new privileges, ...) and restarts on failure.
 
-The module and the binary are deliberately coupled in four places:
+The module and the binary are deliberately coupled in these places:
 
-- `host` and `port` are module options that map one-to-one onto the binary's own config fields, so the listener port is a first-class value on both sides, with nothing rendered or re-parsed in between. It joins the same global port registry the inference backends use, so a backend model reusing it fails evaluation instead of leaving one of the two services unable to bind, and `openFirewall` can act on it directly.
+- Every listener is a `llmhop-<name>.socket` unit, handed to the one service through socket activation, so llmhop binds nothing itself and runs with `SocketBindDeny=any`. The top-level `port`, `host`, `socket`, `socketUser`, `socketGroup` and `socketMode` options define the `default` listener, and each entry of `listen` adds another one with the same options.
+- A listener with a `port` binds `host:port`, with `host` an IP literal. The port joins the same global port registry the inference backends use, so a backend model reusing it fails evaluation instead of leaving one of the two services unable to bind, and `openFirewall` opens it. The `default` listener keeps `port = 8080` unless changed.
+- A listener without a `port` is a unix socket at `socket` (default `<socketDirectory>/<name>.sock`), for a reverse proxy on the same host. systemd applies its `socketUser`, `socketGroup` and `socketMode` and removes the file on stop, so `listen.caddy.socketGroup = "caddy"` grants Caddy access. TCP and socket listeners can be combined freely.
 - The generated config is validated at build time by the binary itself (`llmhop -check`), so a typo or a malformed model URL fails `nixos-rebuild` rather than the service. The schema therefore lives in exactly one place, the Go `Config` struct, instead of being mirrored in Nix. Validation is skipped when the target platform cannot be executed by the build machine (cross-compiled deployments).
-- The unit is `Type=notify`, matching the binary's readiness signal, so anything ordered after `llmhop.service` can assume the port answers.
+- The unit is `Type=notify`, matching the binary's readiness signal, so anything ordered after `llmhop.service` can assume it serves.
 - The same package ships `llmhop-notify`, which the native backends prefix to every model server's command line. None of them speak `sd_notify`, so it polls `/health` and reports readiness on their behalf, letting the worker units be `Type=notify` too. It stays the unit's main process and exits with the server's status, so a model that dies while loading fails its unit immediately instead of being waited out until `TimeoutStartSec`.
 
 The NixOS module is split into two exports.
@@ -188,7 +190,7 @@ Import the latter only if you need `llama-cpp-quadlet`, `vllm-quadlet`, or `sgla
 ### Inference backends
 
 The module can also run the inference servers themselves, so you don't have to wire up llama.cpp, sglang or vLLM by hand.
-Each backend exposes a `models` attrset under `services.llmhop.<backend>` and every entry becomes one isolated worker bound to a loopback port, with the matching route registered automatically with llmhop.
+Each backend exposes a `models` attrset under `services.llmhop.<backend>` and every entry becomes one isolated worker bound to a unix socket or a loopback port, with the matching route registered automatically with llmhop.
 All three backends can be enabled side by side and mixed freely in the same configuration.
 
 Every native worker stays in `activating` until its server answers `/health`, so `systemctl start <backend>-<model>` returns only once the model is actually servable rather than merely spawned.
@@ -215,10 +217,7 @@ services.llmhop = {
   enable = true;
   llama-cpp = {
     enable = true;
-    models."qwen3-8b" = {
-      port = 18001;
-      settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
-    };
+    models."qwen3-8b".settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
   };
   sglang = {
     enable = true;
@@ -232,15 +231,25 @@ services.llmhop = {
   vllm = {
     enable = true;
     package = inputs.llmhop.legacyPackages.${pkgs.system}.mkUvEnv { workspaceRoot = ./vllm-env; };
-    models."llama-3-8b" = {
-      port = 20001;
-      model = "meta-llama/Meta-Llama-3-8B-Instruct";
-    };
+    models."llama-3-8b".model = "meta-llama/Meta-Llama-3-8B-Instruct";
   };
 };
 ```
 
 See the [options reference](https://mirkolenz.github.io/llmhop/) for the full list of per-backend options.
+
+#### Listeners
+
+llama.cpp and vLLM workers, and native watermark detectors, default to `port = null`, which binds the unix socket `<socketDirectory>/<unit>/http.sock` instead of a TCP port.
+`services.llmhop.socketDirectory` defaults to `/run/llmhop`, shared with llmhop's own socket listeners, and must stay below `/run`, since each backend directory is a `RuntimeDirectory=` of its unit.
+Sockets claim nothing from the host's port space, and only llmhop can connect to them, instead of every local process.
+Access is granted to `services.llmhop.user` alone, through a default ACL on the directory.
+The read-only `socket` option of each model holds the resulting path.
+Set `port` to bind `127.0.0.1:<port>` instead, for example to reach a worker without llmhop.
+SGLang and Quadlet detectors have no socket support upstream, so they always take a `port`.
+
+Containers see their socket directory at `/run/llmhop/socket`, mounted with Podman's `U` option, so sockets work with any `User=` and any `UserNS=`, `auto` included.
+`quadlet.mountOptions.socket` replaces those options, for example with `[ "U" "z" ]` on SELinux hosts, beside `quadlet.mountOptions.credentials` for the credential mount.
 
 #### Settings rendering
 
@@ -264,10 +273,7 @@ With no `quadlet.user`, quadlet-nix installs system units and Podman runs rootfu
 services.llmhop.vllm-quadlet = {
   enable = true;
   tag = "latest";
-  models."qwen3-8b" = {
-    model = "Qwen/Qwen3-8B";
-    port = 18001;
-  };
+  models."qwen3-8b".model = "Qwen/Qwen3-8B";
 };
 ```
 
@@ -277,10 +283,7 @@ llama.cpp uses the same interface, but selects one of the upstream server image 
 services.llmhop.llama-cpp-quadlet = {
   enable = true;
   tag = "server-cuda";
-  models."qwen3-8b" = {
-    port = 18001;
-    settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
-  };
+  models."qwen3-8b".settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
 };
 ```
 
@@ -387,10 +390,7 @@ services.llmhop.vllm = {
   package = inputs.llmhop.legacyPackages.${pkgs.system}.mkUvEnv {
     workspaceRoot = ./vllm-env; # directory holding pyproject.toml + uv.lock
   };
-  models."llama-3-8b" = {
-    model = "meta-llama/Meta-Llama-3-8B-Instruct";
-    port = 20001;
-  };
+  models."llama-3-8b".model = "meta-llama/Meta-Llama-3-8B-Instruct";
 };
 ```
 
@@ -582,7 +582,7 @@ runtimePaths = [ "${pkgs.lib.getLib pkgs.rdma-core}/lib" ];     # NCCL
 
 Each model defaults to the backend's `package` but can pin its own with `models.<name>.package`, so a single model can follow a nightly build for a freshly-released architecture while the rest stay on the stable pin.
 
-Because a unit only goes active once it is healthy, `startupOrdering` (on by default) is effective here: workers boot one at a time in ascending `port` order, each finishing its GPU-memory profiling before the next begins, which is what keeps two models sharing a device from racing into an OOM.
+Because a unit only goes active once it is healthy, `startupOrdering` (on by default) is effective here: workers boot one at a time in ascending `name` order, each finishing its GPU-memory profiling before the next begins, which is what keeps two models sharing a device from racing into an OOM.
 
 The container variants live under `services.llmhop.llama-cpp-quadlet`, `vllm-quadlet`, and `sglang-quadlet`.
 A backend's native and container variants emit the same `<backend>-<model>` units and are therefore mutually exclusive, so enable at most one variant per backend.
@@ -595,7 +595,6 @@ Assign the same Nix value to multiple models when sharing is intentional.
 
 ```nix
 services.llmhop.llama-cpp.models."qwen3-8b" = {
-  port = 18001;
   credentials.apiKeys = "/run/secrets/qwen-api-keys";
   settings = {
     hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
@@ -627,7 +626,6 @@ That is an ordinary file-taking setting, so it needs no dedicated option:
 ```nix
 services.llmhop.vllm-quadlet.models."qwen3-8b" = {
   model = "Qwen/Qwen3-8B";
-  port = 18001;
   credentials.config = "/run/secrets/qwen-vllm.yaml";
   settings.config = "\${cred:config}";
 };
@@ -641,7 +639,7 @@ The module does not weaken credential modes to make an incompatible mapping work
 Use an idmapped credential mount when the selected namespace does not already provide that mapping:
 
 ```nix
-models."qwen3-8b".quadlet.credentialMountOptions = [
+models."qwen3-8b".quadlet.mountOptions.credentials = [
   "idmap=uids=0-1000-1;gids=0-1000-1"
 ];
 ```
@@ -708,7 +706,7 @@ They do not receive a GPU device in Quadlet mode.
 
 #### Routing detectors through llmhop
 
-Like the model workers, a detector binds only to host loopback and is registered with llmhop, so clients reach it at llmhop's own address under llmhop's bearer tokens rather than on a second, unauthenticated port.
+A detector binds only to a unix socket or host loopback and is registered with llmhop, so clients reach it at llmhop's own address under llmhop's bearer tokens rather than on a second, unauthenticated port.
 The attribute name is the routing key, so it shares one namespace with every backend's model names and a collision fails evaluation.
 
 Detectors are registered `unlisted`, so they never appear in `GET /v1/models`.
@@ -724,11 +722,13 @@ The response contains `score`, `p_value`, `num_scored_tokens`, and `is_watermark
 The extra `model` key is ignored by the upstream request model, which is a plain pydantic `BaseModel`.
 
 This puts llmhop's authentication in front of a script that has none of its own.
-The detector itself is still unauthenticated on its loopback port, exactly like every model worker, so anything else on the host can reach it directly.
+A detector given a `port` is still unauthenticated there, like every model worker given one, so anything else on the host can reach it directly.
+On its default socket, only llmhop can.
+The native detector binds that socket through a small patch adding `--uds` to the upstream script, applied to the copy extracted from the sdist.
 
 The upstream example also has no config file or key-file option.
 Its `--key` value therefore enters the Nix store and process arguments, so this integration is not suitable for a secret production watermark key until upstream adds a file-based option.
-llmhop does not wrap or patch the script to hide that limitation.
+The `--uds` patch leaves that limitation alone rather than hiding it.
 
 The selected script and package or image must come from a vLLM revision containing `vllm.v1.watermarking`, which no release before 0.30.0 has.
 SGLang and llama.cpp workers can coexist with the detector, but they only produce detectable text if they implement the same watermark generation algorithm and parameters.

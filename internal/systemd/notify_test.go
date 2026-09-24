@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 // listenNotify stands in for the manager's notification socket.
@@ -26,6 +28,17 @@ func listenNotify(t *testing.T) *net.UnixConn {
 	t.Setenv("NOTIFY_SOCKET", path)
 
 	return conn
+}
+
+func parse(t *testing.T, raw string) *upstream.Upstream {
+	t.Helper()
+
+	up, err := upstream.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return up
 }
 
 func readNotify(t *testing.T, conn *net.UnixConn) string {
@@ -79,7 +92,7 @@ func TestReadyWhenHealthy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := ReadyWhenHealthy(srv.URL, time.Millisecond); err != nil {
+	if err := ReadyWhenHealthy(parse(t, srv.URL), "/health", time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 
@@ -100,7 +113,7 @@ func TestReadyWhenHealthyReturnsNotifyError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := ReadyWhenHealthy(srv.URL, time.Millisecond); err == nil {
+	if err := ReadyWhenHealthy(parse(t, srv.URL), "/health", time.Millisecond); err == nil {
 		t.Fatal("expected notification error")
 	}
 }

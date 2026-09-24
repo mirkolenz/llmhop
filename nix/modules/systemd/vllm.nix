@@ -36,6 +36,7 @@ in
             systemd.mkUvModelSubmodule {
               backend = "vllm";
               inherit cfg;
+              socketDirectory = config.services.llmhop.socketDirectory;
               modelArgument = "the `vllm serve` positional argument";
               modelExample = "Qwen/Qwen2.5-7B-Instruct";
             }
@@ -46,11 +47,9 @@ in
           {
             "qwen2-5-7b" = {
               model = "Qwen/Qwen2.5-7B-Instruct";
-              port = 18001;
             };
             "llama-3-8b" = {
               model = "meta-llama/Meta-Llama-3-8B-Instruct";
-              port = 18002;
               settings.max-model-len = 8192;
             };
           }
@@ -60,12 +59,19 @@ in
           Each enabled entry produces one systemd service named `vllm-<name>`;
           the attribute name is the routing key surfaced through llmhop as the
           OpenAI `model` field.
-          Enabled entries are sorted by ascending `port`.
+          Enabled entries are sorted by ascending `name`.
         '';
       };
 
       detectors = lib.mkOption {
-        type = lib.types.attrsOf (lib.types.submodule (detector.mkNativeSubmodule { inherit cfg pkgs; }));
+        type = lib.types.attrsOf (
+          lib.types.submodule (
+            detector.mkNativeSubmodule {
+              inherit cfg pkgs;
+              socketDirectory = config.services.llmhop.socketDirectory;
+            }
+          )
+        );
         default = { };
         description = "Standalone watermark detection services.";
       };
@@ -105,13 +111,7 @@ in
                 "serve"
                 model.model
               ]
-              ++ renderCliArgs "vllm" (
-                withManagedSettings {
-                  served-model-name = model.name;
-                  host = "127.0.0.1";
-                  port = model.port;
-                } settings
-              );
+              ++ renderCliArgs "vllm" (withManagedSettings { served-model-name = model.name; } settings);
           }
           // lib.listToAttrs (
             map (

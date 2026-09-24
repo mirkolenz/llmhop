@@ -56,7 +56,7 @@ in
           Each enabled entry produces one systemd service named `sglang-<name>`;
           the attribute name is the routing key surfaced through llmhop as the
           OpenAI `model` field.
-          Enabled entries are sorted by ascending `port`.
+          Enabled entries are sorted by ascending `name`.
         '';
       };
     };
@@ -92,8 +92,6 @@ in
               withManagedSettings {
                 model-path = model.model;
                 served-model-name = model.name;
-                host = "127.0.0.1";
-                port = model.port;
               } settings
             );
         };

@@ -1,0 +1,19 @@
+--- a/examples/basic/online_serving/watermark_detection_server.py
++++ b/examples/basic/online_serving/watermark_detection_server.py
+@@ -51,6 +51,7 @@
+     parser.add_argument("--p-value-threshold", type=float, default=0.01)
+     parser.add_argument("--host", default="127.0.0.1")
+     parser.add_argument("--port", type=int, default=8000)
++    parser.add_argument("--uds", help="Unix socket to bind instead of --host/--port.")
+     return parser.parse_args()
+ 
+ 
+@@ -63,7 +64,7 @@
+         p_value_threshold=args.p_value_threshold,
+         prf=args.prf,
+     )
+-    uvicorn.run(app, host=args.host, port=args.port)
++    uvicorn.run(app, host=args.host, port=args.port, uds=args.uds)
+ 
+ 
+ if __name__ == "__main__":

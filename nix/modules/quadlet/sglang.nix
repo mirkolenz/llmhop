@@ -11,12 +11,12 @@ let
     credentialDirectory
     credentialsOption
     renderCliArgsShell
-    resolveCredentialRefs
+    resolveSettings
     settingsRendering
     sortedModels
     quadlet
-    withManagedSettings
     workerUrl
+    workloadUnit
     ;
 
   # The Rust SGL Model Gateway's clap `SetTrue` flags negate the same way
@@ -43,11 +43,11 @@ let
   # dedicated podman network. Both stay overridable through `settings`.
   gatewayDefaults = {
     enable-igw = true;
-    worker-urls = map (m: workerUrl m.port) models;
+    worker-urls = map workerUrl models;
   };
 
   workerServices = map (
-    m: "${config.virtualisation.quadlet.containers."sglang-${m.name}".serviceName}.service"
+    m: "${config.virtualisation.quadlet.containers.${workloadUnit "sglang" m}.serviceName}.service"
   ) models;
 
   mkGatewayContainer = lib.nameValuePair "sglang-gateway" (
@@ -55,7 +55,8 @@ let
       inherit cfg;
       inherit (cfg.gateway) credentials;
       overrides = cfg.gateway.quadlet;
-      healthPort = cfg.gateway.port;
+      # Host networking binds the port directly, so nothing is published.
+      containerPort = cfg.gateway.port;
       healthStartPeriod = "5m";
       containerConfig =
         quadlet.mkImageArgs {
@@ -72,8 +73,8 @@ let
           EnvironmentFile = lib.optional (cfg.gateway.environmentFile != null) cfg.gateway.environmentFile;
           Environment = cfg.gateway.environment;
           Exec = renderArgs (
-            resolveCredentialRefs credentialDirectory cfg.gateway.credentials (
-              withManagedSettings gatewayListeners (gatewayDefaults // cfg.gateway.settings)
+            resolveSettings credentialDirectory cfg.gateway.credentials gatewayListeners (
+              gatewayDefaults // cfg.gateway.settings
             )
           );
         };
@@ -140,7 +141,7 @@ in
           Each entry produces one quadlet container; the attribute name is the routing key
           (advertised via `--served-model-name` and surfaced through both llmhop and the
           optional SGL Model Gateway as the OpenAI `model` field).
-          Enabled entries are sorted by ascending `port`.
+          Enabled entries are sorted by ascending `name`.
         '';
       };
 
@@ -267,8 +268,6 @@ in
             settings = model: {
               model-path = model.model;
               served-model-name = model.name;
-              host = "0.0.0.0";
-              port = workerPort;
             };
           }
           // lib.listToAttrs (lib.optional cfg.gateway.enable mkGatewayContainer);

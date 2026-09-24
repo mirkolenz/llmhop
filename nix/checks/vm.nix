@@ -12,17 +12,18 @@ let
 
   notify = lib.getExe' (pkgs.callPackage ../package.nix { }) "llmhop-notify";
 
-  # Stands in for `llama-server`: binds the `--port` the module renders and
-  # answers 503 while "loading", 200 afterwards. Driving it through the real
-  # backend puts the readiness handshake under the generated unit's full
-  # sandbox — DynamicUser, PrivateUsers, SystemCallFilter and all — which is
-  # where a `Type = notify` wrapper actually breaks.
+  # Stands in for `llama-server`: binds the unix socket the module renders as
+  # `--host` and answers 503 while "loading", 200 afterwards. Driving it
+  # through the real backend puts the readiness handshake and the socket
+  # permissions under the generated unit's full sandbox (DynamicUser,
+  # PrivateUsers, SystemCallFilter and all), which is where they actually break.
   fakeServer = pkgs.writeScriptBin "llama-server" ''
     #!${lib.getExe pkgs.python3Minimal}
     import http.server
+    import socketserver
     import sys
 
-    port = int(sys.argv[sys.argv.index("--port") + 1])
+    socket = sys.argv[sys.argv.index("--host") + 1]
 
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -33,11 +34,16 @@ let
             self.send_response(200 if self.health_checks > 1 else 503)
             self.end_headers()
 
+        def do_POST(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"socket ok")
+
         def log_message(self, *args):
             pass
 
 
-    http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    socketserver.UnixStreamServer(socket, Handler).serve_forever()
   '';
 in
 testers.nixosTest {
@@ -47,16 +53,6 @@ testers.nixosTest {
     { ... }:
     {
       imports = [ self.nixosModules.default ];
-
-      services.llmhop.llama-cpp = {
-        enable = true;
-        package = fakeServer;
-        models."fake-model" = {
-          port = 9100;
-          credentials.apiKeys = workerKey;
-          settings.api-key-file = "\${cred:apiKeys}";
-        };
-      };
 
       # Started by hand so the `activating` window is observable rather than
       # racing the rest of the test script.
@@ -68,32 +64,44 @@ testers.nixosTest {
         serviceConfig = {
           Type = "notify";
           TimeoutStartSec = 60;
-          ExecStart = "${notify} -port 9101 -- ${lib.getExe' pkgs.coreutils "false"}";
+          ExecStart = "${notify} -url http://127.0.0.1:9101 -- ${lib.getExe' pkgs.coreutils "false"}";
         };
       };
 
-      services.llmhop = {
-        enable = true;
-        host = "127.0.0.1";
-        port = 8080;
-        credentials = {
-          client_token = clientToken;
-          upstream_key = upstreamKey;
-        };
-        settings = {
-          authTokens = [ "\${cred:client_token}" ];
-          models."test-model" = {
-            url = "http://127.0.0.1:9000";
-            headers.Authorization = "Bearer \${cred:upstream_key}";
+      services = {
+        llmhop = {
+          llama-cpp = {
+            enable = true;
+            package = fakeServer;
+            models."fake-model" = {
+              credentials.apiKeys = workerKey;
+              settings.api-key-file = "\${cred:apiKeys}";
+            };
+          };
+
+          enable = true;
+          # Two sockets, so llmhop serves every descriptor systemd hands over.
+          host = "127.0.0.1";
+          listen.local = { };
+          credentials = {
+            client_token = clientToken;
+            upstream_key = upstreamKey;
+          };
+          settings = {
+            authTokens = [ "\${cred:client_token}" ];
+            models."test-model" = {
+              url = "http://127.0.0.1:9000";
+              headers.Authorization = "Bearer \${cred:upstream_key}";
+            };
           };
         };
-      };
 
-      services.caddy = {
-        enable = true;
-        virtualHosts."http://127.0.0.1:9000".extraConfig = ''
-          respond "auth={http.request.header.authorization}" 200
-        '';
+        caddy = {
+          enable = true;
+          virtualHosts."http://127.0.0.1:9000".extraConfig = ''
+            respond "auth={http.request.header.authorization}" 200
+          '';
+        };
       };
     };
 
@@ -113,6 +121,9 @@ testers.nixosTest {
     with subtest("the unit is only active once the listener is bound"):
         # Type=notify + sd_notify: no wait_for_open_port needed for llmhop.
         machine.succeed("curl -fsS http://127.0.0.1:8080/health >/dev/null")
+
+    with subtest("the unix socket listener serves too"):
+        machine.succeed("curl -fsS --unix-socket /run/llmhop/local.sock http://localhost/health >/dev/null")
 
     with subtest("health is served without a token"):
         # `test-model` plus the llama-cpp backend's own registration.
@@ -141,6 +152,14 @@ testers.nixosTest {
     with subtest("the unit goes active once the model answers 200"):
         # Only reachable if READY=1 crossed the worker sandbox.
         machine.wait_for_unit("llama-cpp-fake-model.service")
+
+    with subtest("llmhop reaches the worker through its socket"):
+        body = machine.succeed(curl({"model": "fake-model"}, token="client-secret"))
+        assert body == "socket ok", f"unexpected body: {body!r}"
+
+    with subtest("the worker restarts over its stale socket"):
+        machine.succeed("systemctl kill --signal=SIGKILL llama-cpp-fake-model.service")
+        machine.succeed("systemctl restart llama-cpp-fake-model.service")
 
     with subtest("the worker stops cleanly"):
         machine.succeed("systemctl stop llama-cpp-fake-model.service")

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 // Bound on a single health probe; the unit's `TimeoutStartSec` bounds the wait
@@ -48,11 +50,13 @@ func Ready() error {
 	return nil
 }
 
-// ReadyWhenHealthy polls url until it answers 200, then reports readiness on
-// behalf of a server that speaks no sd_notify itself.
-func ReadyWhenHealthy(url string, interval time.Duration) error {
-	client := &http.Client{Timeout: probeTimeout}
+// ReadyWhenHealthy polls healthPath on up until it answers 200, then reports
+// readiness on behalf of a server that speaks no sd_notify itself.
+func ReadyWhenHealthy(up *upstream.Upstream, healthPath string, interval time.Duration) error {
+	client := &http.Client{Timeout: probeTimeout, Transport: up.Transport}
 	defer client.CloseIdleConnections()
+
+	url := up.URL.JoinPath(healthPath).String()
 
 	for !healthy(client, url) {
 		time.Sleep(interval)

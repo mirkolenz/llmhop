@@ -24,6 +24,66 @@ let
     else
       configFile;
 
+  tcpListeners = lib.filterAttrs (_: listener: listener.port != null) cfg.listen;
+
+  # A `ListenStream=`, which takes IP literals only.
+  listenStream =
+    listener:
+    if listener.port == null then
+      listener.socket
+    else if listener.host == "" then
+      toString listener.port
+    else if lib.hasInfix ":" listener.host then
+      "[${listener.host}]:${toString listener.port}"
+    else
+      "${listener.host}:${toString listener.port}";
+
+  # Shared by the top-level options, which define the `default` listener, and
+  # every entry of `listen`.
+  listenerOptions = name: defaultPort: {
+    port = lib.mkOption {
+      type = with lib.types; nullOr port;
+      default = defaultPort;
+      description = ''
+        TCP port to listen on, registered in the global port registry so a
+        backend reusing it fails evaluation. `null` listens on the unix socket
+        `socket` instead.
+      '';
+    };
+    host = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      example = "127.0.0.1";
+      description = ''
+        IP address to bind `port` to. The default binds every interface,
+        leaving access control to the firewall. IPv6 literals are written
+        plain (e.g. `::1`).
+      '';
+    };
+    socket = lib.mkOption {
+      type = lib.types.str;
+      default = "${cfg.socketDirectory}/${name}.sock";
+      defaultText = lib.literalExpression ''"''${config.services.llmhop.socketDirectory}/${name}.sock"'';
+      description = "Unix socket to listen on while `port` is null.";
+    };
+    socketUser = lib.mkOption {
+      type = lib.types.str;
+      default = "root";
+      description = "Owner of `socket`.";
+    };
+    socketGroup = lib.mkOption {
+      type = lib.types.str;
+      default = "root";
+      example = "caddy";
+      description = "Group of `socket`, typically the one of a reverse proxy in front of llmhop.";
+    };
+    socketMode = lib.mkOption {
+      type = lib.types.str;
+      default = "0660";
+      description = "Mode of `socket`. Connecting needs write permission.";
+    };
+  };
+
   inherit (import ./lib.nix lib)
     credentialsOption
     mergeCredentialServiceConfig
@@ -38,7 +98,8 @@ in
     ./systemd/sglang.nix
   ];
 
-  options.services.llmhop = {
+  # The top-level listener options define the `default` listener.
+  options.services.llmhop = listenerOptions "default" 8080 // {
     enable = lib.mkEnableOption "llmhop reverse proxy";
 
     package = lib.mkPackageOption pkgs "llmhop" { } // {
@@ -46,31 +107,47 @@ in
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
     };
 
-    host = lib.mkOption {
+    user = lib.mkOption {
       type = lib.types.str;
-      default = "";
-      example = "127.0.0.1";
+      default = "llmhop";
       description = ''
-        Interface llmhop binds to. The default binds every interface, leaving
-        access control to the firewall. IPv6 literals are written plain
-        (e.g. `::1`) and bracketed by llmhop itself.
+        System user llmhop runs as. The default user and its group are
+        declared by the module; any other name is the deployer's to declare.
+        Backend sockets grant access to this user alone.
       '';
     };
 
-    port = lib.mkOption {
-      type = lib.types.port;
-      default = 8080;
+    socketDirectory = lib.mkOption {
+      type = lib.types.strMatching "/run/[^/]+(/[^/]+)*";
+      default = "/run/llmhop";
       description = ''
-        Port llmhop listens on. Registered in the global port registry, so a
-        backend model reusing it fails evaluation instead of leaving one of the
-        two services unable to bind.
+        Directory of every unix socket llmhop serves or connects to: the
+        default path of each socket listener, and one directory per workload
+        without a `port`. Those are `RuntimeDirectory=`s except under a
+        rootless Quadlet user, hence the `/run` prefix.
+      '';
+    };
+
+    listen = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule ({ name, ... }: { options = listenerOptions name null; })
+      );
+      default = { };
+      example.caddy.socketGroup = "caddy";
+      description = ''
+        Addresses llmhop serves besides the `default` listener, which the
+        top-level `port`, `host`, `socket`, `socketUser`, `socketGroup` and
+        `socketMode` options define.
+        Each is a `llmhop-<name>.socket` unit handing its socket to llmhop
+        through socket activation. systemd applies the ownership and mode of a
+        unix socket and removes it on stop.
       '';
     };
 
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Whether to open `port` in the host firewall.";
+      description = "Whether to open the `port` of every TCP listener in the host firewall.";
     };
 
     credentials = credentialsOption // {
@@ -86,7 +163,7 @@ in
     };
 
     settings = lib.mkOption {
-      type = format.type;
+      inherit (format) type;
       default = { };
       example = {
         models = {
@@ -95,8 +172,9 @@ in
       };
       description = ''
         Configuration written to the JSON config file passed to llmhop.
-        See the upstream `Config` struct for available fields; `host` and
-        `port` are contributed by the options of the same name.
+        See the upstream `Config` struct for available fields. `host` and
+        `port` only apply outside socket activation, so the module's
+        listeners come from the options of the same name and `listen` instead.
 
         The generated file is validated at build time by the binary itself, so
         unknown keys and malformed model URLs fail `nixos-rebuild` rather than
@@ -165,53 +243,108 @@ in
     }
     (lib.mkIf cfg.enable {
       services.llmhop = {
-        # Contributed as real option definitions rather than merged in behind
-        # the user's back, so a conflicting `settings.port` fails evaluation
-        # instead of being silently dropped.
-        settings = { inherit (cfg) host port; };
+        listen.default = {
+          inherit (cfg)
+            port
+            host
+            socket
+            socketUser
+            socketGroup
+            socketMode
+            ;
+        };
 
-        # llmhop's own listener competes for host ports with every backend
-        # worker, so it participates in the same collision check.
-        portsRegistry."llmhop.port" = cfg.port;
+        # llmhop's listeners compete for host ports with every backend worker,
+        # so they participate in the same collision check.
+        portsRegistry = lib.mapAttrs' (
+          name: listener: lib.nameValuePair "llmhop.listen.${name}" listener.port
+        ) tcpListeners;
       };
 
-      networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+      networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
+        lib.mapAttrsToList (_: listener: listener.port) tcpListeners
+      );
 
-      systemd.services.llmhop = {
-        description = "llmhop reverse proxy";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
+      users = lib.mkIf (cfg.user == "llmhop") {
+        users.llmhop = {
+          description = "llmhop reverse proxy";
+          isSystemUser = true;
+          group = "llmhop";
+        };
+        groups.llmhop = { };
+      };
 
-        unitConfig = systemd.sharedUnitConfig;
+      systemd = {
+        # See "Unix sockets" in the module internals documentation.
+        tmpfiles.settings."10-llmhop".${cfg.socketDirectory} = {
+          d = {
+            mode = "0711";
+            user = "root";
+            group = "root";
+          };
+          a.argument = "default:user:${cfg.user}:-wx";
+        };
 
-        # Tighter than the worker baseline: `@resources` syscalls are blocked
-        # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited baseline
-        # for the sd_notify datagram; the proxy itself speaks IP only.
-        serviceConfig = mergeCredentialServiceConfig (
-          systemd.hardenedServiceConfig
-          // {
-            # Pairs with the binary's sd_notify call: the unit reaches `active`
-            # only once the port accepts connections, so anything ordered after
-            # llmhop can assume it answers.
-            Type = "notify";
-            ExecStart = utils.escapeSystemdExecArgs [
-              (lib.getExe cfg.package)
-              "-config"
-              validatedConfigFile
-            ];
-            Restart = "on-failure";
-            RestartSec = 5;
-            DynamicUser = true;
-            PrivateDevices = true;
-            UMask = "0077";
-            SystemCallFilter = [
-              "@system-service"
-              "~@privileged"
-              "~@resources"
-            ];
+        sockets = lib.mapAttrs' (
+          name: listener:
+          lib.nameValuePair "llmhop-${name}" {
+            wantedBy = [ "sockets.target" ];
+            listenStreams = [ (listenStream listener) ];
+            socketConfig = {
+              Service = "llmhop.service";
+            }
+            // lib.optionalAttrs (listener.port == null) {
+              SocketUser = listener.socketUser;
+              SocketGroup = listener.socketGroup;
+              SocketMode = listener.socketMode;
+              RemoveOnStop = true;
+            };
           }
-        ) cfg.credentials;
+        ) cfg.listen;
+
+        services.llmhop = {
+          description = "llmhop reverse proxy";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "network-online.target" ];
+          wants = [ "network-online.target" ];
+
+          unitConfig = systemd.sharedUnitConfig;
+
+          # Tighter than the worker baseline: `@resources` syscalls are blocked
+          # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited baseline
+          # for the sd_notify datagram and the worker sockets.
+          serviceConfig = mergeCredentialServiceConfig (
+            systemd.hardenedServiceConfig
+            // {
+              # Pairs with the binary's sd_notify call: the unit reaches `active`
+              # only once llmhop serves, so anything ordered after it can assume
+              # it answers.
+              Type = "notify";
+              ExecStart = utils.escapeSystemdExecArgs [
+                (lib.getExe cfg.package)
+                "-config"
+                validatedConfigFile
+              ];
+              Restart = "on-failure";
+              RestartSec = 5;
+              # Named, not `DynamicUser`, so the backend sockets' ACL can grant
+              # this user alone. Never give it a `RuntimeDirectory=` of
+              # `socketDirectory`: stopping llmhop would delete every socket.
+              User = cfg.user;
+              # The listeners arrive from `llmhop-<name>.socket`, so nothing is
+              # bound here.
+              Sockets = lib.mapAttrsToList (name: _: "llmhop-${name}.socket") cfg.listen;
+              SocketBindDeny = "any";
+              PrivateDevices = true;
+              UMask = "0077";
+              SystemCallFilter = [
+                "@system-service"
+                "~@privileged"
+                "~@resources"
+              ];
+            }
+          ) cfg.credentials;
+        };
       };
     })
   ];

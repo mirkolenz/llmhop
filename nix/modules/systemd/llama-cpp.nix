@@ -21,6 +21,7 @@ in
         lib.types.submodule (
           systemd.mkModelSubmodule {
             backend = "llama-cpp";
+            socketDirectory = config.services.llmhop.socketDirectory;
             portDescription = ''
               Loopback host port that llama-server binds to. Must be unique per
               enabled model; the gateway (llmhop) reaches each backend at
@@ -33,7 +34,6 @@ in
       example = lib.literalExpression ''
         {
           "qwen3-8b" = {
-            port = 18001;
             settings = {
               hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
               temperature = 1.0;
@@ -82,13 +82,7 @@ in
           execStart =
             model: settings:
             [ (lib.getExe' cfg.package "llama-server") ]
-            ++ renderCliArgs "llama-cpp" (
-              withManagedSettings {
-                host = "127.0.0.1";
-                port = model.port;
-                alias = model.name;
-              } settings
-            );
+            ++ renderCliArgs "llama-cpp" (withManagedSettings { alias = model.name; } settings);
         };
       }
     ]

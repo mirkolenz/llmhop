@@ -26,7 +26,8 @@ That keeps `0.6` from becoming `0.600000` (what `toString` makes of a float) and
 
 Native workers start from a universal `systemd-exec(5)` baseline shared with the llmhop reverse proxy.
 Quadlet workers skip it, because Podman handles isolation at the container level.
-`SocketBind*` is not part of the baseline: it pairs with a per-unit `SocketBindAllow` that only worker units declare.
+`SocketBind*` is not part of the baseline: it pairs with a per-unit `SocketBindAllow` that only worker units with a `port` declare.
+`SocketBind*` only governs IP sockets, so a worker on a unix socket keeps `SocketBindDeny = "any"`.
 
 ### GPU relaxations
 
@@ -53,6 +54,34 @@ Every accelerator stack compiles kernels on first use and caches them next to `$
 All of the variables are set unconditionally: one belonging to a stack that is not installed is never read, which is cheaper than tracking which host has which vendor.
 MIOpen (ROCm) needs two of them, or its kernel database and its compiled-kernel cache land under separate `$HOME` roots.
 SYCL and the Intel compute runtime only cache their SPIR-V to ISA compilation when asked to, which is what turns a multi-minute JIT into a one-time cost across restarts.
+
+## Unix sockets
+
+A workload without a `port` binds `http.sock` in a directory of its own below `services.llmhop.socketDirectory`, and llmhop reaches it through a `unix://` model URL.
+There is one directory per unit rather than one flat directory of `<unit>.sock` files.
+A flat directory would have to be writable by every worker, letting one worker delete or squat another's socket and intercept its traffic.
+
+`connect()` needs search permission on each directory and write permission on the socket.
+The root is `root:root` with mode `0711` and carries the default ACL `user:<services.llmhop.user>:-wx`, which every directory and socket below it inherits.
+llmhop therefore runs as a named system user rather than a `DynamicUser`, whose UID no ACL could name in advance.
+So llmhop alone can search each directory and write each socket, but not list or read anything.
+Workers cannot reach each other's sockets.
+llmhop's own socket listeners live in the same root, but systemd creates those with the ownership and mode of their listener options.
+Each directory has mode `0710`, which caps the inherited ACL at search.
+
+The kernel masks a new socket's mode with the process umask even below a default ACL, and the ACL mask follows the group bits.
+vLLM and llama.cpp bind with the umask and never `chmod`, so workers run with `UMask = "0007"` (and containers with `Umask=0007`).
+That keeps group write, which the ACL then narrows to the `llmhop` user entry.
+The owning group's own entry comes from the root's `0711` and grants no write.
+
+Each directory is a `RuntimeDirectory=` of its unit, created on start and removed on stop, crashes included.
+So no stale socket can make a restarted server fail with `EADDRINUSE`, although neither server removes one itself.
+A rootful container mounts its directory with `U` (`quadlet.mountOptions.socket`), so Podman hands it to whatever host UID the container user maps to under `UserNS=`, and ACLs survive the `chown`.
+The directory mode is a default rather than enforced, so `serviceConfig.RuntimeDirectoryMode` can still override it.
+
+A user manager keeps `RuntimeDirectory=` below its own `$XDG_RUNTIME_DIR`, which llmhop cannot enter.
+Rootless containers therefore use a tmpfiles directory owned by the Podman account, and an `ExecStartPre=` clears it.
+It runs through `podman unshare`, since after the `U` chown only the account's user namespace may delete there.
 
 ## Python backends built from wheels
 
@@ -82,7 +111,7 @@ vLLM and SGLang catch an EngineCore death, shut the API server down gracefully, 
 A shared `StartLimitBurst` of 3 errors per hour still breaks crash loops, so journald surfaces the underlying error instead of an endless restart.
 `TimeoutStartSec` allows an hour, which covers cold-start model downloads plus GPU memory profiling.
 
-Workers are chained by ascending `port` during startup.
+Workers are chained by ascending `name` during startup.
 GPU-memory profiling races otherwise: two workers booting on the same device each see it as fully free and race to claim their share, leading to OOM.
 The chain is only meaningful because a worker is held in `activating` until its server reports itself ready, which `llmhop-notify` does for native units and `Notify=healthy` for containers.
 

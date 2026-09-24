@@ -31,6 +31,7 @@ in
             quadlet.mkModelSubmodule {
               backend = "llama-cpp-quadlet";
               inherit cfg;
+              socketDirectory = config.services.llmhop.socketDirectory;
               hasModel = false;
               portDescription = ''
                 Loopback host port forwarded to the container's llama.cpp API.
@@ -43,7 +44,6 @@ in
         example = lib.literalExpression ''
           {
             "qwen3-8b" = {
-              port = 18001;
               settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
             };
           }
@@ -66,11 +66,7 @@ in
         virtualisation.quadlet.containers = quadlet.mkModelContainers {
           backend = "llama-cpp-quadlet";
           inherit cfg config workerPort;
-          settings = model: {
-            host = "0.0.0.0";
-            port = workerPort;
-            alias = model.name;
-          };
+          settings = model: { alias = model.name; };
         };
       }
     ]

@@ -87,7 +87,7 @@ let
     };
     models.test = credentialed // {
       quadlet.containerConfig.User = "1000";
-      quadlet.credentialMountOptions = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+      quadlet.mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
     };
     detectors.watermark = {
       tokenizer = "example/test";
@@ -115,7 +115,7 @@ let
         credentials.tlsKey = tlsKey;
         settings.tls-key-path = "\${cred:tlsKey}";
         quadlet.containerConfig.User = "1000";
-        quadlet.credentialMountOptions = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+        quadlet.mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
       };
     };
   };
@@ -204,6 +204,69 @@ let
 
   invalidCredential = mkConfig { models.test.credentials."tls/key" = tlsKey; };
 
+  # Without a `port`, workers bind a unix socket below a custom root. `b`
+  # sorts after `a` despite being declared first, so it is the one chained on
+  # its predecessor. `b` also runs in its own user namespace.
+  sockets = mkSystem {
+    enable = true;
+    socketDirectory = "/run/sockets/llmhop";
+    user = "hop";
+    vllm = {
+      enable = true;
+      uid = 504;
+      package = pkgs.writeShellScriptBin "vllm" "exit 0";
+      models.test = {
+        model = "example/test";
+        # The escape hatch still wins over the socket directory's mode.
+        serviceConfig.RuntimeDirectoryMode = "0750";
+      };
+      detectors.watermark = {
+        tokenizer = "example/test";
+        script = detectorScript;
+        settings.key = 42;
+      };
+    };
+    llama-cpp-quadlet = {
+      enable = true;
+      tag = "server";
+      models = {
+        b = {
+          settings.hf-repo = "example/b";
+          quadlet = {
+            containerConfig.UserNS = "auto";
+            mountOptions.socket = [
+              "U"
+              "z"
+            ];
+          };
+        };
+        a.settings.hf-repo = "example/a";
+      };
+    };
+  };
+
+  # llmhop's own listeners, each a socket unit handed to the one service.
+  listeners = mkSystem {
+    enable = true;
+    openFirewall = true;
+    listen.caddy.socketGroup = "caddy";
+  };
+  listenerIPv6 = mkSystem {
+    enable = true;
+    host = "::1";
+  };
+
+  rootlessSockets = mkConfig {
+    quadlet.user.uid = 503;
+    models.test.port = null;
+  };
+
+  socketRoot = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
+  socketWorker = sockets.systemd.services.vllm-test;
+  socketDetector = sockets.systemd.services.vllm-detector-watermark;
+  socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
+  rootlessSocketContainer = rootlessSockets.virtualisation.quadlet.containers.vllm-test;
+
   rootfulWorker = rootful.virtualisation.quadlet.containers.vllm-test;
   rootfulDetector = rootful.virtualisation.quadlet.containers.vllm-detector-watermark;
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
@@ -213,6 +276,175 @@ let
   nativeVllmDetector = nativeVllm.systemd.services.vllm-detector-watermark;
 
   tests = {
+    testSocketRoot = {
+      expr = {
+        root = {
+          d = { inherit (socketRoot.d) mode user group; };
+          a = { inherit (socketRoot.a) argument; };
+        };
+        user = sockets.systemd.services.llmhop.serviceConfig.User;
+        # A custom user is the deployer's to declare.
+        declared = sockets.users.users ? hop;
+        invalid =
+          evaluates
+            (mkSystem { socketDirectory = "/var/lib/llmhop"; }).services.llmhop.socketDirectory;
+      };
+      expected = {
+        root = {
+          d = {
+            mode = "0711";
+            user = "root";
+            group = "root";
+          };
+          a.argument = "default:user:hop:-wx";
+        };
+        user = "hop";
+        declared = false;
+        invalid = false;
+      };
+    };
+
+    testListeners = {
+      expr = {
+        socket = listeners.systemd.sockets.llmhop-caddy.listenStreams;
+        inherit (listeners.systemd.sockets.llmhop-caddy.socketConfig)
+          Service
+          SocketGroup
+          SocketMode
+          RemoveOnStop
+          ;
+        inherit (listeners.systemd.services.llmhop.serviceConfig) Sockets;
+        registered = listeners.services.llmhop.portsRegistry;
+        firewall = listeners.networking.firewall.allowedTCPPorts;
+        tcp = sockets.systemd.sockets.llmhop-default.listenStreams;
+        ipv6 = listenerIPv6.systemd.sockets.llmhop-default.listenStreams;
+      };
+      expected = {
+        socket = [ "/run/llmhop/caddy.sock" ];
+        Service = "llmhop.service";
+        SocketGroup = "caddy";
+        SocketMode = "0660";
+        RemoveOnStop = true;
+        Sockets = [
+          "llmhop-caddy.socket"
+          "llmhop-default.socket"
+        ];
+        registered."llmhop.listen.default" = 8080;
+        firewall = [ 8080 ];
+        tcp = [ "8080" ];
+        ipv6 = [ "[::1]:8080" ];
+      };
+    };
+
+    testNativeSocket = {
+      expr = {
+        command = containsAll [
+          "-url"
+          "unix:///run/sockets/llmhop/vllm-test/http.sock"
+          "--uds"
+        ] socketWorker.serviceConfig.ExecStart;
+        tcp = containsAll [ "--port" ] socketWorker.serviceConfig.ExecStart;
+        inherit (socketWorker.serviceConfig)
+          UMask
+          RuntimeDirectory
+          RuntimeDirectoryMode
+          SupplementaryGroups
+          ;
+        bind =
+          socketWorker.serviceConfig ? SocketBindAllow && socketWorker.serviceConfig.SocketBindAllow != "tcp";
+        routed = sockets.services.llmhop.settings.models.test.url;
+        registered = sockets.services.llmhop.portsRegistry ? "vllm.models.test";
+      };
+      expected = {
+        command = true;
+        tcp = false;
+        UMask = "0007";
+        RuntimeDirectory = [ "sockets/llmhop/vllm-test" ];
+        RuntimeDirectoryMode = "0750";
+        # No socket group: the root's default ACL alone grants llmhop access.
+        SupplementaryGroups = [
+          "render"
+          "video"
+        ];
+        bind = false;
+        routed = "unix:///run/sockets/llmhop/vllm-test/http.sock";
+        registered = false;
+      };
+    };
+
+    testNativeDetectorSocket = {
+      expr = {
+        command = containsAll [
+          "--uds"
+          "/run/sockets/llmhop/vllm-detector-watermark/http.sock"
+        ] socketDetector.serviceConfig.ExecStart;
+        inherit (socketDetector.serviceConfig) RuntimeDirectory;
+        routed = sockets.services.llmhop.settings.models.watermark;
+      };
+      expected = {
+        command = true;
+        RuntimeDirectory = [ "sockets/llmhop/vllm-detector-watermark" ];
+        routed = {
+          url = "unix:///run/sockets/llmhop/vllm-detector-watermark/http.sock";
+          unlisted = true;
+        };
+      };
+    };
+
+    testQuadletSocket = {
+      expr = {
+        inherit (socketContainer.containerConfig)
+          Volume
+          Umask
+          UserNS
+          HealthCmd
+          ;
+        inherit (socketContainer.serviceConfig) RuntimeDirectory RuntimeDirectoryMode;
+        published = socketContainer.containerConfig ? PublishPort;
+        host = containsAll [ "--host=/run/llmhop/socket/http.sock" ] socketContainer.containerConfig.Exec;
+        after = socketContainer.unitConfig.After;
+      };
+      expected = {
+        Volume = [
+          "/var/cache/llama-cpp:/root/.cache/llama.cpp"
+          "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U,z"
+        ];
+        Umask = "0007";
+        UserNS = "auto";
+        HealthCmd = "curl --fail --silent --show-error --unix-socket /run/llmhop/socket/http.sock http://localhost/health";
+        RuntimeDirectory = [ "sockets/llmhop/llama-cpp-b" ];
+        RuntimeDirectoryMode = "0710";
+        published = false;
+        host = true;
+        after = [ "llama-cpp-a.service" ];
+      };
+    };
+
+    testRootlessSocket = {
+      expr = {
+        clear = containsAll [
+          "unshare rm -f /run/llmhop/vllm-test/http.sock"
+        ] (toString rootlessSocketContainer.serviceConfig.ExecStartPre);
+        runtime = rootlessSocketContainer.serviceConfig ? RuntimeDirectory;
+        directory = {
+          inherit (rootlessSockets.systemd.tmpfiles.settings."10-vllm"."/run/llmhop/vllm-test".d)
+            user
+            group
+            mode
+            ;
+        };
+      };
+      expected = {
+        clear = true;
+        runtime = false;
+        directory = {
+          user = "vllm";
+          group = "vllm";
+          mode = "0710";
+        };
+      };
+    };
+
     testUnknownCredentialReference = {
       expr = evaluates (llmhopLib.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}");
       expected = false;

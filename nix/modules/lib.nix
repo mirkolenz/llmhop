@@ -8,6 +8,16 @@ let
 
   # ─── Shared building blocks (private) ────────────────────────────────
 
+  # Append to a systemd list setting that an earlier layer may have set as a
+  # scalar, or not at all.
+  appendList =
+    attrs: key: entries:
+    lib.toList (attrs.${key} or [ ]) ++ entries;
+
+  # Unit name of a model or auxiliary workload. Everything keyed by unit, from
+  # its socket path to its credential directory, derives from this.
+  workloadUnit = prefix: workload: "${prefix}-${workload.name}";
+
   # Permissive label for unit and routing-key names. Allows dots so
   # `qwen3.6-…`-style version suffixes work.
   modelLabel = types.strMatching "[[:alnum:]][[:alnum:].-]*";
@@ -87,12 +97,11 @@ let
         lib.mapAttrsToList (name: value: "${name}:${toString value.source}") (
           lib.filterAttrs (_: value: value.encrypted == encrypted) normalized
         );
-      append = key: entries: lib.toList (serviceConfig.${key} or [ ]) ++ entries;
     in
     serviceConfig
     // lib.optionalAttrs (credentials != { }) {
-      LoadCredential = append "LoadCredential" (render false);
-      LoadCredentialEncrypted = append "LoadCredentialEncrypted" (render true);
+      LoadCredential = appendList serviceConfig "LoadCredential" (render false);
+      LoadCredentialEncrypted = appendList serviceConfig "LoadCredentialEncrypted" (render true);
     };
 
   # Rewrite every `${cred:<name>}` reference in a settings tree to the path the
@@ -125,6 +134,12 @@ let
 
   systemdCredentialDirectory = unit: "/run/credentials/${unit}.service";
 
+  # Settings as a server receives them: `managed` over `settings`, with every
+  # `${cred:…}` resolved against the credential `directory`.
+  resolveSettings =
+    directory: credentials: managed: settings:
+    resolveCredentialRefs directory credentials (withManagedSettings managed settings);
+
   # ─── CLI rendering (private) ─────────────────────────────────────────
 
   # How each backend's parser reads the two `settings` shapes that have no
@@ -133,22 +148,57 @@ let
   # registers a `--no-<key>` twin for every boolean; `listStyle` picks between
   # `--key a b` ("values") and `--key a --key b` ("repeat"). See the module
   # internals documentation for why neither axis can be delegated to `lib.cli`.
+  # `socketSettings` renders the flags binding a unix socket, or is null for a
+  # server that only listens on TCP.
   cliDialects = {
     llama-cpp = {
       negateBools = true;
       listStyle = "repeat";
+      # llama-server binds a unix socket when the host ends in `.sock`.
+      socketSettings = path: {
+        host = path;
+        port = null;
+      };
     };
     vllm = {
       negateBools = true;
       listStyle = "values";
+      socketSettings = path: {
+        uds = path;
+        host = null;
+        port = null;
+      };
     };
     sglang = {
       negateBools = false;
       listStyle = "values";
+      socketSettings = null;
     };
   };
 
   cliDialect = backend: cliDialects.${quadletServiceName backend};
+
+  # Listener flags binding `socket`, or `host:port` when `socket` is null.
+  listenSettings =
+    backend:
+    {
+      host,
+      port,
+      socket,
+    }:
+    if socket == null then { inherit host port; } else (cliDialect backend).socketSettings socket;
+
+  # What a host process binds, and what a container binds on `containerPort`
+  # or the mounted `socket`, in the shape `listenSettings` takes.
+  hostListen = workload: {
+    host = "127.0.0.1";
+    inherit (workload) port socket;
+  };
+  containerListen = containerPort: socket: {
+    host = "0.0.0.0";
+    port = containerPort;
+    socket = if socket != null then containerSocketPath else null;
+  };
 
   # `false` becomes `--no-<key>` (and `no-<key> = false` becomes `--<key>`) for
   # the backends whose parsers auto-register the negated twin. Other values
@@ -230,9 +280,9 @@ let
     in
     attrs: lib.escapeShellArgs (render attrs);
 
-  # Merge the flags llmhop derives from its own options (bind address,
-  # registered port, routing name) onto the user's `settings`. `managed` wins,
-  # so an override can neither move a server off loopback nor off the port the
+  # Merge the flags llmhop derives from its own options (listener, routing
+  # name) onto the user's `settings`. `managed` wins, so an override can
+  # neither move a server off loopback nor off the port or socket the
   # readiness probe and llmhop route to.
   withManagedSettings = managed: settings: settings // managed;
 
@@ -359,15 +409,14 @@ let
     lib.mkIf (cfg.user == serviceName) {
       users.users.${cfg.user} = {
         description = "${serviceName} service user";
-        uid = cfg.uid;
+        inherit (cfg) uid group;
         isSystemUser = true;
-        group = cfg.group;
       }
       // userExtra;
       users.groups.${cfg.group}.gid = cfg.gid;
     };
 
-  # Ascending-port startup chaining, shared by every multi-worker GPU backend.
+  # Startup chaining by model name, shared by every multi-worker GPU backend.
   # `pinNote` names the backend-specific way to pin a model to one device.
   startupOrderingOption =
     { pinNote }:
@@ -375,11 +424,53 @@ let
       type = types.bool;
       default = true;
       description = ''
-        Whether to chain enabled model services by ascending `port` during startup.
+        Whether to chain enabled model services by ascending `name` during startup.
         GPU-memory profiling races otherwise: two workers booting on the same device
         each see it as fully free and race to claim their share, leading to OOM.
         Disable only when each model pins itself to a dedicated device ${pinNote}.
       '';
+    };
+
+  # `port` plus the `socket` derived from it. A socket-capable workload
+  # defaults to `port = null`, which binds `socket` instead of a TCP port.
+  # `workload` is the submodule's own config, read for `port` and `name`.
+  listenerOptions =
+    {
+      socketCapable,
+      socketDirectory ? null,
+      unitPrefix,
+      portDescription,
+      workload,
+    }:
+    {
+      port = mkOption (
+        if socketCapable then
+          {
+            type = types.nullOr types.port;
+            default = null;
+            description = ''
+              ${portDescription}
+              `null` binds the unix socket `socket` instead, which claims no port
+              and only llmhop can connect to.
+            '';
+          }
+        else
+          {
+            type = types.port;
+            description = portDescription;
+          }
+      );
+      socket = mkOption {
+        type = types.nullOr types.str;
+        readOnly = true;
+        default =
+          if socketCapable && workload.port == null then
+            "${socketDirectory}/${workloadUnit unitPrefix workload}/${socketName}"
+          else
+            null;
+        defaultText = lib.literalMD "`<services.llmhop.socketDirectory>/${unitPrefix}-<name>/${socketName}` while `port` is null, else null";
+        description = "Unix socket the server binds, derived from `port`.";
+      };
     };
 
   # Per-model options every backend exposes, regardless of kind. `backend` is
@@ -390,6 +481,8 @@ let
       backend,
       serviceName ? backend,
       name,
+      workload,
+      socketDirectory ? null,
       portDescription,
     }:
     {
@@ -409,10 +502,17 @@ let
           required label format.
         '';
       };
-      port = mkOption {
-        type = types.port;
-        description = portDescription;
-      };
+    }
+    // listenerOptions {
+      inherit
+        socketDirectory
+        portDescription
+        workload
+        ;
+      socketCapable = (cliDialect backend).socketSettings != null;
+      unitPrefix = serviceName;
+    }
+    // {
       settings = mkOption {
         type = with types; attrsOf anything;
         default = { };
@@ -421,7 +521,7 @@ let
           ${settingsRendering backend}
           Merged with `services.llmhop.${backend}.modelSettings`; per-model entries
           take precedence. The flags llmhop derives from the model options
-          (its served name, bind address and port) always win over both.
+          (its served name and listener) always win over both.
         '';
       };
       environment = mkOption {
@@ -485,6 +585,38 @@ let
         `systemd.services."${serviceName}-<name>"` from your own module,
         where the module system concatenates them with what this one sets.
       '';
+    };
+
+  # ─── Unix sockets (private) ──────────────────────────────────────────
+
+  # A workload without a `port` binds `socketName` in a `RuntimeDirectory=` of
+  # its own below `services.llmhop.socketDirectory`, reachable through that
+  # directory's default ACL for `services.llmhop.user`. See "Unix sockets" in
+  # the module internals documentation for the permission model.
+  socketName = "http.sock";
+
+  # Keeps group write, which the kernel would otherwise mask off the socket
+  # and thereby off its ACL.
+  socketUMask = "0007";
+
+  # Where a container sees its socket directory. Beside, not over, the
+  # credential mount.
+  containerSocketDirectory = "/run/llmhop/socket";
+  containerSocketPath = "${containerSocketDirectory}/${socketName}";
+
+  # Mode of the socket directory, search only: llmhop knows the name.
+  socketDirectoryMode = "0710";
+
+  # The `RuntimeDirectory=` holding `socket`, appended to whatever
+  # `serviceConfig` already declares, since the socket depends on it. Its mode
+  # stays a default the escape hatches may override.
+  socketRuntimeDirectory =
+    serviceConfig: socket:
+    lib.optionalAttrs (socket != null) {
+      RuntimeDirectory = appendList serviceConfig "RuntimeDirectory" [
+        (lib.removePrefix "/run/" (dirOf socket))
+      ];
+      RuntimeDirectoryMode = serviceConfig.RuntimeDirectoryMode or socketDirectoryMode;
     };
 
   # ─── Unit defaults (private) ─────────────────────────────────────────
@@ -592,13 +724,13 @@ let
   # Enabled-model subset shared by registry helpers and backend iteration.
   enabledModels = cfg: enabled cfg.models;
 
-  # Enabled models sorted by ascending `port`, the order workers are emitted
+  # Enabled models sorted by ascending `name`, the order workers are emitted
   # and chained in.
   sortedModels =
     cfg:
     lib.pipe (enabledModels cfg) [
       lib.attrValues
-      (lib.sort (a: b: a.port < b.port))
+      (lib.sortOn (m: m.name))
     ];
 
   # `EnvironmentFile=` layering shared by every workload: the backend-wide file
@@ -629,8 +761,14 @@ let
     else
       throw "${label}: one of `tag`, `digest`, or a default tag must be provided.";
 
-  # Every backend binds the host loopback and llmhop shares the host.
-  workerUrl = port: "http://127.0.0.1:${toString port}";
+  # Every backend binds the host loopback or a socket, and llmhop shares the host.
+  # `workload` carries `port` and, for socket-capable ones, `socket`.
+  workerUrl =
+    workload:
+    if workload.socket != null then
+      "unix://${workload.socket}"
+    else
+      "http://127.0.0.1:${toString workload.port}";
 
   # Cross-cutting NixOS fragment every backend emits: its llmhop models and its
   # contributions to the three registries `core.nix` asserts on. Registry keys
@@ -641,6 +779,7 @@ let
   # rather than one map per registry, so a label cannot go missing from a
   # dimension it belongs to. `model` is the llmhop routing key, registered
   # `unlisted` so the service shares llmhop's auth but stays out of the catalog.
+  # Sockets need no registry, since their paths derive from unit names.
   mkSharedConfig =
     {
       backend,
@@ -650,12 +789,13 @@ let
     }:
     let
       models = enabledModels cfg;
-      # An auxiliary joins a registry only if it carries that field.
+      unitName = workloadUnit serviceName;
+      # An entry joins a registry only if it carries that field.
       mkRegistry =
         modelValue: auxValue:
-        lib.mapAttrs' (name: m: lib.nameValuePair "${backend}.models.${name}" (modelValue m)) models
-        // lib.mapAttrs' (label: aux: lib.nameValuePair "${backend}.${label}" (auxValue aux)) (
-          lib.filterAttrs (_: aux: auxValue aux != null) auxiliaries
+        lib.filterAttrs (_: value: value != null) (
+          lib.mapAttrs' (name: m: lib.nameValuePair "${backend}.models.${name}" (modelValue m)) models
+          // lib.mapAttrs' (label: aux: lib.nameValuePair "${backend}.${label}" (auxValue aux)) auxiliaries
         );
       routed = lib.filterAttrs (_: aux: aux.model or null != null) auxiliaries;
     in
@@ -664,25 +804,27 @@ let
         # Keyed by `name`, not the attribute: that is what the worker advertises
         # and what clients send, and the two differ when `name` is set.
         settings.models =
-          lib.mapAttrs' (_: m: lib.nameValuePair m.name { url = workerUrl m.port; }) models
+          lib.mapAttrs' (_: m: lib.nameValuePair m.name { url = workerUrl m; }) models
           // lib.mapAttrs' (
             _: aux:
             lib.nameValuePair aux.model {
-              url = workerUrl aux.port;
+              url = workerUrl aux;
               unlisted = true;
             }
           ) routed;
         portsRegistry = mkRegistry (m: m.port) (aux: aux.port);
-        unitsRegistry = mkRegistry (m: "${serviceName}-${m.name}") (aux: aux.unit or null);
+        unitsRegistry = mkRegistry unitName (aux: aux.unit or null);
         modelsRegistry = mkRegistry (m: m.name) (aux: aux.model or null);
       };
     };
 
   # ─── Quadlet helpers (private) ───────────────────────────────────────
 
+  # `socket` adds the options of a container that may bind a unix socket.
   mkQuadletObjectOptions =
     {
       description ? "this container",
+      socket ? false,
     }:
     let
       sectionOption =
@@ -715,15 +857,33 @@ let
           fit one of the dedicated `*Config` options.
         '';
       };
-      credentialMountOptions = mkOption {
-        type = with types; listOf str;
-        default = [ ];
-        example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
-        description = ''
-          Podman volume options appended to this container's systemd credential
-          mount. Use an `idmap` mapping when `[Container] User=` selects a
-          non-root identity. The mount is always read-only.
-        '';
+      mountOptions = {
+        credentials = mkOption {
+          type = with types; listOf str;
+          default = [ ];
+          example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+          description = ''
+            Podman volume options appended to ${description}'s systemd
+            credential mount. Use an `idmap` mapping when `[Container] User=`
+            selects a non-root identity. The mount is always read-only.
+          '';
+        };
+      }
+      // lib.optionalAttrs socket {
+        socket = mkOption {
+          type = with types; listOf str;
+          default = [ "U" ];
+          example = [
+            "U"
+            "z"
+          ];
+          description = ''
+            Podman volume options of ${description}'s socket directory mount.
+            `U` hands the directory to whatever host UID the container user maps
+            to, so the socket works under any `User=` and `UserNS=`. Add `z` on
+            SELinux hosts.
+          '';
+        };
       };
     };
 
@@ -765,10 +925,18 @@ let
   # Render a Quadlet container worker fragment. The optional host user selects
   # the systemd user manager. Native Quadlet section overrides are layered
   # globally and then per container.
+  #
+  # The server binds the host `socket` mounted into the container, else
+  # `containerPort`, published on the host `port` unless that is null (host
+  # networking). A rootless `socket` needs `podman` to clear it. See "Unix
+  # sockets" in the module internals documentation.
   mkQuadletWorker =
     {
       cfg,
-      healthPort,
+      containerPort,
+      port ? null,
+      socket ? null,
+      podman ? null,
       healthPath ? "/health",
       healthStartPeriod ? "30m",
       serviceConfig ? { },
@@ -778,7 +946,14 @@ let
       overrides ? { },
     }:
     let
-      credentialMountOptions = [ "ro" ] ++ overrides.credentialMountOptions;
+      rootless = cfg.quadlet.user != null;
+      mounts =
+        lib.optional (
+          socket != null
+        ) "${dirOf socket}:${containerSocketDirectory}${quadletMountSuffix overrides.mountOptions.socket}"
+        ++
+          lib.optional (credentials != { })
+            "%d:${credentialDirectory}${quadletMountSuffix ([ "ro" ] ++ overrides.mountOptions.credentials)}";
       mergedServiceConfig =
         sharedServiceConfig
         // {
@@ -786,6 +961,9 @@ let
           # see the module internals documentation.
           Restart = "always";
           LimitNOFILE = cfg.openFilesLimit;
+        }
+        // lib.optionalAttrs (socket != null && rootless) {
+          ExecStartPre = "${lib.getExe podman} unshare rm -f ${socket}";
         }
         // serviceConfig
         // cfg.quadlet.serviceConfig
@@ -797,28 +975,36 @@ let
         DropCapability = "all";
         Tmpfs = [ "/tmp" ];
         Notify = "healthy";
-        HealthCmd = "curl --fail --silent --show-error http://localhost:${toString healthPort}${healthPath}";
+        HealthCmd = "curl --fail --silent --show-error ${
+          if socket != null then
+            "--unix-socket ${containerSocketPath} http://localhost"
+          else
+            "http://localhost:${toString containerPort}"
+        }${healthPath}";
         HealthStartPeriod = healthStartPeriod;
         HealthInterval = "10s";
         HealthTimeout = "5s";
+      }
+      // lib.optionalAttrs (socket != null) { Umask = socketUMask; }
+      // lib.optionalAttrs (port != null) {
+        PublishPort = [ "127.0.0.1:${toString port}:${toString containerPort}" ];
       }
       // containerConfig
       // cfg.quadlet.containerConfig
       // overrides.containerConfig;
     in
     {
-      uid = if cfg.quadlet.user == null then null else cfg.quadlet.user.uid;
-      serviceConfig = mergeCredentialServiceConfig mergedServiceConfig credentials;
+      uid = if rootless then cfg.quadlet.user.uid else null;
+      serviceConfig = mergeCredentialServiceConfig (
+        mergedServiceConfig
+        // lib.optionalAttrs (!rootless) (socketRuntimeDirectory mergedServiceConfig socket)
+      ) credentials;
       unitConfig = sharedUnitConfig // unitConfig // cfg.quadlet.unitConfig // overrides.unitConfig;
       quadletConfig = cfg.quadlet.quadletConfig // overrides.quadletConfig;
       extraConfig = lib.recursiveUpdate cfg.quadlet.extraConfig overrides.extraConfig;
       containerConfig =
         mergedContainerConfig
-        // lib.optionalAttrs (credentials != { }) {
-          Volume = lib.toList (mergedContainerConfig.Volume or [ ]) ++ [
-            "%d:${credentialDirectory}${quadletMountSuffix credentialMountOptions}"
-          ];
-        };
+        // lib.optionalAttrs (mounts != [ ]) { Volume = appendList mergedContainerConfig "Volume" mounts; };
     };
 
   # ─── Native (systemd) helpers (private) ──────────────────────────────
@@ -830,13 +1016,14 @@ let
   # Render a systemd worker unit fragment from the worker's argv. Returns
   # `{ serviceConfig, unitConfig }` with the shared baseline plus full
   # systemd-exec(5) hardening merged in and lifecycle settings enforced last.
-  # `llmhop-notify` keeps the unit activating until its readiness path answers.
+  # `llmhop-notify` keeps the unit activating until `healthPath` on `url`
+  # answers.
   mkNativeWorker =
     {
       openFilesLimit,
       pkgs,
       utils,
-      healthPort,
+      url,
       healthPath ? "/health",
       execStart,
       serviceConfig ? { },
@@ -858,8 +1045,8 @@ let
           ExecStart = utils.escapeSystemdExecArgs (
             [
               (notifyExe pkgs)
-              "-port"
-              (toString healthPort)
+              "-url"
+              url
               "-health-path"
               healthPath
             ]
@@ -895,6 +1082,24 @@ let
     let
       # CacheDirectory root, owned by the unit; see `gpuCacheEnvironment`.
       cacheBase = "/var/cache/${subdir}";
+      mergedServiceConfig = {
+        Restart = "on-failure";
+        CacheDirectory = subdir;
+        WorkingDirectory = cacheBase;
+        EnvironmentFile = environmentFiles cfg workload;
+      }
+      // (
+        if workload.socket != null then
+          { UMask = socketUMask; }
+        else
+          {
+            UMask = "0077";
+            SocketBindAllow = "tcp:${toString workload.port}";
+          }
+      )
+      // serviceConfig
+      # Last, so the per-workload escape hatch wins over every default.
+      // workload.serviceConfig;
     in
     lib.nameValuePair unitName (
       {
@@ -914,18 +1119,8 @@ let
           healthPath
           ;
         inherit (workload) credentials unitConfig;
-        healthPort = workload.port;
-        serviceConfig = {
-          UMask = "0077";
-          Restart = "on-failure";
-          CacheDirectory = subdir;
-          WorkingDirectory = cacheBase;
-          SocketBindAllow = "tcp:${toString workload.port}";
-          EnvironmentFile = environmentFiles cfg workload;
-        }
-        // serviceConfig
-        # Last, so the per-workload escape hatch wins over every default.
-        // workload.serviceConfig;
+        url = workerUrl workload;
+        serviceConfig = mergedServiceConfig // socketRuntimeDirectory mergedServiceConfig workload.socket;
       }
     );
 
@@ -958,10 +1153,10 @@ let
         execStart
         path
         ;
-      unitName = "${serviceName}-${model.name}";
+      unitName = workloadUnit serviceName model;
       description = "${serviceName} server for ${model.name}";
       workload = model;
-      after = lib.optional (previous != null) "${serviceName}-${previous.name}.service";
+      after = lib.optional (previous != null) "${workloadUnit serviceName previous}.service";
       environment = cacheBase: environment cacheBase // ncclEnvironment;
       serviceConfig = {
         KillSignal = "SIGINT";
@@ -1005,7 +1200,8 @@ let
             ;
           previous = previous index;
           execStart = execStart model (
-            resolveCredentialRefs (systemdCredentialDirectory "${serviceName}-${model.name}") model.credentials
+            resolveSettings (systemdCredentialDirectory (workloadUnit serviceName model)) model.credentials
+              (listenSettings serviceName (hostListen model))
               (cfg.modelSettings // model.settings)
           );
         })
@@ -1056,9 +1252,14 @@ in
     identityConfig
     mergeCredentialServiceConfig
     modelLabel
+    containerListen
+    hostListen
+    listenSettings
+    listenerOptions
     renderCliArgs
     renderCliArgsShell
     resolveCredentialRefs
+    resolveSettings
     serviceConfigOption
     settingsRendering
     sortedModels
@@ -1066,6 +1267,7 @@ in
     unitConfigOption
     withManagedSettings
     workerUrl
+    workloadUnit
     ;
 
   # Global uniqueness check over a `<backend>/<component>` → resource registry
@@ -1180,12 +1382,12 @@ in
             `tag` or `digest`.
           '';
         };
-        # The credential mount is per container: the global layer would apply a
-        # mapping to containers that do not share the same `User=`.
+        # Mounts are per container: the global layer would apply a mapping to
+        # containers that do not share the same `User=`.
         quadlet =
           removeAttrs (mkQuadletObjectOptions {
             description = "every generated container";
-          }) [ "credentialMountOptions" ]
+          }) [ "mountOptions" ]
           // {
             user = mkOption {
               type = types.nullOr userType;
@@ -1300,13 +1502,14 @@ in
       {
         backend,
         cfg,
+        socketDirectory ? null,
         portDescription,
         hasModel ? true,
       }:
       let
         serviceName = quadletServiceName backend;
       in
-      { name, ... }:
+      { name, config, ... }:
       {
         options =
           (baseModelOptions {
@@ -1314,8 +1517,10 @@ in
               backend
               serviceName
               name
+              socketDirectory
               portDescription
               ;
+            workload = config;
           })
           // {
             tag = mkOption {
@@ -1359,7 +1564,10 @@ in
                 isolation: raise the value for larger models or higher tensor-parallel sizes.
               '';
             };
-            quadlet = mkQuadletObjectOptions { description = "this model container"; };
+            quadlet = mkQuadletObjectOptions {
+              description = "this model container";
+              socket = (cliDialect backend).socketSettings != null;
+            };
           }
           // lib.optionalAttrs hasModel {
             model = mkOption {
@@ -1371,13 +1579,14 @@ in
       };
 
     # Every enabled model of a quadlet backend as one
-    # `virtualisation.quadlet.containers` attrset: sorted by ascending `port`,
-    # each published on loopback, chained on its lower-port predecessor, and
-    # with every `${cred:…}` in its settings already resolved.
+    # `virtualisation.quadlet.containers` attrset: sorted by ascending `name`,
+    # each published on loopback or bound to its socket, chained on its
+    # predecessor, and with every `${cred:…}` in its settings already resolved.
     #
     # `settings` builds the backend's base flags from a model, `arguments` the
     # positional argv preceding them, and `containerConfig` carries static
-    # `[Container]` extras such as `Entrypoint`.
+    # `[Container]` extras such as `Entrypoint`. The listener flags are derived
+    # here from `port`, `socket` and `workerPort`, the container-side port.
     mkModelContainers =
       {
         backend,
@@ -1391,16 +1600,17 @@ in
       let
         serviceName = quadletServiceName backend;
         models = sortedModels cfg;
-        renderArgs = renderCliArgsShell backend;
       in
       lib.listToAttrs (
         lib.imap0 (
           index: model:
-          lib.nameValuePair "${serviceName}-${model.name}" (mkQuadletWorker {
+          lib.nameValuePair (workloadUnit serviceName model) (mkQuadletWorker {
             inherit cfg;
+            inherit (model) port socket;
+            containerPort = workerPort;
             inherit (model) credentials;
+            inherit (config.virtualisation.quadlet) podman;
             overrides = model.quadlet;
-            healthPort = workerPort;
             containerConfig =
               mkQuadletContainerRuntime cfg model
               // mkQuadletImageArgs {
@@ -1416,26 +1626,23 @@ in
               }
               // containerConfig
               // {
-                PublishPort = [ "127.0.0.1:${toString model.port}:${toString workerPort}" ];
-                Exec = lib.concatStringsSep " " (
-                  map lib.escapeShellArg (arguments model)
-                  ++ [
-                    (renderArgs (
-                      resolveCredentialRefs credentialDirectory model.credentials (
-                        withManagedSettings (settings model) (cfg.modelSettings // model.settings)
-                      )
-                    ))
-                  ]
+                Exec = lib.escapeShellArgs (
+                  arguments model
+                  ++ renderCliArgsWith "=" backend (
+                    resolveSettings credentialDirectory model.credentials (
+                      settings model // listenSettings backend (containerListen workerPort model.socket)
+                    ) (cfg.modelSettings // model.settings)
+                  )
                 );
               };
-            # Each container waits on its lower-port predecessor so GPU-memory
-            # profiling never overlaps.
+            # Each container waits on its predecessor so GPU-memory profiling
+            # never overlaps.
             unitConfig.After =
               lib.optional (cfg.startupOrdering && index > 0)
                 "${
-                  config.virtualisation.quadlet.containers."${serviceName}-${
-                    (lib.elemAt models (index - 1)).name
-                  }".serviceName
+                  config.virtualisation.quadlet.containers.${
+                    workloadUnit serviceName (lib.elemAt models (index - 1))
+                  }.serviceName
                 }.service";
           })
         ) models
@@ -1443,7 +1650,8 @@ in
 
     # Cross-cutting NixOS config produced by every quadlet backend:
     # the quadlet-enabled assertion, llmhop registration, resource registries,
-    # cache directory, and optional rootless account and operator helper.
+    # cache and socket directories, and optional rootless account and operator
+    # helper.
     #
     # `auxiliaries` describes the non-model services this backend runs; see
     # `mkSharedConfig`.
@@ -1485,12 +1693,35 @@ in
             }
           ];
 
-          systemd.tmpfiles.settings."10-${serviceName}" = lib.optionalAttrs cfg.cache.manage {
-            ${cfg.cache.directory}.d = {
-              inherit (cfg.cache) user group;
-              mode = "0700";
-            };
-          };
+          systemd.tmpfiles.settings."10-${serviceName}" =
+            lib.optionalAttrs cfg.cache.manage {
+              ${cfg.cache.directory}.d = {
+                inherit (cfg.cache) user group;
+                mode = "0700";
+              };
+            }
+            # Rootless socket directories of every workload, see
+            # `mkQuadletWorker`.
+            // lib.optionalAttrs (user != null) (
+              lib.listToAttrs (
+                map
+                  (
+                    w:
+                    lib.nameValuePair (dirOf w.socket) {
+                      d = {
+                        inherit (user) group;
+                        user = user.name;
+                        mode = socketDirectoryMode;
+                      };
+                    }
+                  )
+                  (
+                    lib.filter (w: w.socket or null != null) (
+                      lib.attrValues (enabledModels cfg) ++ lib.attrValues auxiliaries
+                    )
+                  )
+              )
+            );
 
           environment.systemPackages = lib.optional (user != null) (
             pkgs.writeShellApplication {
@@ -1593,13 +1824,27 @@ in
 
     # Per-model submodule for a systemd-service backend.
     mkModelSubmodule =
-      { backend, portDescription }:
-      { name, ... }:
       {
-        options = baseModelOptions { inherit backend name portDescription; } // {
-          serviceConfig = serviceConfigOption { serviceName = backend; };
-          unitConfig = unitConfigOption { serviceName = backend; };
-        };
+        backend,
+        socketDirectory ? null,
+        portDescription,
+      }:
+      { name, config, ... }:
+      {
+        options =
+          baseModelOptions {
+            inherit
+              backend
+              name
+              socketDirectory
+              portDescription
+              ;
+            workload = config;
+          }
+          // {
+            serviceConfig = serviceConfigOption { serviceName = backend; };
+            unitConfig = unitConfigOption { serviceName = backend; };
+          };
       };
 
     # Per-model submodule for a uv/wheel-based GPU Python backend: the shared
@@ -1612,14 +1857,16 @@ in
       {
         backend,
         cfg,
+        socketDirectory ? null,
         modelArgument,
         modelExample,
       }:
-      { name, ... }:
+      { name, config, ... }:
       {
         options =
           baseModelOptions {
-            inherit backend name;
+            inherit backend name socketDirectory;
+            workload = config;
             portDescription = ''
               Loopback host port ${backend} binds to (`--host 127.0.0.1 --port <port>`).
               Must be unique per enabled model; llmhop reaches the backend at
@@ -1656,7 +1903,7 @@ in
     mkServices = args: mkModelServices (args // { models = lib.attrValues (enabledModels args.cfg); });
 
     # `mkServices` for a from-wheel Python backend: the uv environment, and
-    # workers emitted and chained by ascending `port`.
+    # workers emitted and chained by ascending `name`.
     mkUvServices =
       args:
       let
@@ -1678,8 +1925,8 @@ in
         }
       );
 
-    # Cross-cutting NixOS config produced by a systemd backend: port
-    # uniqueness assertion (local + global registry) plus llmhop registration.
+    # Cross-cutting NixOS config produced by a systemd backend: registry
+    # entries, socket directories and llmhop registration.
     # Units are named after the backend itself. No user/group: llama.cpp gets
     # one per service from `DynamicUser`, while the uv backends, which cannot
     # (see the module internals documentation), merge in `identityConfig`.

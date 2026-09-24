@@ -9,21 +9,26 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"time"
 
 	"github.com/mirkolenz/llmhop/internal/systemd"
+	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 func main() {
-	port := flag.Int("port", 0, "loopback port the supervised server listens on")
+	rawURL := flag.String("url", "", "address the supervised server listens on, http://127.0.0.1:<port> or unix:///<socket path>")
 	healthPath := flag.String("health-path", "/health", "HTTP path used for readiness checks")
 	flag.Parse()
 
 	argv := flag.Args()
 
-	if *port == 0 || len(argv) == 0 {
-		log.Fatal("usage: llmhop-notify -port <port> [-health-path <path>] -- <command> [args...]")
+	if *rawURL == "" || len(argv) == 0 {
+		log.Fatal("usage: llmhop-notify -url <url> [-health-path <path>] -- <command> [args...]")
+	}
+
+	up, err := upstream.Parse(*rawURL)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -34,7 +39,7 @@ func main() {
 	}
 
 	go func() {
-		if err := systemd.ReadyWhenHealthy("http://127.0.0.1:"+strconv.Itoa(*port)+*healthPath, time.Second); err != nil {
+		if err := systemd.ReadyWhenHealthy(up, *healthPath, time.Second); err != nil {
 			log.Fatalf("readiness: %v", err)
 		}
 	}()

@@ -604,13 +604,13 @@ let
   # ─── Unix sockets (private) ──────────────────────────────────────────
 
   # A workload without a `port` binds `socketName` in a `RuntimeDirectory=` of
-  # its own below `services.llmhop.socketDirectory`, reachable through that
-  # directory's default ACL for `services.llmhop.user`. See "Unix sockets" in
-  # the module internals documentation for the permission model.
+  # its own below `services.llmhop.socketDirectory`, reachable by llmhop
+  # through the unit's group, or through the root's default ACL for Quadlet.
+  # See "Unix sockets" in the module internals documentation.
   socketName = "http.sock";
 
   # Keeps group write, which the kernel would otherwise mask off the socket
-  # and thereby off its ACL.
+  # and thereby off its group or ACL.
   socketUMask = "0007";
 
   # Where a container sees its socket directory. Beside, not over, the
@@ -1951,23 +1951,34 @@ in
       );
 
     # Cross-cutting NixOS config produced by a systemd backend: registry
-    # entries, socket directories and llmhop registration.
-    # Units are named after the backend itself. No user/group: llama.cpp gets
-    # one per service from `DynamicUser`, while the uv backends, which cannot
-    # (see the module internals documentation), merge in `identityConfig`.
+    # entries, socket directories and llmhop registration. While any workload
+    # binds a socket, llmhop also joins `group`, which owns the sockets.
+    # Units are named after the backend itself. No user: llama.cpp gets one
+    # per service from `DynamicUser`, while the uv backends, which cannot (see
+    # the module internals documentation), merge in `identityConfig`.
     mkConfig =
       {
         backend,
         cfg,
         auxiliaries ? { },
       }:
-      mkSharedConfig {
-        inherit
-          backend
-          cfg
-          auxiliaries
-          ;
-        serviceName = backend;
-      };
+      lib.mkMerge [
+        (mkSharedConfig {
+          inherit
+            backend
+            cfg
+            auxiliaries
+            ;
+          serviceName = backend;
+        })
+        (lib.mkIf
+          (lib.any (workload: workload.socket or null != null) (
+            lib.attrValues (enabledModels cfg) ++ lib.attrValues auxiliaries
+          ))
+          {
+            services.llmhop.supplementaryGroups = [ cfg.group ];
+          }
+        )
+      ];
   };
 }

@@ -354,6 +354,7 @@ let
           socketWorker.serviceConfig ? SocketBindAllow && socketWorker.serviceConfig.SocketBindAllow != "tcp";
         routed = sockets.services.llmhop.settings.models.test.url;
         registered = sockets.services.llmhop.portsRegistry ? "vllm.models.test";
+        joined = sockets.systemd.services.llmhop.serviceConfig.SupplementaryGroups;
       };
       expected = {
         command = true;
@@ -361,7 +362,7 @@ let
         UMask = "0007";
         RuntimeDirectory = [ "sockets/llmhop/vllm-test" ];
         RuntimeDirectoryMode = "0750";
-        # No socket group: the root's default ACL alone grants llmhop access.
+        # The socket belongs to the worker's own group, which llmhop joins.
         SupplementaryGroups = [
           "render"
           "video"
@@ -369,6 +370,8 @@ let
         bind = false;
         routed = "unix:///run/sockets/llmhop/vllm-test/http.sock";
         registered = false;
+        # The Quadlet backend relies on the ACL, so only vLLM's group.
+        joined = [ "vllm" ];
       };
     };
 

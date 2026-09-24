@@ -62,16 +62,22 @@ There is one directory per unit rather than one flat directory of `<unit>.sock` 
 A flat directory would have to be writable by every worker, letting one worker delete or squat another's socket and intercept its traffic.
 
 `connect()` needs search permission on each directory and write permission on the socket.
-The root is `root:root` with mode `0711` and carries the default ACL `user:<services.llmhop.user>:-wx`, which every directory and socket below it inherits.
-llmhop therefore runs as a named system user rather than a `DynamicUser`, whose UID no ACL could name in advance.
-So llmhop alone can search each directory and write each socket, but not list or read anything.
-Workers cannot reach each other's sockets.
+The root is `root:root` with mode `0711`, so anyone may pass through it but not list it.
+Each directory has mode `0710`, search only, since llmhop knows the name.
+vLLM and llama.cpp bind with the umask and never `chmod`, so workers run with `UMask = "0007"` (and containers with `Umask=0007`), which keeps the socket group-writable.
 llmhop's own socket listeners live in the same root, but systemd creates those with the ownership and mode of their listener options.
-Each directory has mode `0710`, which caps the inherited ACL at search.
 
-The kernel masks a new socket's mode with the process umask even below a default ACL, and the ACL mask follows the group bits.
-vLLM and llama.cpp bind with the umask and never `chmod`, so workers run with `UMask = "0007"` (and containers with `Umask=0007`).
-That keeps group write, which the ACL then narrows to the `llmhop` user entry.
+A native worker's directory and socket belong to the backend's `group`, and llmhop joins every such group through `services.llmhop.supplementaryGroups`.
+This is the usual systemd pattern for a client of a socket.
+An ACL cannot work here, because systemd drops every ACL of an exec directory when it chowns it to a non-root unit.
+llama.cpp keeps its `DynamicUser` with the static `group`, so its state and cache stay below the `0700` `/var/{lib,cache}/private` despite the umask.
+Workers of one backend can therefore reach each other's sockets, but not those of another backend.
+
+A container user maps to an unpredictable host UID and GID under `UserNS=`, so no group can be named in advance.
+Quadlet sockets therefore rely on the root's default ACL `user:<services.llmhop.user>:-wx`, which every directory and socket below it inherits.
+systemd never chowns their directories, since rootful units run as root and rootless ones use tmpfiles.
+llmhop therefore runs as a named system user rather than a `DynamicUser`, whose UID no ACL could name in advance.
+The kernel masks a new socket's mode with the umask even below a default ACL, and the ACL mask follows the group bits, so `Umask=0007` keeps the ACL's write.
 The owning group's own entry comes from the root's `0711` and grants no write.
 
 Each directory is a `RuntimeDirectory=` of its unit, created on start and removed on stop, crashes included.

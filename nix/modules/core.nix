@@ -113,7 +113,17 @@ in
       description = ''
         System user llmhop runs as. The default user and its group are
         declared by the module; any other name is the deployer's to declare.
-        Backend sockets grant access to this user alone.
+        Quadlet sockets grant access to this user alone.
+      '';
+    };
+
+    supplementaryGroups = lib.mkOption {
+      type = with lib.types; listOf str;
+      default = [ ];
+      example = [ "inference" ];
+      description = ''
+        Groups llmhop joins through `SupplementaryGroups=`. Every native
+        backend adds its `group`, which owns the sockets of its workers.
       '';
     };
 
@@ -327,10 +337,11 @@ in
               ];
               Restart = "on-failure";
               RestartSec = 5;
-              # Named, not `DynamicUser`, so the backend sockets' ACL can grant
+              # Named, not `DynamicUser`, so the Quadlet sockets' ACL can grant
               # this user alone. Never give it a `RuntimeDirectory=` of
               # `socketDirectory`: stopping llmhop would delete every socket.
               User = cfg.user;
+              SupplementaryGroups = cfg.supplementaryGroups;
               # The listeners arrive from `llmhop-<name>.socket`, so nothing is
               # bound here.
               Sockets = lib.mapAttrsToList (name: _: "llmhop-${name}.socket") cfg.listen;

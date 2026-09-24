@@ -70,7 +70,7 @@ llmhop's own socket listeners live in the same root, but systemd creates those w
 A native worker's directory and socket belong to the backend's `group`, and llmhop joins every such group through `services.llmhop.supplementaryGroups`.
 This is the usual systemd pattern for a client of a socket.
 An ACL cannot work here, because systemd drops every ACL of an exec directory when it chowns it to a non-root unit.
-llama.cpp keeps its `DynamicUser` with the static `group`, so its state and cache stay below the `0700` `/var/{lib,cache}/private` despite the umask.
+llama.cpp defaults to a `DynamicUser` with the static `group`, so its state and cache stay below the `0700` `/var/{lib,cache}/private` despite the umask.
 Workers of one backend can therefore reach each other's sockets, but not those of another backend.
 
 A container user maps to an unpredictable host UID and GID under `UserNS=`, so no group can be named in advance.
@@ -108,7 +108,7 @@ Triton locates `libcuda.so.1` by shelling out to `/sbin/ldconfig -p`, which does
 
 These backends run as a real system user rather than under `DynamicUser`.
 The `/var/lib/private` layout `DynamicUser` implies makes systemd hand `StateDirectory` and `CacheDirectory` over as ID-mapped mounts, which are unconditionally noexec and beyond the reach of `ExecPaths=`, and these runtimes compile kernels into that cache and `dlopen` them back.
-llama.cpp compiles nothing at runtime and keeps `DynamicUser`.
+llama.cpp compiles nothing at runtime and defaults to `DynamicUser`.
 
 ## Lifecycle
 

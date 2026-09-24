@@ -16,16 +16,6 @@ in
 
     package = lib.mkPackageOption pkgs "llama-cpp" { };
 
-    group = lib.mkOption {
-      type = lib.types.str;
-      default = "llama-cpp";
-      description = ''
-        Static group every worker runs as beside its `DynamicUser`, owning the
-        worker sockets that llmhop joins it for. The default group is declared
-        by the module; any other name is the deployer's to declare.
-      '';
-    };
-
     models = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule (
@@ -79,16 +69,13 @@ in
         inherit cfg;
       })
       {
-        users.groups.${cfg.group} = lib.mkIf (cfg.group == "llama-cpp") { };
-
-        # llama.cpp compiles nothing at runtime, so it keeps `DynamicUser`: the
-        # `parent/leaf` State/CacheDirectory form shares `/var/{lib,cache}/llama-cpp/`
+        # llama.cpp compiles nothing at runtime, so it defaults to `DynamicUser`:
+        # the `parent/leaf` State/CacheDirectory form shares `/var/{lib,cache}/llama-cpp/`
         # across models with only the leaf owned by the ephemeral UID.
         systemd.services = systemd.mkServices {
           serviceName = "llama-cpp";
           inherit cfg pkgs utils;
           environment = cacheBase: { LLAMA_CACHE = cacheBase; };
-          serviceConfig.DynamicUser = true;
           # llama-server serves `/health` as 503 while the model loads, 200 once
           # it can generate, so the unit only goes active when it is servable.
           command = _model: [ (lib.getExe' cfg.package "llama-server") ];

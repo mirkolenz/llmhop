@@ -84,10 +84,22 @@ let
     };
   };
 
+  # The `default` listener and the identity llmhop runs as.
+  topLevelOptions =
+    listenerOptions "default" 8080
+    // staticIdentityOptions {
+      inherit cfg;
+      name = "llmhop";
+      prefix = "services.llmhop";
+    };
+
   inherit (import ./lib.nix lib)
     credentialsOption
+    identityConfig
+    identityServiceConfig
     mergeCredentialServiceConfig
     mkRegistryAssertion
+    staticIdentityOptions
     systemd
     ;
 in
@@ -98,23 +110,12 @@ in
     ./systemd/sglang.nix
   ];
 
-  # The top-level listener options define the `default` listener.
-  options.services.llmhop = listenerOptions "default" 8080 // {
+  options.services.llmhop = topLevelOptions // {
     enable = lib.mkEnableOption "llmhop reverse proxy";
 
     package = lib.mkPackageOption pkgs "llmhop" { } // {
       default = pkgs.callPackage ../package.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
-    };
-
-    user = lib.mkOption {
-      type = lib.types.str;
-      default = "llmhop";
-      description = ''
-        System user llmhop runs as. The default user and its group are
-        declared by the module; any other name is the deployer's to declare.
-        Quadlet sockets grant access to this user alone.
-      '';
     };
 
     supplementaryGroups = lib.mkOption {
@@ -251,6 +252,10 @@ in
         })
       ];
     }
+    (lib.mkIf cfg.enable (identityConfig {
+      inherit cfg;
+      name = "llmhop";
+    }))
     (lib.mkIf cfg.enable {
       services.llmhop = {
         listen.default = {
@@ -274,15 +279,6 @@ in
       networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
         lib.mapAttrsToList (_: listener: listener.port) tcpListeners
       );
-
-      users = lib.mkIf (cfg.user == "llmhop") {
-        users.llmhop = {
-          description = "llmhop reverse proxy";
-          isSystemUser = true;
-          group = "llmhop";
-        };
-        groups.llmhop = { };
-      };
 
       systemd = {
         # See "Unix sockets" in the module internals documentation.
@@ -322,6 +318,10 @@ in
           # for the sd_notify datagram and the worker sockets.
           serviceConfig = mergeCredentialServiceConfig (
             systemd.hardenedServiceConfig
+            # Named, not `DynamicUser`, so the Quadlet sockets' ACL can grant
+            # this user alone. Never give it a `RuntimeDirectory=` of
+            # `socketDirectory`: stopping llmhop would delete every socket.
+            // identityServiceConfig cfg
             // {
               # Pairs with the binary's sd_notify call: the unit reaches `active`
               # only once llmhop serves, so anything ordered after it can assume
@@ -334,10 +334,6 @@ in
               ];
               Restart = "on-failure";
               RestartSec = 5;
-              # Named, not `DynamicUser`, so the Quadlet sockets' ACL can grant
-              # this user alone. Never give it a `RuntimeDirectory=` of
-              # `socketDirectory`: stopping llmhop would delete every socket.
-              User = cfg.user;
               SupplementaryGroups = cfg.supplementaryGroups;
               # The listeners arrive from `llmhop-<name>.socket`, so nothing is
               # bound here.

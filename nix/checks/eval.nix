@@ -256,6 +256,19 @@ let
     host = "::1";
   };
 
+  # llama.cpp runs as a `DynamicUser` unless a user is named.
+  mkLlamaCpp =
+    llamaCppConfig:
+    mkSystem {
+      llama-cpp = {
+        enable = true;
+        models.a.settings.hf-repo = "example/a";
+      }
+      // llamaCppConfig;
+    };
+  dynamicIdentity = mkLlamaCpp { };
+  namedIdentity = mkLlamaCpp { user = "llama"; };
+
   rootlessSockets = mkConfig {
     quadlet.user.uid = 503;
     models.test.port = null;
@@ -301,6 +314,33 @@ let
         user = "hop";
         declared = false;
         invalid = false;
+      };
+    };
+
+    testIdentity = {
+      expr = {
+        dynamic = {
+          inherit (dynamicIdentity.systemd.services.llama-cpp-a.serviceConfig) DynamicUser Group;
+          declared = dynamicIdentity.users.groups ? llama-cpp;
+        };
+        named = {
+          inherit (namedIdentity.systemd.services.llama-cpp-a.serviceConfig) User Group;
+          dynamic = namedIdentity.systemd.services.llama-cpp-a.serviceConfig ? DynamicUser;
+          declared = namedIdentity.users.users ? llama;
+        };
+      };
+      expected = {
+        dynamic = {
+          DynamicUser = true;
+          Group = "llama-cpp";
+          declared = true;
+        };
+        named = {
+          User = "llama";
+          Group = "llama-cpp";
+          dynamic = false;
+          declared = false;
+        };
       };
     };
 

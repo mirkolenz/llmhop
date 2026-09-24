@@ -353,82 +353,92 @@ let
   # mutual-exclusion assertion in `quadlet.mkConfig`).
   quadletServiceName = lib.removeSuffix "-quadlet";
 
-  # Identity of a native backend whose directories outlive any single service
-  # start, so their ownership has to be pinned rather than left to systemd.
-  # The group side lazily defaults to its user counterpart, which is why `cfg`
-  # is passed in.
-  identityOptions =
+  # Identity of units that always run as a named account, e.g. because their
+  # directories outlive any single start. `prefix` is the option path, for the
+  # documented defaults.
+  staticIdentityOptions =
     {
-      backend,
+      name,
       cfg,
+      prefix,
     }:
-    let
-      serviceName = quadletServiceName backend;
-    in
     {
       user = mkOption {
         type = types.str;
-        default = serviceName;
+        default = name;
         description = ''
-          Dedicated system user owning the ${serviceName} data and cache
-          directories. Defaults to the backend name; override to point at a
-          user the deployer manages externally (in which case the matching
-          `users.users.<name>` and `users.groups.<name>` declarations become the
-          deployer's responsibility).
+          System user the units run as. The module declares it while it keeps
+          its default name, any other user is the deployer's to declare.
         '';
       };
       uid = mkOption {
-        type = types.ints.unsigned;
+        type = with types; nullOr ints.unsigned;
+        default = null;
         example = 503;
-        description = ''
-          Host UID assigned to `services.llmhop.${backend}.user`.
-          Required — pick a value that does not clash with other system users on the
-          host.
-        '';
+        description = "UID of the declared `user`. `null` lets NixOS allocate one.";
       };
       group = mkOption {
         type = types.str;
         default = cfg.user;
-        defaultText = lib.literalExpression "config.services.llmhop.${backend}.user";
+        defaultText = lib.literalExpression "config.${prefix}.user";
         description = ''
-          Primary group for `services.llmhop.${backend}.user`.
-          Defaults to the user name (matching the typical 1:1 user/group layout).
+          Primary group of `user`. The module declares it while it keeps its
+          default name, any other group is the deployer's to declare.
         '';
       };
       gid = mkOption {
-        type = types.ints.unsigned;
+        type = with types; nullOr ints.unsigned;
         default = cfg.uid;
-        defaultText = lib.literalExpression "config.services.llmhop.${backend}.uid";
+        defaultText = lib.literalExpression "config.${prefix}.uid";
+        description = "GID of the declared `group`. `null` lets NixOS allocate one.";
+      };
+    };
+
+  # Identity of units that run as a `DynamicUser` unless a user is named.
+  dynamicIdentityOptions =
+    { name }:
+    {
+      user = mkOption {
+        type = with types; nullOr str;
+        default = null;
         description = ''
-          Host GID assigned to `services.llmhop.${backend}.group`.
-          Defaults to `uid`.
+          System user the units run as, which is the deployer's to declare.
+          `null` allocates one per unit through `DynamicUser=`.
+        '';
+      };
+      group = mkOption {
+        type = types.str;
+        default = name;
+        description = ''
+          Static primary group of the units, also beside a `DynamicUser`. The
+          module declares it while it keeps its default name, any other group
+          is the deployer's to declare.
         '';
       };
     };
 
-  # Config-side twin of `identityOptions`: the system user and group the
-  # backend's units run as. Declared only while `user` is still llmhop's own
-  # default — pointing it at an externally managed account makes the matching
-  # declarations the deployer's responsibility. `userExtra` carries the
-  # rootless-session attributes only quadlet needs.
+  # Config-side twin of both identity options. `mkIf` guards the whole
+  # attrset, since a `null` user cannot name an attribute.
   identityConfig =
+    { name, cfg }:
     {
-      backend,
-      cfg,
-      userExtra ? { },
-    }:
-    let
-      serviceName = quadletServiceName backend;
-    in
-    lib.mkIf (cfg.user == serviceName) {
-      users.users.${cfg.user} = {
-        description = "${serviceName} service user";
-        inherit (cfg) uid group;
-        isSystemUser = true;
-      }
-      // userExtra;
-      users.groups.${cfg.group}.gid = cfg.gid;
+      users.users = lib.mkIf (cfg.user == name) {
+        ${cfg.user} = {
+          description = "${name} service user";
+          isSystemUser = true;
+          inherit (cfg) group;
+          uid = cfg.uid or null;
+        };
+      };
+      users.groups = lib.mkIf (cfg.group == name) { ${cfg.group}.gid = cfg.gid or null; };
     };
+
+  identityServiceConfig =
+    cfg:
+    {
+      Group = cfg.group;
+    }
+    // (if cfg.user == null then { DynamicUser = true; } else { User = cfg.user; });
 
   # Startup chaining by model name, shared by every multi-worker GPU backend.
   # `pinNote` names the backend-specific way to pin a model to one device.
@@ -1105,12 +1115,12 @@ let
       cacheBase = "/var/cache/${subdir}";
       mergedServiceConfig = {
         Restart = "on-failure";
-        # Owns the worker socket, see `systemd.mkConfig`.
-        Group = cfg.group;
         CacheDirectory = subdir;
         WorkingDirectory = cacheBase;
         EnvironmentFile = environmentFiles cfg workload;
       }
+      # Its group owns the worker socket, see `systemd.mkConfig`.
+      // identityServiceConfig cfg
       // (
         if workload.socket != null then
           { UMask = socketUMask; }
@@ -1241,15 +1251,13 @@ let
       ) models
     );
 
-  # The `PATH`, environment and identity a backend built from Python wheels
+  # The `PATH` and environment a backend built from Python wheels
   # needs, layered onto any `mkNativeService`/`mkNativeModelService` arguments.
   # See the module internals documentation for what each entry is for.
   withUv =
     args@{
-      cfg,
       pkgs,
       environment ? (_cacheBase: { }),
-      serviceConfig ? { },
       ...
     }:
     args
@@ -1270,10 +1278,6 @@ let
           TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
         }
         // environment cacheBase;
-      serviceConfig = {
-        User = cfg.user;
-      }
-      // serviceConfig;
     };
 in
 {
@@ -1282,6 +1286,8 @@ in
     credentialsOption
     enabled
     identityConfig
+    identityServiceConfig
+    staticIdentityOptions
     mergeCredentialServiceConfig
     modelLabel
     containerListen
@@ -1806,9 +1812,10 @@ in
     # that are not model workers.
     mkUvService = args: mkNativeService (withUv args);
 
-    # Top-level options for a systemd-service backend. Just the shared base —
-    # nothing container-specific.
-    mkOptions = { backend }: baseOptions { inherit backend; };
+    # Top-level options for a systemd-service backend running as a
+    # `DynamicUser` by default.
+    mkOptions =
+      { backend }: baseOptions { inherit backend; } // dynamicIdentityOptions { name = backend; };
 
     # Options for a uv/wheel-based GPU Python backend (vLLM, SGLang): the
     # shared base plus the service identity, the `startupOrdering` switch and
@@ -1825,7 +1832,11 @@ in
         packageNote ? "",
       }:
       baseOptions { inherit backend; }
-      // identityOptions { inherit backend cfg; }
+      // staticIdentityOptions {
+        inherit cfg;
+        name = backend;
+        prefix = "services.llmhop.${backend}";
+      }
       // {
         startupOrdering = startupOrderingOption {
           pinNote = "via `environment` (the variable is stack-specific: `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `ZE_AFFINITY_MASK`, ...)";
@@ -1963,9 +1974,7 @@ in
     # Cross-cutting NixOS config produced by a systemd backend: registry
     # entries, socket directories and llmhop registration. llmhop also joins
     # `group`, which owns the worker sockets.
-    # Units are named after the backend itself. No user: llama.cpp gets one
-    # per service from `DynamicUser`, while the uv backends, which cannot (see
-    # the module internals documentation), merge in `identityConfig`.
+    # Units are named after the backend itself, and run as its identity.
     mkConfig =
       {
         backend,
@@ -1980,6 +1989,10 @@ in
             auxiliaries
             ;
           serviceName = backend;
+        })
+        (identityConfig {
+          inherit cfg;
+          name = backend;
         })
         { services.llmhop.supplementaryGroups = [ cfg.group ]; }
       ];

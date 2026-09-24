@@ -10,7 +10,6 @@ let
 
   inherit (import ../lib.nix lib)
     enabled
-    identityConfig
     systemd
     ;
   detector = import ../detector.nix lib;
@@ -84,12 +83,6 @@ in
         }
         // detector.registry detectors
       ))
-      # The workers run as a real user rather than `DynamicUser`; see the module
-      # internals documentation.
-      (identityConfig {
-        backend = "vllm";
-        inherit cfg;
-      })
       {
         # `mkUvServices` owns the shared GPU/cache/hardening service body; vLLM
         # supplies only its `vllm serve <model>` invocation (a real `bin/vllm`

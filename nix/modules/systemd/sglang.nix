@@ -8,10 +8,7 @@
 let
   cfg = config.services.llmhop.sglang;
 
-  inherit (import ../lib.nix lib)
-    identityConfig
-    systemd
-    ;
+  inherit (import ../lib.nix lib) systemd;
 in
 {
   options.services.llmhop.sglang =
@@ -62,12 +59,6 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       (systemd.mkConfig {
-        backend = "sglang";
-        inherit cfg;
-      })
-      # The workers run as a real user rather than `DynamicUser`; see the module
-      # internals documentation.
-      (identityConfig {
         backend = "sglang";
         inherit cfg;
       })

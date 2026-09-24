@@ -374,7 +374,10 @@ Podman validates incompatible namespace combinations during the build, using the
 ### Native vLLM and SGLang from prebuilt wheels
 
 The default vLLM and SGLang backends run as native systemd units built from upstream's prebuilt wheels: no Podman, and the same sandboxing as the llama.cpp backend.
-They need a dedicated system user rather than `DynamicUser`, so `uid` is required: the `/var/lib/private` layout `DynamicUser` implies hands the state and cache directories to the unit as noexec ID-mapped mounts, and these runtimes `dlopen` kernels they compiled into that cache.
+They need a named system user rather than `DynamicUser`: the `/var/lib/private` layout `DynamicUser` implies hands the state and cache directories to the unit as noexec ID-mapped mounts, and these runtimes `dlopen` kernels they compiled into that cache.
+Every native backend, like llmhop itself, runs as its `user` and `group`, which the module declares while they keep their default names.
+vLLM, SGLang and llmhop default to an account named after them, optionally pinned with `uid` and `gid`.
+llama.cpp defaults to `user = null`, a `DynamicUser` per worker, and runs as the named user instead once `user` is set.
 vLLM and SGLang lean heavily on dev snapshots and architecture-specific builds, so there is no one-derivation-fits-all version, and you pin yours in a tiny [uv](https://docs.astral.sh/uv/) workspace and build the package with the flake's `mkUvEnv` helper.
 
 ```nix
@@ -386,7 +389,6 @@ vLLM and SGLang lean heavily on dev snapshots and architecture-specific builds, 
 
 services.llmhop.vllm = {
   enable = true;
-  uid = 503; # required: pick one free on this host
   package = inputs.llmhop.legacyPackages.${pkgs.system}.mkUvEnv {
     workspaceRoot = ./vllm-env; # directory holding pyproject.toml + uv.lock
   };

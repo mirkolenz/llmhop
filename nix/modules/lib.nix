@@ -738,6 +738,13 @@ let
   # Enabled-model subset shared by registry helpers and backend iteration.
   enabledModels = cfg: enabled cfg.models;
 
+  # Enabled models and auxiliaries that bind a unix socket.
+  socketWorkloads =
+    cfg: auxiliaries:
+    lib.filter (w: w.socket or null != null) (
+      lib.attrValues (enabledModels cfg) ++ lib.attrValues auxiliaries
+    );
+
   # Enabled models sorted by ascending `name`, the order workers are emitted
   # and chained in.
   sortedModels =
@@ -1098,6 +1105,8 @@ let
       cacheBase = "/var/cache/${subdir}";
       mergedServiceConfig = {
         Restart = "on-failure";
+        # Owns the worker socket, see `systemd.mkConfig`.
+        Group = cfg.group;
         CacheDirectory = subdir;
         WorkingDirectory = cacheBase;
         EnvironmentFile = environmentFiles cfg workload;
@@ -1263,7 +1272,6 @@ let
         // environment cacheBase;
       serviceConfig = {
         User = cfg.user;
-        Group = cfg.group;
       }
       // serviceConfig;
     };
@@ -1730,24 +1738,26 @@ in
             # `mkQuadletWorker`.
             // lib.optionalAttrs (user != null) (
               lib.listToAttrs (
-                map
-                  (
-                    w:
-                    lib.nameValuePair (dirOf w.socket) {
-                      d = {
-                        inherit (user) group;
-                        user = user.name;
-                        mode = socketDirectoryMode;
-                      };
-                    }
-                  )
-                  (
-                    lib.filter (w: w.socket or null != null) (
-                      lib.attrValues (enabledModels cfg) ++ lib.attrValues auxiliaries
-                    )
-                  )
+                map (
+                  w:
+                  lib.nameValuePair (dirOf w.socket) {
+                    d = {
+                      inherit (user) group;
+                      user = user.name;
+                      mode = socketDirectoryMode;
+                    };
+                  }
+                ) (socketWorkloads cfg auxiliaries)
               )
             );
+
+          # A container maps to no host group known in advance, so its socket
+          # is reachable through a default ACL on the root instead. See "Unix
+          # sockets" in the module internals documentation.
+          systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (socketWorkloads cfg auxiliaries != [ ]) {
+            ${config.services.llmhop.socketDirectory}.a.argument =
+              "default:user:${config.services.llmhop.user}:-wx";
+          };
 
           environment.systemPackages = lib.optional (user != null) (
             pkgs.writeShellApplication {
@@ -1951,8 +1961,8 @@ in
       );
 
     # Cross-cutting NixOS config produced by a systemd backend: registry
-    # entries, socket directories and llmhop registration. While any workload
-    # binds a socket, llmhop also joins `group`, which owns the sockets.
+    # entries, socket directories and llmhop registration. llmhop also joins
+    # `group`, which owns the worker sockets.
     # Units are named after the backend itself. No user: llama.cpp gets one
     # per service from `DynamicUser`, while the uv backends, which cannot (see
     # the module internals documentation), merge in `identityConfig`.
@@ -1971,14 +1981,7 @@ in
             ;
           serviceName = backend;
         })
-        (lib.mkIf
-          (lib.any (workload: workload.socket or null != null) (
-            lib.attrValues (enabledModels cfg) ++ lib.attrValues auxiliaries
-          ))
-          {
-            services.llmhop.supplementaryGroups = [ cfg.group ];
-          }
-        )
+        { services.llmhop.supplementaryGroups = [ cfg.group ]; }
       ];
   };
 }

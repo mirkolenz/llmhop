@@ -74,9 +74,9 @@ llama.cpp keeps its `DynamicUser` with the static `group`, so its state and cach
 Workers of one backend can therefore reach each other's sockets, but not those of another backend.
 
 A container user maps to an unpredictable host UID and GID under `UserNS=`, so no group can be named in advance.
-Quadlet sockets therefore rely on the root's default ACL `user:<services.llmhop.user>:-wx`, which every directory and socket below it inherits.
-systemd never chowns their directories, since rootful units run as root and rootless ones use tmpfiles.
+Quadlet sockets rely on a default ACL `user:<services.llmhop.user>:-wx` on the root instead, which every directory and socket below it inherits.
 llmhop therefore runs as a named system user rather than a `DynamicUser`, whose UID no ACL could name in advance.
+The ACL survives, because systemd never chowns these directories: rootful units run as root, and rootless ones use tmpfiles.
 The kernel masks a new socket's mode with the umask even below a default ACL, and the ACL mask follows the group bits, so `Umask=0007` keeps the ACL's write.
 The owning group's own entry comes from the root's `0711` and grants no write.
 

@@ -242,7 +242,7 @@ See the [options reference](https://mirkolenz.github.io/llmhop/) for the full li
 
 llama.cpp and vLLM workers, and native watermark detectors, default to `port = null`, which binds the unix socket `<socketDirectory>/<unit>/http.sock` instead of a TCP port.
 `services.llmhop.socketDirectory` defaults to `/run/llmhop`, shared with llmhop's own socket listeners, and must stay below `/run`, since each backend directory is a `RuntimeDirectory=` of its unit.
-Sockets claim nothing from the host's port space, and only llmhop can connect to them, instead of every local process.
+Sockets claim nothing from the host's port space, and only llmhop and the backend's own workers can connect to them, instead of every local process.
 Access is granted to llmhop through the backend's `group`, which it joins via `services.llmhop.supplementaryGroups`, or through a default ACL for `services.llmhop.user` on Quadlet sockets.
 The read-only `socket` option of each model holds the resulting path.
 Set `port` to bind `127.0.0.1:<port>` instead, for example to reach a worker without llmhop.

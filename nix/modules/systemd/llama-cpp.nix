@@ -79,7 +79,7 @@ in
         inherit cfg;
       })
       {
-        users.groups = lib.mkIf (cfg.group == "llama-cpp") { llama-cpp = { }; };
+        users.groups.${cfg.group} = lib.mkIf (cfg.group == "llama-cpp") { };
 
         # llama.cpp compiles nothing at runtime, so it keeps `DynamicUser`: the
         # `parent/leaf` State/CacheDirectory form shares `/var/{lib,cache}/llama-cpp/`
@@ -88,11 +88,7 @@ in
           serviceName = "llama-cpp";
           inherit cfg pkgs utils;
           environment = cacheBase: { LLAMA_CACHE = cacheBase; };
-          serviceConfig = {
-            DynamicUser = true;
-            # A static group keeps the UID dynamic, see `group`.
-            Group = cfg.group;
-          };
+          serviceConfig.DynamicUser = true;
           # llama-server serves `/health` as 503 while the model loads, 200 once
           # it can generate, so the unit only goes active when it is servable.
           command = _model: [ (lib.getExe' cfg.package "llama-server") ];

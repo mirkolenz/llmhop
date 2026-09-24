@@ -286,13 +286,10 @@ in
 
       systemd = {
         # See "Unix sockets" in the module internals documentation.
-        tmpfiles.settings."10-llmhop".${cfg.socketDirectory} = {
-          d = {
-            mode = "0711";
-            user = "root";
-            group = "root";
-          };
-          a.argument = "default:user:${cfg.user}:-wx";
+        tmpfiles.settings."10-llmhop".${cfg.socketDirectory}.d = {
+          mode = "0711";
+          user = "root";
+          group = "root";
         };
 
         sockets = lib.mapAttrs' (

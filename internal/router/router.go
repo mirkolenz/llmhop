@@ -29,17 +29,16 @@ func New(cfg *config.Config) (http.Handler, error) {
 		if err != nil {
 			return nil, fmt.Errorf("model %q: invalid url %q: %w", name, m.URL, err)
 		}
-		proxy := httputil.NewSingleHostReverseProxy(u)
-		if len(m.Headers) > 0 {
-			orig := proxy.Director
-			proxy.Director = func(r *http.Request) {
-				orig(r)
+		proxies[name] = &httputil.ReverseProxy{
+			Rewrite: func(r *httputil.ProxyRequest) {
+				r.SetURL(u)
+				r.SetXForwarded()
+
 				for k, v := range m.Headers {
-					r.Header.Set(k, v)
+					r.Out.Header.Set(k, v)
 				}
-			}
+			},
 		}
-		proxies[name] = proxy
 	}
 
 	tokens := make([][]byte, len(cfg.AuthTokens))

@@ -43,7 +43,7 @@ func TestExpand(t *testing.T) {
 		{
 			name: "env missing",
 			setup: func(t *testing.T) string {
-				os.Unsetenv("LLMHOP_TEST_MISSING")
+				_ = os.Unsetenv("LLMHOP_TEST_MISSING")
 				return "${env:LLMHOP_TEST_MISSING}"
 			},
 			wantErr: true,

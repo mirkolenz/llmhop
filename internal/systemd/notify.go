@@ -39,7 +39,7 @@ func Ready() error {
 	if err != nil {
 		return fmt.Errorf("dial %q: %w", addr, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.Write([]byte("READY=1")); err != nil {
 		return fmt.Errorf("write to %q: %w", addr, err)
@@ -69,7 +69,7 @@ func healthy(client *http.Client, url string) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
 

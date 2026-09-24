@@ -25,7 +25,7 @@ func TestLoadMissingFile(t *testing.T) {
 // Loading without expansion backs `llmhop -check`, which validates configs in
 // environments where the referenced secrets do not exist.
 func TestLoadKeepsSecretReferences(t *testing.T) {
-	os.Unsetenv("LLMHOP_CFG_MISSING")
+	_ = os.Unsetenv("LLMHOP_CFG_MISSING")
 	path := writeConfig(t, `{
 		"authTokens": ["${env:LLMHOP_CFG_MISSING}"],
 		"models": {"m": {"url": "http://x"}}
@@ -146,7 +146,7 @@ func TestLoad(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			os.Unsetenv("LLMHOP_CFG_MISSING")
+			_ = os.Unsetenv("LLMHOP_CFG_MISSING")
 			for k, v := range c.setenv {
 				t.Setenv(k, v)
 			}

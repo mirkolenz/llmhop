@@ -22,7 +22,7 @@ func listenNotify(t *testing.T) *net.UnixConn {
 		t.Fatal(err)
 	}
 
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	t.Setenv("NOTIFY_SOCKET", path)
 
 	return conn

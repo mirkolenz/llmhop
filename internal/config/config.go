@@ -69,7 +69,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	cfg := &Config{}
 	dec := json.NewDecoder(f)

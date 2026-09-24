@@ -10,9 +10,7 @@ let
 
   inherit (import ../lib.nix lib)
     identityConfig
-    renderCliArgs
     systemd
-    withManagedSettings
     ;
 in
 {
@@ -81,19 +79,15 @@ in
         systemd.services = systemd.mkUvServices {
           serviceName = "sglang";
           inherit cfg pkgs utils;
-          execStart =
-            model: settings:
-            [
-              (lib.getExe' model.package "python")
-              "-m"
-              "sglang.launch_server"
-            ]
-            ++ renderCliArgs "sglang" (
-              withManagedSettings {
-                model-path = model.model;
-                served-model-name = model.name;
-              } settings
-            );
+          command = model: [
+            (lib.getExe' model.package "python")
+            "-m"
+            "sglang.launch_server"
+          ];
+          settings = model: {
+            model-path = model.model;
+            served-model-name = model.name;
+          };
         };
       }
     ]

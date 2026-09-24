@@ -8,7 +8,7 @@
 let
   cfg = config.services.llmhop.llama-cpp;
 
-  inherit (import ../lib.nix lib) renderCliArgs systemd withManagedSettings;
+  inherit (import ../lib.nix lib) systemd;
 in
 {
   options.services.llmhop.llama-cpp = systemd.mkOptions { backend = "llama-cpp"; } // {
@@ -79,10 +79,8 @@ in
           serviceConfig.DynamicUser = true;
           # llama-server serves `/health` as 503 while the model loads, 200 once
           # it can generate, so the unit only goes active when it is servable.
-          execStart =
-            model: settings:
-            [ (lib.getExe' cfg.package "llama-server") ]
-            ++ renderCliArgs "llama-cpp" (withManagedSettings { alias = model.name; } settings);
+          command = _model: [ (lib.getExe' cfg.package "llama-server") ];
+          settings = model: { alias = model.name; };
         };
       }
     ]

@@ -188,6 +188,20 @@ let
     }:
     if socket == null then { inherit host port; } else (cliDialect backend).socketSettings socket;
 
+  # The flags a workload's server receives: its `settings` under the backend's
+  # `managed` flags and the `listen` flags, with every `${cred:…}` resolved
+  # against the credential `directory`.
+  workloadFlags =
+    {
+      backend,
+      directory,
+      listen,
+      managed,
+      workload,
+      settings,
+    }:
+    resolveSettings directory workload.credentials (managed // listenSettings backend listen) settings;
+
   # What a host process binds, and what a container binds on `containerPort`
   # or the mounted `socket`, in the shape `listenSettings` takes.
   hostListen = workload: {
@@ -1170,15 +1184,20 @@ let
     };
 
   # Shared body of `systemd.mkServices`/`mkUvServices`. `wrap` layers a backend
-  # flavour (currently `withUv`) onto every worker's arguments and `previous`
+  # flavour (currently `withUv`) onto every worker's args and `previous`
   # resolves the startup chain, or stays null for a backend that does not chain.
+  #
+  # `command` builds the argv preceding the flags, executable included, and
+  # `settings` the backend's own managed flags from a model, as `arguments`
+  # and `settings` do for `quadlet.mkModelContainers`.
   mkModelServices =
     {
       serviceName,
       cfg,
       pkgs,
       utils,
-      execStart,
+      command,
+      settings,
       models,
       previous ? (_index: null),
       wrap ? lib.id,
@@ -1199,11 +1218,16 @@ let
             serviceConfig
             ;
           previous = previous index;
-          execStart = execStart model (
-            resolveSettings (systemdCredentialDirectory (workloadUnit serviceName model)) model.credentials
-              (listenSettings serviceName (hostListen model))
-              (cfg.modelSettings // model.settings)
-          );
+          execStart =
+            command model
+            ++ renderCliArgs serviceName (workloadFlags {
+              backend = serviceName;
+              directory = systemdCredentialDirectory (workloadUnit serviceName model);
+              listen = hostListen model;
+              managed = settings model;
+              workload = model;
+              settings = cfg.modelSettings // model.settings;
+            });
         })
       ) models
     );
@@ -1254,7 +1278,6 @@ in
     modelLabel
     containerListen
     hostListen
-    listenSettings
     listenerOptions
     renderCliArgs
     renderCliArgsShell
@@ -1265,8 +1288,8 @@ in
     sortedModels
     systemdCredentialDirectory
     unitConfigOption
-    withManagedSettings
     workerUrl
+    workloadFlags
     workloadUnit
     ;
 
@@ -1628,11 +1651,14 @@ in
               // {
                 Exec = lib.escapeShellArgs (
                   arguments model
-                  ++ renderCliArgsWith "=" backend (
-                    resolveSettings credentialDirectory model.credentials (
-                      settings model // listenSettings backend (containerListen workerPort model.socket)
-                    ) (cfg.modelSettings // model.settings)
-                  )
+                  ++ renderCliArgsWith "=" backend (workloadFlags {
+                    inherit backend;
+                    directory = credentialDirectory;
+                    listen = containerListen workerPort model.socket;
+                    managed = settings model;
+                    workload = model;
+                    settings = cfg.modelSettings // model.settings;
+                  })
                 );
               };
             # Each container waits on its predecessor so GPU-memory profiling
@@ -1897,9 +1923,8 @@ in
       };
 
     # One unit per enabled model. Owning the unit name also lets this own the
-    # credential directory derived from it, so `execStart` receives settings
-    # with every `${cred:…}` already resolved and backends never spell a
-    # credential path themselves.
+    # credential directory derived from it, so every `${cred:…}` is resolved
+    # here and backends never spell a credential path themselves.
     mkServices = args: mkModelServices (args // { models = lib.attrValues (enabledModels args.cfg); });
 
     # `mkServices` for a from-wheel Python backend: the uv environment, and

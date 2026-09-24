@@ -11,9 +11,7 @@ let
   inherit (import ../lib.nix lib)
     enabled
     identityConfig
-    renderCliArgs
     systemd
-    withManagedSettings
     ;
   detector = import ../detector.nix lib;
 
@@ -104,14 +102,12 @@ in
               VLLM_CACHE_ROOT = "${cacheBase}/vllm";
               OUTLINES_CACHE_DIR = "${cacheBase}/outlines";
             };
-            execStart =
-              model: settings:
-              [
-                (lib.getExe' model.package "vllm")
-                "serve"
-                model.model
-              ]
-              ++ renderCliArgs "vllm" (withManagedSettings { served-model-name = model.name; } settings);
+            command = model: [
+              (lib.getExe' model.package "vllm")
+              "serve"
+              model.model
+            ];
+            settings = model: { served-model-name = model.name; };
           }
           // lib.listToAttrs (
             map (

@@ -11,16 +11,15 @@ let
     credentialsOption
     containerListen
     hostListen
-    listenSettings
     listenerOptions
     modelLabel
     renderCliArgs
     renderCliArgsShell
-    resolveSettings
     serviceConfigOption
     settingsRendering
     systemdCredentialDirectory
     unitConfigOption
+    workloadFlags
     workloadUnit
     ;
 
@@ -33,11 +32,14 @@ let
     directory: listen: detector:
     lib.throwIfNot (detector.settings ? key)
       "services.llmhop: watermark detector `${detector.name}` needs `settings.key`, the key used for generation."
-      resolveSettings
-      directory
-      detector.credentials
-      ({ inherit (detector) tokenizer; } // listenSettings "vllm" listen)
-      detector.settings;
+      workloadFlags
+      {
+        backend = "vllm";
+        inherit directory listen;
+        managed = { inherit (detector) tokenizer; };
+        workload = detector;
+        inherit (detector) settings;
+      };
 
   # The upstream script serves no health endpoint, so readiness comes from
   # FastAPI's `/openapi.json`.

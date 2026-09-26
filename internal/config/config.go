@@ -4,9 +4,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -93,7 +95,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
-			return nil, fmt.Errorf("multiple JSON values in config")
+			return nil, errors.New("multiple JSON values in config")
 		}
 
 		return nil, err
@@ -107,55 +109,93 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 		cfg.Port = DefaultPort
 	}
 
-	if expandSecrets {
-		if err := cfg.expand(); err != nil {
-			return nil, err
-		}
+	resolve := secrets.Expand
+	if !expandSecrets {
+		resolve = func(s string) (string, error) { return s, secrets.ValidateReferences(s) }
+	}
+
+	if err := cfg.resolveSecrets(resolve); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
 }
 
-// validate checks every invariant that does not depend on secret expansion, so
-// a `-check` run rejects exactly the configs that would fail at startup.
+// validate checks every invariant of values that cannot carry secrets.
 func (cfg *Config) validate() error {
 	if cfg.Port < 0 || cfg.Port > 65535 {
 		return fmt.Errorf("port %d is outside 0..65535", cfg.Port)
 	}
 
 	if cfg.MaxBodyBytes < 0 {
-		return fmt.Errorf("maxBodyBytes must not be negative")
+		return errors.New("maxBodyBytes must not be negative")
 	}
 
 	if cfg.MaxConcurrentRequests < 0 {
-		return fmt.Errorf("maxConcurrentRequests must not be negative")
-	}
-
-	for i, token := range cfg.AuthTokens {
-		if err := validateAuthToken(token); err != nil {
-			return fmt.Errorf("authTokens[%d]: %w", i, err)
-		}
-
-		if err := secrets.ValidateReferences(token); err != nil {
-			return fmt.Errorf("authTokens[%d]: %w", i, err)
-		}
+		return errors.New("maxConcurrentRequests must not be negative")
 	}
 
 	if len(cfg.Models) == 0 {
-		return fmt.Errorf("no models configured")
+		return errors.New("no models configured")
 	}
 
 	for name, model := range cfg.Models {
 		if name == "" {
-			return fmt.Errorf("model name must not be empty")
+			return errors.New("model name must not be empty")
 		}
 
 		if _, err := upstream.Parse(model.URL); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
 
-		if err := validateHeaders(name, model.Headers); err != nil {
-			return err
+		seen := make(map[string]bool, len(model.Headers))
+
+		for header := range model.Headers {
+			if !validHeaderName(header) {
+				return fmt.Errorf("models.%s.headers: invalid header name %q", name, header)
+			}
+
+			key := http.CanonicalHeaderKey(header)
+			if seen[key] {
+				return fmt.Errorf("models.%s.headers: duplicate header %q", name, key)
+			}
+
+			seen[key] = true
+		}
+	}
+
+	return nil
+}
+
+// resolveSecrets passes auth tokens and per-model header values through
+// resolve in place and validates the results. Raw references are valid
+// header values, so the same checks serve `-check` runs and startup.
+func (cfg *Config) resolveSecrets(resolve func(string) (string, error)) error {
+	for i, token := range cfg.AuthTokens {
+		v, err := resolve(token)
+		if err == nil {
+			err = validateAuthToken(v)
+		}
+
+		if err != nil {
+			return fmt.Errorf("authTokens[%d]: %w", i, err)
+		}
+
+		cfg.AuthTokens[i] = v
+	}
+
+	for name, model := range cfg.Models {
+		for k, value := range model.Headers {
+			v, err := resolve(value)
+			if err == nil && !validHeaderValue(v) {
+				err = errors.New("invalid header value")
+			}
+
+			if err != nil {
+				return fmt.Errorf("models.%s.headers.%s: %w", name, k, err)
+			}
+
+			model.Headers[k] = v
 		}
 	}
 
@@ -164,72 +204,11 @@ func (cfg *Config) validate() error {
 
 func validateAuthToken(token string) error {
 	if token == "" {
-		return fmt.Errorf("empty token")
+		return errors.New("empty token")
 	}
 
 	if !validHeaderValue(token) {
-		return fmt.Errorf("invalid token")
-	}
-
-	return nil
-}
-
-func validateHeaders(model string, headers map[string]string) error {
-	seen := make(map[string]bool, len(headers))
-
-	for header, value := range headers {
-		if !validHeaderName(header) {
-			return fmt.Errorf("models.%s.headers: invalid header name %q", model, header)
-		}
-
-		key := strings.ToLower(header)
-		if seen[key] {
-			return fmt.Errorf("models.%s.headers: duplicate header %q", model, key)
-		}
-
-		seen[key] = true
-
-		if !validHeaderValue(value) {
-			return fmt.Errorf("models.%s.headers.%s: invalid header value", model, header)
-		}
-
-		if err := secrets.ValidateReferences(value); err != nil {
-			return fmt.Errorf("models.%s.headers.%s: %w", model, header, err)
-		}
-	}
-
-	return nil
-}
-
-// expand resolves the secret references inside auth tokens and per-model
-// headers in place.
-func (cfg *Config) expand() error {
-	for i, t := range cfg.AuthTokens {
-		v, err := secrets.Expand(t)
-		if err != nil {
-			return fmt.Errorf("authTokens[%d]: %w", i, err)
-		}
-
-		if err := validateAuthToken(v); err != nil {
-			return fmt.Errorf("authTokens[%d]: %w", i, err)
-		}
-
-		cfg.AuthTokens[i] = v
-	}
-
-	for name, model := range cfg.Models {
-		for k, v := range model.Headers {
-			expanded, err := secrets.Expand(v)
-			if err != nil {
-				return fmt.Errorf("models.%s.headers.%s: %w", name, k, err)
-			}
-
-			if !validHeaderValue(expanded) {
-				return fmt.Errorf("models.%s.headers.%s: invalid header value", name, k)
-			}
-
-			model.Headers[k] = expanded
-		}
+		return errors.New("invalid token")
 	}
 
 	return nil

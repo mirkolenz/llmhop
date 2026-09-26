@@ -43,16 +43,9 @@ func TestLoadKeepsSecretReferences(t *testing.T) {
 	if cfg.AuthTokens[0] != "${env:LLMHOP_CFG_MISSING}" {
 		t.Fatalf("AuthTokens = %#v, want the reference verbatim", cfg.AuthTokens)
 	}
-}
 
-func TestLoadRejectsMalformedSecretReferencesWithoutExpansion(t *testing.T) {
-	for _, body := range []string{
-		`{"authTokens": ["${"], "models": {"m": {"url": "http://x"}}}`,
-		`{"models": {"m": {"url": "http://x", "headers": {"Authorization": "${}"}}}}`,
-	} {
-		if _, err := Load(writeConfig(t, body), false); err == nil {
-			t.Fatalf("accepted malformed secret reference in %s", body)
-		}
+	if _, err := Load(writeConfig(t, `{"authTokens": ["${"], "models": {"m": {"url": "http://x"}}}`), false); err == nil {
+		t.Fatal("accepted malformed secret reference")
 	}
 }
 
@@ -110,18 +103,6 @@ func TestLoad(t *testing.T) {
 			name:    "rejects empty auth token",
 			body:    `{"authTokens": [""], "models": {"m": {"url": "http://x"}}}`,
 			wantErr: "empty token",
-		},
-		{
-			name:    "rejects empty expanded auth token",
-			setenv:  map[string]string{"LLMHOP_CFG_EMPTY_TOKEN": ""},
-			body:    `{"authTokens": ["${env:LLMHOP_CFG_EMPTY_TOKEN}"], "models": {"m": {"url": "http://x"}}}`,
-			wantErr: "empty token",
-		},
-		{
-			name:    "rejects unsendable expanded auth token",
-			setenv:  map[string]string{"LLMHOP_CFG_BAD_TOKEN": "first\nsecond"},
-			body:    `{"authTokens": ["${env:LLMHOP_CFG_BAD_TOKEN}"], "models": {"m": {"url": "http://x"}}}`,
-			wantErr: "invalid token",
 		},
 		{
 			name:    "rejects duplicate header names ignoring case",

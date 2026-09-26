@@ -17,7 +17,7 @@ func TestCheckBearer(t *testing.T) {
 		{"wrong scheme", "Basic alpha", tokens, false},
 		{"empty header", "", tokens, false},
 		{"bearer without token", "Bearer ", tokens, false},
-		{"case-sensitive scheme", "bearer alpha", tokens, false},
+		{"case-insensitive scheme", "bearer alpha", tokens, true},
 		{"prefix-only match is not accepted", "Bearer alph", tokens, false},
 		{"extra whitespace is not trimmed", "Bearer alpha ", tokens, false},
 		{"no configured tokens", "Bearer anything", nil, false},

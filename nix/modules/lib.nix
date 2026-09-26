@@ -969,6 +969,8 @@ let
       socket ? null,
       podman ? null,
       healthPath ? "/health",
+      healthHost ? "localhost",
+      healthTLS ? false,
       healthStartPeriod ? "30m",
       serviceConfig ? { },
       unitConfig ? { },
@@ -978,6 +980,7 @@ let
     }:
     let
       rootless = cfg.quadlet.user != null;
+      healthScheme = if healthTLS then "https" else "http";
       mounts =
         lib.optional (
           socket != null
@@ -1006,11 +1009,13 @@ let
         DropCapability = "all";
         Tmpfs = [ "/tmp" ];
         Notify = "healthy";
-        HealthCmd = "curl --fail --silent --show-error ${
+        HealthCmd = "curl --fail --silent --show-error ${lib.optionalString healthTLS "--insecure "}${
           if socket != null then
-            "--unix-socket ${containerSocketPath} http://localhost"
+            "--unix-socket ${containerSocketPath} ${healthScheme}://localhost"
           else
-            "http://localhost:${toString containerPort}"
+            "${healthScheme}://${
+              if lib.hasInfix ":" healthHost then "[${healthHost}]" else healthHost
+            }:${toString containerPort}"
         }${healthPath}";
         HealthStartPeriod = healthStartPeriod;
         HealthInterval = "10s";

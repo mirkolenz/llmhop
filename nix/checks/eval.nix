@@ -111,11 +111,26 @@ let
       };
       gateway = {
         enable = true;
+        bindAddress = "192.0.2.1";
         port = 19000;
         credentials.tlsKey = tlsKey;
+        settings.tls-cert-path = "/etc/sglang/tls/server.crt";
         settings.tls-key-path = "\${cred:tlsKey}";
         quadlet.containerConfig.User = "1000";
         quadlet.mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+      };
+    };
+  };
+
+  sglangNoTLS = mkSystem {
+    sglang-quadlet = {
+      enable = true;
+      tag = "latest";
+      gateway = {
+        enable = true;
+        bindAddress = "::";
+        port = 19010;
+        settings.tls-cert-path = null;
       };
     };
   };
@@ -599,8 +614,10 @@ let
           User
           UserNS
           Volume
+          HealthCmd
           ;
         arguments = containsAll [
+          "--tls-cert-path=/etc/sglang/tls/server.crt"
           "--tls-key-path=/run/llmhop/credentials/tlsKey"
           "http://127.0.0.1:19001"
         ] sglangGateway.containerConfig.Exec;
@@ -611,8 +628,14 @@ let
         User = "1000";
         UserNS = "host";
         Volume = [ "%d:/run/llmhop/credentials:ro,idmap=uids=0-1000-1;gids=0-1000-1" ];
+        HealthCmd = "curl --fail --silent --show-error --insecure https://192.0.2.1:19000/health";
         load = [ "tlsKey:${tlsKey}" ];
       };
+    };
+
+    testGatewayWithoutTLS = {
+      expr = sglangNoTLS.virtualisation.quadlet.containers.sglang-gateway.containerConfig.HealthCmd;
+      expected = "curl --fail --silent --show-error http://[::1]:19010/health";
     };
 
     testLlamaCpp = {

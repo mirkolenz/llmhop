@@ -57,6 +57,14 @@ let
       overrides = cfg.gateway.quadlet;
       # Host networking binds the port directly, so nothing is published.
       containerPort = cfg.gateway.port;
+      healthHost =
+        if cfg.gateway.bindAddress == "0.0.0.0" then
+          "127.0.0.1"
+        else if cfg.gateway.bindAddress == "::" then
+          "::1"
+        else
+          cfg.gateway.bindAddress;
+      healthTLS = !lib.elem (cfg.gateway.settings."tls-cert-path" or null) [ null false ];
       healthStartPeriod = "5m";
       containerConfig =
         quadlet.mkImageArgs {

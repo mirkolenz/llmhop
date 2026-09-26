@@ -129,13 +129,15 @@ in
     };
 
     socketDirectory = lib.mkOption {
-      type = lib.types.strMatching "/run/[^/]+(/[^/]+)*";
+      type = lib.types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
       default = "/run/llmhop";
       description = ''
         Directory of every unix socket llmhop serves or connects to: the
         default path of each socket listener, and one directory per workload
         without a `port`. Those are `RuntimeDirectory=`s except under a
         rootless Quadlet user, hence the `/run` prefix.
+        Each path component must start with a letter, digit, or underscore and
+        contain only those characters, dots, and hyphens.
       '';
     };
 

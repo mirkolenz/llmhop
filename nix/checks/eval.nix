@@ -301,6 +301,9 @@ let
         invalid =
           evaluates
             (mkSystem { socketDirectory = "/var/lib/llmhop"; }).services.llmhop.socketDirectory;
+        traversal =
+          evaluates
+            (mkSystem { socketDirectory = "/run/../etc"; }).services.llmhop.socketDirectory;
       };
       expected = {
         root = {
@@ -314,6 +317,7 @@ let
         user = "hop";
         declared = false;
         invalid = false;
+        traversal = false;
       };
     };
 

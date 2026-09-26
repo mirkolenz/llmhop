@@ -123,5 +123,10 @@ func readFile(path string) (string, error) {
 		return "", fmt.Errorf("read secret file %q: %w", path, err)
 	}
 
-	return strings.TrimSuffix(strings.TrimSuffix(string(data), "\r\n"), "\n"), nil
+	value, hasNewline := strings.CutSuffix(string(data), "\n")
+	if hasNewline {
+		value = strings.TrimSuffix(value, "\r")
+	}
+
+	return value, nil
 }

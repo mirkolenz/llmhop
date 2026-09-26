@@ -125,6 +125,13 @@ func TestExpand(t *testing.T) {
 			want: "secret\n",
 		},
 		{
+			name: "file trims only one CRLF-terminated line",
+			setup: func(t *testing.T) string {
+				return "${file:" + writeFile(t, "", "secret\n\r\n") + "}"
+			},
+			want: "secret\n",
+		},
+		{
 			name:    "file missing",
 			input:   "${file:/does/not/exist/llmhop-test}",
 			wantErr: true,

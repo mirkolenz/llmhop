@@ -30,16 +30,6 @@ func TestExpand(t *testing.T) {
 			want:  "a $ b $",
 		},
 		{
-			name:    "empty reference",
-			input:   "Bearer ${}",
-			wantErr: true,
-		},
-		{
-			name:    "unclosed reference",
-			input:   "Bearer ${env:LLMHOP_TEST_X",
-			wantErr: true,
-		},
-		{
 			name: "env braced",
 			setup: func(t *testing.T) string {
 				t.Setenv("LLMHOP_TEST_X", "secret")
@@ -48,12 +38,19 @@ func TestExpand(t *testing.T) {
 			want: "Bearer secret",
 		},
 		{
-			name: "env bare shorthand",
-			setup: func(t *testing.T) string {
-				t.Setenv("LLMHOP_TEST_X", "secret")
-				return "$LLMHOP_TEST_X"
-			},
-			want: "secret",
+			name:    "bare name is rejected",
+			input:   "pa$sword",
+			wantErr: true,
+		},
+		{
+			name:  "escaped reference",
+			input: "a$${env:LLMHOP_TEST_X}",
+			want:  "a${env:LLMHOP_TEST_X}",
+		},
+		{
+			name:    "reference without scheme",
+			input:   "${LLMHOP_TEST_X}",
+			wantErr: true,
 		},
 		{
 			name: "env missing",
@@ -157,6 +154,18 @@ func TestExpand(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestValidate(t *testing.T) {
+	for _, in := range []string{"${file:tok}", "${cred:sub/tok}", "${env:}"} {
+		if err := Validate(in); err == nil {
+			t.Errorf("Validate(%q) accepted an invalid reference", in)
+		}
+	}
+
+	if err := Validate("${env:LLMHOP_TEST_MISSING}"); err != nil {
+		t.Errorf("Validate resolved a reference: %v", err)
 	}
 }
 

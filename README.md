@@ -93,7 +93,8 @@ String values inside `authTokens` and `models.*.headers` are expanded at startup
   This is the same reference the NixOS module rewrites for the model backends, so one spelling covers every service: those servers receive the credential's path because they open the file themselves, while llmhop reads its own config and so receives its contents.
 - `${env:NAME}`: read from the `NAME` environment variable.
 - `${file:/absolute/path}`: read from a file llmhop is pointed at directly. The path must be absolute, since credentials are addressed by name with `${cred:name}`.
-- `$NAME`: shorthand for `${env:NAME}`.
+- `$$`: a literal `$`, so `$${env:NAME}` stays as written.
+  A bare `$NAME` is rejected rather than read from the environment.
 
 A single trailing newline is trimmed from a file's contents.
 

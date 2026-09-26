@@ -44,7 +44,7 @@ func TestLoadKeepsSecretReferences(t *testing.T) {
 		t.Fatalf("AuthTokens = %#v, want the reference verbatim", cfg.AuthTokens)
 	}
 
-	if _, err := Load(writeConfig(t, `{"authTokens": ["${"], "models": {"m": {"url": "http://x"}}}`), false); err == nil {
+	if _, err := Load(writeConfig(t, `{"authTokens": ["${nope:x}"], "models": {"m": {"url": "http://x"}}}`), false); err == nil {
 		t.Fatal("accepted malformed secret reference")
 	}
 }

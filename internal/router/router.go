@@ -6,6 +6,7 @@ package router
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,21 +30,26 @@ func New(cfg *config.Config) (http.Handler, error) {
 		if err != nil {
 			return nil, fmt.Errorf("model %q: %w", name, err)
 		}
+
+		// Go carries Host outside the header map, so a configured one overrides r.Out.Host.
+		headers := make(http.Header, len(m.Headers))
+		for k, v := range m.Headers {
+			headers.Set(k, v)
+		}
+
+		host := headers.Get("Host")
+		headers.Del("Host")
+
 		proxies[name] = &httputil.ReverseProxy{
 			Rewrite: func(r *httputil.ProxyRequest) {
-				// The router does not interpret query parameters.
+				// ReverseProxy drops unparsable queries, forward them verbatim instead.
 				r.Out.URL.RawQuery = r.In.URL.RawQuery
 				r.SetURL(up.URL)
-				r.Out.Host = r.In.Host
+				r.Out.Host = cmp.Or(host, r.In.Host)
 				r.SetXForwarded()
 
-				for k, v := range m.Headers {
-					if http.CanonicalHeaderKey(k) == "Host" {
-						r.Out.Host = v
-						continue
-					}
-
-					r.Out.Header.Set(k, v)
+				for k, v := range headers {
+					r.Out.Header[k] = v
 				}
 			},
 			Transport: up.Transport,
@@ -94,10 +100,6 @@ func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64, max
 				defer func() { <-slots }()
 			default:
 				http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
-				return
-			}
-
-			if req.Context().Err() != nil {
 				return
 			}
 		}

@@ -5,7 +5,7 @@
   ...
 }:
 {
-  systems = lib.filter (system: system != "x86_64-darwin") (import inputs.systems);
+  systems = lib.remove "x86_64-darwin" (import inputs.systems);
   imports = [
     inputs.treefmt-nix.flakeModule
     ./docs

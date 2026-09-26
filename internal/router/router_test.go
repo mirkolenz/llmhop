@@ -2,11 +2,14 @@ package router
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 )
@@ -15,6 +18,9 @@ type capturedRequest struct {
 	method string
 	body   string
 	header http.Header
+	host   string
+	path   string
+	query  string
 }
 
 func newBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
@@ -25,6 +31,9 @@ func newBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
 		captured.method = r.Method
 		captured.body = string(body)
 		captured.header = r.Header.Clone()
+		captured.host = r.Host
+		captured.path = r.URL.Path
+		captured.query = r.URL.RawQuery
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("backend ok"))
 	}))
@@ -163,6 +172,11 @@ func TestRouterRequests(t *testing.T) {
 		checkFwd   func(t *testing.T, req *capturedRequest)
 	}{
 		{
+			name:     "invalid JSON returns 400",
+			body:     `{"model":`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
 			name:     "unknown model returns 404",
 			body:     `{"model": "nope"}`,
 			wantCode: http.StatusNotFound,
@@ -222,7 +236,7 @@ func TestRouterRequests(t *testing.T) {
 		},
 		{
 			name:    "model headers are injected",
-			headers: map[string]string{"Authorization": "Bearer upstream", "X-Injected": "yes"},
+			headers: map[string]string{"Authorization": "Bearer upstream", "Host": "backend.example", "X-Injected": "yes"},
 			body:    `{"model": "m"}`,
 			// client Authorization should be overridden by injected value.
 			authHeader: "Bearer client-token",
@@ -233,6 +247,10 @@ func TestRouterRequests(t *testing.T) {
 				}
 				if got := r.header.Get("X-Injected"); got != "yes" {
 					t.Fatalf("got X-Injected %q", got)
+				}
+
+				if r.host != "backend.example" {
+					t.Fatalf("backend saw host %q", r.host)
 				}
 			},
 		},
@@ -267,6 +285,254 @@ func TestRouterRequests(t *testing.T) {
 			}
 			if c.checkFwd != nil {
 				c.checkFwd(t, captured)
+			}
+		})
+	}
+}
+
+func TestProxyPreservesHostAndQuery(t *testing.T) {
+	backend, captured := newBackend(t)
+	h, err := New(&config.Config{Models: map[string]config.Model{
+		"m": {URL: backend.URL + "/base?backend=1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?valid=1&semi=one;two", strings.NewReader(`{"model":"m"}`))
+	req.Host = "client.example"
+	req.RemoteAddr = "198.51.100.4:4321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d", rec.Code)
+	}
+
+	if captured.host != req.Host {
+		t.Errorf("backend saw host %q, want %q", captured.host, req.Host)
+	}
+
+	if captured.path != "/base/v1/chat/completions" {
+		t.Errorf("backend saw path %q", captured.path)
+	}
+
+	if captured.query != "backend=1&valid=1&semi=one;two" {
+		t.Errorf("backend saw query %q", captured.query)
+	}
+
+	if got := captured.header.Get("X-Forwarded-For"); got != "198.51.100.4" {
+		t.Errorf("backend saw X-Forwarded-For %q", got)
+	}
+}
+
+func TestNoncanonicalPathRedirect(t *testing.T) {
+	backend, captured := newBackend(t)
+	h, err := New(&config.Config{
+		AuthTokens: []string{"secret"},
+		Models:     map[string]config.Model{"m": {URL: backend.URL}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+
+	client := server.Client()
+	redirects := 0
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		redirects++
+		if req.Method != http.MethodPost {
+			t.Errorf("redirect changed method to %s", req.Method)
+		}
+
+		return nil
+	}
+
+	const body = `{"model":"m"}`
+	send := func(target string, reader io.Reader) int {
+		t.Helper()
+
+		req, err := http.NewRequest(http.MethodPost, server.URL+target, reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		req.Header.Set("Authorization", "Bearer secret")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		return resp.StatusCode
+	}
+
+	for _, target := range []string{"/v1//chat/completions", "/v1/./chat/completions"} {
+		if code := send(target, strings.NewReader(body)); code != http.StatusOK || captured.path != "/v1/chat/completions" || captured.body != body {
+			t.Fatalf("path %q: status %d, backend path %q, body %q", target, code, captured.path, captured.body)
+		}
+	}
+
+	if redirects != 2 {
+		t.Fatalf("got %d redirects, want 2", redirects)
+	}
+
+	if code := send("/v1//chat/completions", io.NopCloser(strings.NewReader(body))); code != http.StatusTemporaryRedirect || redirects != 2 {
+		t.Fatalf("non-replayable body: status %d, redirects %d", code, redirects)
+	}
+}
+
+func TestModelField(t *testing.T) {
+	backend, captured := newBackend(t)
+	h, err := New(&config.Config{Models: map[string]config.Model{
+		"a": {URL: backend.URL},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, body := range []string{
+		`{"model":"a","prompt":{"model":"b"}}`,
+		`{"MODEL":"a"}`,
+		`{"model":"missing","model":"a"}`,
+	} {
+		if rec := post(t, h, body, ""); rec.Code != http.StatusOK {
+			t.Fatalf("body %s: got status %d", body, rec.Code)
+		}
+
+		if captured.body != body {
+			t.Fatalf("backend saw body %q, want %q", captured.body, body)
+		}
+	}
+
+	for _, body := range []string{`{}`, `{"model":123}`, `{"model":"a","model":null}`} {
+		if rec := post(t, h, body, ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: got status %d", body, rec.Code)
+		}
+	}
+}
+
+func TestProxyPreservesRequestTrailer(t *testing.T) {
+	var trailer string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		trailer = req.Trailer.Get("X-Check")
+	}))
+	t.Cleanup(backend.Close)
+
+	h, err := New(&config.Config{Models: map[string]config.Model{"m": {URL: backend.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+	req.ContentLength = -1
+	req.Trailer = http.Header{"X-Check": {"ok"}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || trailer != "ok" {
+		t.Fatalf("status %d, trailer %q", rec.Code, trailer)
+	}
+}
+
+func TestBodyLimit(t *testing.T) {
+	cases := []struct {
+		name          string
+		maxBytes      int64
+		contentLength int64
+		body          io.Reader
+		wantCode      int
+	}{
+		{"known length is rejected before reading", 4, 5, iotest.ErrReader(errors.New("body was read")), http.StatusRequestEntityTooLarge},
+		{"unknown length is capped while reading", 4, -1, strings.NewReader(`{"model":"m"}`), http.StatusRequestEntityTooLarge},
+		{"zero disables the body limit", 0, 13, strings.NewReader(`{"model":"m"}`), http.StatusNotFound},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", c.body)
+			req.ContentLength = c.contentLength
+			rec := httptest.NewRecorder()
+			proxyHandler(nil, c.maxBytes, 0)(rec, req)
+
+			if rec.Code != c.wantCode {
+				t.Fatalf("got status %d, want %d", rec.Code, c.wantCode)
+			}
+		})
+	}
+}
+
+func TestConcurrentRequestLimit(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		limit    int
+		wantCode int
+	}{
+		{"disabled", 0, http.StatusBadRequest},
+		{"one active request", 1, http.StatusServiceUnavailable},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			handler := proxyHandler(nil, 0, c.limit)
+			body, writer := io.Pipe()
+			defer func() { _ = writer.Close() }()
+
+			firstDone := make(chan struct{})
+			go func() {
+				handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", body))
+				close(firstDone)
+			}()
+
+			wrote := make(chan error, 1)
+			go func() {
+				_, err := writer.Write([]byte("{"))
+				wrote <- err
+			}()
+
+			select {
+			case err := <-wrote:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("first request did not start reading")
+			}
+
+			second := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not JSON"))
+			rec := httptest.NewRecorder()
+			secondDone := make(chan struct{})
+			go func() {
+				handler(rec, second)
+				close(secondDone)
+			}()
+
+			select {
+			case <-secondDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("second request did not finish")
+			}
+
+			if rec.Code != c.wantCode {
+				t.Fatalf("second request got status %d, want %d", rec.Code, c.wantCode)
+			}
+
+			_ = writer.Close()
+
+			select {
+			case <-firstDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("first request did not finish")
+			}
+
+			if c.limit > 0 {
+				rec := httptest.NewRecorder()
+				handler(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader("not JSON")))
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("after first request got status %d, want 400", rec.Code)
+				}
 			}
 		})
 	}

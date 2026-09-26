@@ -31,10 +31,18 @@ func New(cfg *config.Config) (http.Handler, error) {
 		}
 		proxies[name] = &httputil.ReverseProxy{
 			Rewrite: func(r *httputil.ProxyRequest) {
+				// The router does not interpret query parameters.
+				r.Out.URL.RawQuery = r.In.URL.RawQuery
 				r.SetURL(up.URL)
+				r.Out.Host = r.In.Host
 				r.SetXForwarded()
 
 				for k, v := range m.Headers {
+					if http.CanonicalHeaderKey(k) == "Host" {
+						r.Out.Host = v
+						continue
+					}
+
 					r.Out.Header.Set(k, v)
 				}
 			},
@@ -52,7 +60,7 @@ func New(cfg *config.Config) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	registerModels(mux, listed)
-	mux.HandleFunc("/", proxyHandler(proxies, cfg.MaxBodyBytes))
+	mux.HandleFunc("/", proxyHandler(proxies, cfg.MaxBodyBytes, cfg.MaxConcurrentRequests))
 
 	// Health sits outside the auth middleware: liveness probes and downstream
 	// load balancers must be able to check the proxy without a token.
@@ -66,11 +74,34 @@ func New(cfg *config.Config) (http.Handler, error) {
 // proxyHandler buffers each request body so it can peek at the JSON "model"
 // field, then forwards the request verbatim to the matching backend.
 //
-// The body is fully buffered. A streaming json.Decoder that stops at the
-// "model" field would let us forward very large bodies (e.g. base64 images)
-// without copying them into memory first; see the roadmap in README.md.
-func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64) http.HandlerFunc {
+// Full buffering validates the entire JSON body before forwarding.
+func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64, maxConcurrent int) http.HandlerFunc {
+	var slots chan struct{}
+
+	if maxConcurrent > 0 {
+		slots = make(chan struct{}, maxConcurrent)
+	}
+
 	return func(w http.ResponseWriter, req *http.Request) {
+		if maxBytes > 0 && req.ContentLength > maxBytes {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		if slots != nil {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			default:
+				http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
+				return
+			}
+
+			if req.Context().Err() != nil {
+				return
+			}
+		}
+
 		if maxBytes > 0 {
 			req.Body = http.MaxBytesReader(w, req.Body, maxBytes)
 		}
@@ -85,18 +116,31 @@ func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64) htt
 			return
 		}
 
-		var probe struct {
-			Model string `json:"model"`
+		var request struct {
+			Model *string `json:"model"`
 		}
-		_ = json.Unmarshal(body, &probe)
-		proxy, ok := proxies[probe.Model]
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+			return
+		}
+
+		if request.Model == nil {
+			http.Error(w, "missing model", http.StatusBadRequest)
+			return
+		}
+
+		proxy, ok := proxies[*request.Model]
 		if !ok {
-			http.Error(w, fmt.Sprintf("unknown model %q", probe.Model), http.StatusNotFound)
+			http.Error(w, fmt.Sprintf("unknown model %q", *request.Model), http.StatusNotFound)
 			return
 		}
 
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		req.ContentLength = int64(len(body))
+		if len(req.Trailer) > 0 {
+			req.ContentLength = -1
+		}
+
 		proxy.ServeHTTP(w, req)
 	}
 }

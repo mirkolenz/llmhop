@@ -24,6 +24,8 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 
 `GET /v1/models` and `GET /v1/models/{model}` are answered by LLMhop itself from the configured models, never proxied, so the catalog reflects exactly what clients may ask for.
 Everything else is dispatched by its `model` field as above.
+Invalid JSON request bodies return `400 Bad Request`.
+Missing or non-string `model` values also return `400 Bad Request`.
 When `authTokens` is set, all routes (the models API included) require a valid bearer token.
 
 A backend marked `"unlisted": true` is routed like any other but left out of both model endpoints.
@@ -110,14 +112,18 @@ llmhop --check --config config.json
 Secret references are left unexpanded in this mode, so a config can be validated where the referenced files and environment variables do not exist, such as a CI job or a Nix build.
 The NixOS module uses exactly this to validate the generated config at build time.
 
-### Request size limit
+### Request limits
 
 LLMhop buffers each request body in memory so it can peek at the `model` field before forwarding.
-To keep a single request from exhausting memory, the body is capped at 100 MiB by default; bodies beyond the cap are rejected with `413 Request Entity Too Large`.
-Override it when vision or other multimodal payloads need more:
+To keep a single request from exhausting memory, the body is capped at 100 MiB by default.
+Bodies beyond the cap are rejected with `413 Request Entity Too Large`.
+A declared `Content-Length` above the cap is rejected before reading the body.
+At most 8 proxied requests are active at once by default.
+Additional requests receive `503 Service Unavailable` immediately.
+Set either limit to `0` to disable it, or adjust both for larger multimodal payloads and expected concurrency:
 
 ```json
-{ "maxBodyBytes": 524288000 }
+{ "maxBodyBytes": 524288000, "maxConcurrentRequests": 4 }
 ```
 
 ## Running

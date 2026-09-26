@@ -21,6 +21,7 @@ from argparse import ArgumentParser
 from collections.abc import Container, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from csv import reader
+from email.parser import Parser
 from fnmatch import fnmatch
 from os import environ, stat, walk
 from pathlib import Path
@@ -82,10 +83,12 @@ def unresolved(library: Path) -> list[str]:
     """
     result = run(["ldd", library], capture_output=True, text=True, check=False)
 
+    entries = (line.partition("=>") for line in result.stdout.splitlines())
+
     return [
-        line.split("=>")[0].strip()
-        for line in result.stdout.splitlines()
-        if line.endswith("=> not found")
+        soname.strip()
+        for soname, _, target in entries
+        if target.strip() == "not found"
     ]
 
 
@@ -151,8 +154,8 @@ def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
         if not wheel.is_file() or not record.is_file():
             continue
 
-        lines = wheel.read_text().splitlines()
-        tags = [line[5:] for line in lines if line.startswith("Tag: ")]
+        metadata = Parser().parsestr(wheel.read_text(), headersonly=True)
+        tags = metadata.get_all("Tag", [])
 
         if not tags or not all(tag.endswith("-any") for tag in tags):
             continue

@@ -5,7 +5,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -51,30 +50,20 @@ func supervise(cmd *exec.Cmd, ready func() error) (int, error) {
 		return 1, fmt.Errorf("start %s: %w", cmd.Path, err)
 	}
 
-	waited := make(chan error, 1)
+	failed := make(chan error, 1)
 	go func() {
-		waited <- cmd.Wait()
+		if err := ready(); err != nil {
+			failed <- err
+			_ = cmd.Process.Kill()
+		}
 	}()
 
-	checked := make(chan error, 1)
-	go func() {
-		checked <- ready()
-	}()
+	code := systemd.ExitCode(cmd.Wait())
 
 	select {
-	case err := <-waited:
-		return systemd.ExitCode(err), nil
-	case err := <-checked:
-		if err != nil {
-			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-				return 1, fmt.Errorf("readiness: %w, kill child: %v", err, killErr)
-			}
-
-			<-waited
-
-			return 1, fmt.Errorf("readiness: %w", err)
-		}
-
-		return systemd.ExitCode(<-waited), nil
+	case err := <-failed:
+		return 1, fmt.Errorf("readiness: %w", err)
+	default:
+		return code, nil
 	}
 }

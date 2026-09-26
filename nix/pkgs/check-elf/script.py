@@ -43,13 +43,17 @@ def matches(name: str, patterns: Iterable[str]) -> bool:
 
 
 def shared_libraries(root: Path) -> Iterator[Path]:
-    """Yield every shared library below `root` once, relative to it.
+    """Yield every host shared library below `root` once, relative to it.
 
     A virtual environment is assembled from links, so its packages are reached
     through symlinked directories rather than copied into place. Directories
     reached twice, such as through `lib64 -> lib`, are visited once.
     """
     seen: set[tuple[int, int]] = set()
+    host = machine(Path(sys.executable).resolve())
+
+    if host is None:
+        return
 
     for directory, dirs, names in walk(root, followlinks=True):
         info = stat(directory)
@@ -63,21 +67,28 @@ def shared_libraries(root: Path) -> Iterator[Path]:
         dirs.sort()
 
         for name in names:
-            if name.endswith(".so") or ".so." in name:
-                yield Path(directory, name).relative_to(root)
+            if not (name.endswith(".so") or ".so." in name):
+                continue
+
+            path = Path(directory, name)
+
+            if path.is_file() and machine(path, shared=True) == host:
+                yield path.relative_to(root)
 
 
-def unresolved(library: Path) -> Iterator[str]:
-    """Yield the sonames `ldd` cannot resolve for one library.
+def unresolved(library: Path) -> list[str]:
+    """Return the sonames `ldd` cannot resolve for one library.
 
     `ldd` rejects everything that is not a dynamic ELF, of which an environment
     holds plenty. Those report nothing rather than failing the run.
     """
     result = run(["ldd", library], capture_output=True, text=True, check=False)
 
-    for line in result.stdout.splitlines():
-        if line.endswith("=> not found"):
-            yield line.split("=>")[0].strip()
+    return [
+        line.split("=>")[0].strip()
+        for line in result.stdout.splitlines()
+        if line.endswith("=> not found")
+    ]
 
 
 def missing(
@@ -112,8 +123,10 @@ def missing(
     }
 
 
-def machine(path: Path) -> int | None:
-    """Return the `e_machine` of a loadable ELF file, or `None` otherwise.
+def machine(path: Path, *, shared: bool = False) -> int | None:
+    """Return a loadable ELF file's `e_machine`, or `None` otherwise.
+
+    Set `shared` to exclude executables from the libraries a soname can use.
 
     >>> machine(Path(__file__)) is None
     True
@@ -124,7 +137,9 @@ def machine(path: Path) -> int | None:
     if header[:4] != b"\x7fELF":
         return None
 
-    if int.from_bytes(header[16:18], "little") not in LOADABLE:
+    elf_type = int.from_bytes(header[16:18], "little")
+
+    if elf_type not in LOADABLE or (shared and elf_type != 3):
         return None
 
     return int.from_bytes(header[18:20], "little")
@@ -148,8 +163,10 @@ def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
         if not tags or not all(tag.endswith("-any") for tag in tags):
             continue
 
+        site_packages = info.parent
+
         with record.open(newline="") as file:
-            paths = [info.parent / row[0] for row in reader(file) if row]
+            paths = [site_packages / row[0] for row in reader(file) if row]
 
         # PEP 503 normalization, as the lock spells the name.
         name = sub(r"[-_.]+", "-", info.name.split("-")[0]).lower()

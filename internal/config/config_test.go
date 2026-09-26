@@ -45,6 +45,17 @@ func TestLoadKeepsSecretReferences(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsMalformedSecretReferencesWithoutExpansion(t *testing.T) {
+	for _, body := range []string{
+		`{"authTokens": ["${"], "models": {"m": {"url": "http://x"}}}`,
+		`{"models": {"m": {"url": "http://x", "headers": {"Authorization": "${}"}}}}`,
+	} {
+		if _, err := Load(writeConfig(t, body), false); err == nil {
+			t.Fatalf("accepted malformed secret reference in %s", body)
+		}
+	}
+}
+
 func TestLoad(t *testing.T) {
 	const minimal = `{"models": {"m": {"url": "http://x"}}}`
 
@@ -71,6 +82,69 @@ func TestLoad(t *testing.T) {
 			wantErr: "unknown field",
 		},
 		{
+			name:    "rejects trailing JSON",
+			body:    minimal + ` {}`,
+			wantErr: "multiple JSON values",
+		},
+		{
+			name:    "rejects out of range port",
+			body:    `{"port": 65536, "models": {"m": {"url": "http://x"}}}`,
+			wantErr: "port 65536",
+		},
+		{
+			name:    "rejects negative body limit",
+			body:    `{"maxBodyBytes": -1, "models": {"m": {"url": "http://x"}}}`,
+			wantErr: "maxBodyBytes",
+		},
+		{
+			name:    "rejects negative concurrency limit",
+			body:    `{"maxConcurrentRequests": -1, "models": {"m": {"url": "http://x"}}}`,
+			wantErr: "maxConcurrentRequests",
+		},
+		{
+			name:    "rejects empty model name",
+			body:    `{"models": {"": {"url": "http://x"}}}`,
+			wantErr: "model name",
+		},
+		{
+			name:    "rejects empty auth token",
+			body:    `{"authTokens": [""], "models": {"m": {"url": "http://x"}}}`,
+			wantErr: "empty token",
+		},
+		{
+			name:    "rejects empty expanded auth token",
+			setenv:  map[string]string{"LLMHOP_CFG_EMPTY_TOKEN": ""},
+			body:    `{"authTokens": ["${env:LLMHOP_CFG_EMPTY_TOKEN}"], "models": {"m": {"url": "http://x"}}}`,
+			wantErr: "empty token",
+		},
+		{
+			name:    "rejects unsendable expanded auth token",
+			setenv:  map[string]string{"LLMHOP_CFG_BAD_TOKEN": "first\nsecond"},
+			body:    `{"authTokens": ["${env:LLMHOP_CFG_BAD_TOKEN}"], "models": {"m": {"url": "http://x"}}}`,
+			wantErr: "invalid token",
+		},
+		{
+			name:    "rejects duplicate header names ignoring case",
+			body:    `{"models": {"m": {"url": "http://x", "headers": {"Authorization": "one", "authorization": "two"}}}}`,
+			wantErr: "duplicate header",
+		},
+		{
+			name:    "rejects invalid header name",
+			body:    `{"models": {"m": {"url": "http://x", "headers": {"Bad Header": "value"}}}}`,
+			wantErr: "invalid header name",
+		},
+		{
+			name:    "rejects invalid header value",
+			body:    `{"models": {"m": {"url": "http://x", "headers": {"X-Test": "first\nsecond"}}}}`,
+			wantErr: "invalid header value",
+		},
+		{
+			name:    "rejects invalid expanded header value",
+			setenv:  map[string]string{"LLMHOP_CFG_BAD_HEADER": "first\nsecond"},
+			body:    `{"models": {"m": {"url": "http://x", "headers": {"X-Test": "${env:LLMHOP_CFG_BAD_HEADER}"}}}}`,
+			wantErr: "invalid header value",
+		},
+		{
 			name:    "requires absolute model URLs",
 			body:    `{"models": {"m": {"url": "localhost:8000"}}}`,
 			wantErr: "absolute http(s) or unix URL",
@@ -85,6 +159,9 @@ func TestLoad(t *testing.T) {
 				if cfg.MaxBodyBytes != DefaultMaxBodyBytes {
 					t.Fatalf("MaxBodyBytes = %d, want %d", cfg.MaxBodyBytes, DefaultMaxBodyBytes)
 				}
+				if cfg.MaxConcurrentRequests != DefaultMaxConcurrentRequests {
+					t.Fatalf("MaxConcurrentRequests = %d, want %d", cfg.MaxConcurrentRequests, DefaultMaxConcurrentRequests)
+				}
 			},
 		},
 		{
@@ -97,11 +174,20 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			name: "custom maxBodyBytes",
-			body: `{"maxBodyBytes": 4096, "models": {"m": {"url": "http://x"}}}`,
+			name: "custom limits",
+			body: `{"maxBodyBytes": 4096, "maxConcurrentRequests": 4, "models": {"m": {"url": "http://x"}}}`,
 			check: func(t *testing.T, cfg *Config) {
-				if cfg.MaxBodyBytes != 4096 {
-					t.Fatalf("got %d", cfg.MaxBodyBytes)
+				if cfg.MaxBodyBytes != 4096 || cfg.MaxConcurrentRequests != 4 {
+					t.Fatalf("got limits %d and %d", cfg.MaxBodyBytes, cfg.MaxConcurrentRequests)
+				}
+			},
+		},
+		{
+			name: "zero disables limits",
+			body: `{"maxBodyBytes": 0, "maxConcurrentRequests": 0, "models": {"m": {"url": "http://x"}}}`,
+			check: func(t *testing.T, cfg *Config) {
+				if cfg.MaxBodyBytes != 0 || cfg.MaxConcurrentRequests != 0 {
+					t.Fatalf("got limits %d and %d", cfg.MaxBodyBytes, cfg.MaxConcurrentRequests)
 				}
 			},
 		},

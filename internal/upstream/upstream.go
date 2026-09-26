@@ -33,6 +33,10 @@ func Parse(raw string) (*Upstream, error) {
 	// which would only surface as a proxy error per request.
 	switch u.Scheme {
 	case "http", "https":
+		if u.User != nil || u.Fragment != "" {
+			return nil, fmt.Errorf("http(s) backend URL must not contain credentials or a fragment")
+		}
+
 		if u.Host != "" {
 			return &Upstream{URL: u, Transport: http.DefaultTransport}, nil
 		}

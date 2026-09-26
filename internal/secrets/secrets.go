@@ -16,6 +16,10 @@ const credentialsDirectory = "CREDENTIALS_DIRECTORY"
 // return the first error encountered so misconfiguration fails loudly at
 // startup instead of leaking an empty credential to a backend.
 func Expand(s string) (string, error) {
+	if err := ValidateReferences(s); err != nil {
+		return "", err
+	}
+
 	var firstErr error
 	out := os.Expand(s, func(key string) string {
 		v, err := resolve(key)
@@ -25,6 +29,25 @@ func Expand(s string) (string, error) {
 		return v
 	})
 	return out, firstErr
+}
+
+// ValidateReferences rejects malformed braced references without resolving them.
+func ValidateReferences(s string) error {
+	for rest := s; ; {
+		_, after, found := strings.Cut(rest, "${")
+		if !found {
+			break
+		}
+
+		name, tail, closed := strings.Cut(after, "}")
+		if !closed || name == "" {
+			return fmt.Errorf("malformed secret reference")
+		}
+
+		rest = tail
+	}
+
+	return nil
 }
 
 func resolve(key string) (string, error) {
@@ -74,5 +97,11 @@ func readFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read secret file %q: %w", path, err)
 	}
-	return strings.TrimRight(string(data), "\r\n"), nil
+
+	value, hasNewline := strings.CutSuffix(string(data), "\n")
+	if hasNewline {
+		value = strings.TrimSuffix(value, "\r")
+	}
+
+	return value, nil
 }

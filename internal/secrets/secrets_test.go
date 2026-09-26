@@ -25,6 +25,16 @@ func TestExpand(t *testing.T) {
 			want:  "",
 		},
 		{
+			name:    "empty reference",
+			input:   "Bearer ${}",
+			wantErr: true,
+		},
+		{
+			name:    "unclosed reference",
+			input:   "Bearer ${env:LLMHOP_TEST_X",
+			wantErr: true,
+		},
+		{
 			name: "env braced",
 			setup: func(t *testing.T) string {
 				t.Setenv("LLMHOP_TEST_X", "secret")
@@ -101,6 +111,13 @@ func TestExpand(t *testing.T) {
 				return "${file:" + writeFile(t, "", "a b\nc\r\n") + "}"
 			},
 			want: "a b\nc",
+		},
+		{
+			name: "file trims only one trailing newline",
+			setup: func(t *testing.T) string {
+				return "${file:" + writeFile(t, "", "secret\n\n") + "}"
+			},
+			want: "secret\n",
 		},
 		{
 			name:    "file missing",

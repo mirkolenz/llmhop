@@ -20,7 +20,11 @@ func Listeners() ([]net.Listener, error) {
 		return nil, fmt.Errorf("LISTEN_FDS: %w", err)
 	}
 
-	listeners := make([]net.Listener, n)
+	if n < 0 {
+		return nil, fmt.Errorf("LISTEN_FDS must not be negative")
+	}
+
+	var listeners []net.Listener
 
 	for i := range n {
 		// Numbered from SD_LISTEN_FDS_START. FileListener duplicates the
@@ -30,10 +34,14 @@ func Listeners() ([]net.Listener, error) {
 		_ = f.Close()
 
 		if err != nil {
+			for _, listener := range listeners {
+				_ = listener.Close()
+			}
+
 			return nil, fmt.Errorf("socket %d: %w", i, err)
 		}
 
-		listeners[i] = ln
+		listeners = append(listeners, ln)
 	}
 
 	return listeners, nil

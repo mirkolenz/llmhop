@@ -5,7 +5,9 @@
 package main
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -34,15 +36,45 @@ func main() {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
-	if err := cmd.Start(); err != nil {
-		log.Fatalf("start %s: %v", argv[0], err)
+	code, err := supervise(cmd, func() error {
+		return systemd.ReadyWhenHealthy(up, *healthPath, time.Second)
+	})
+	if err != nil {
+		log.Fatal(err)
 	}
 
+	os.Exit(code)
+}
+
+func supervise(cmd *exec.Cmd, ready func() error) (int, error) {
+	if err := cmd.Start(); err != nil {
+		return 1, fmt.Errorf("start %s: %w", cmd.Path, err)
+	}
+
+	waited := make(chan error, 1)
 	go func() {
-		if err := systemd.ReadyWhenHealthy(up, *healthPath, time.Second); err != nil {
-			log.Fatalf("readiness: %v", err)
-		}
+		waited <- cmd.Wait()
 	}()
 
-	os.Exit(systemd.ExitCode(cmd.Wait()))
+	checked := make(chan error, 1)
+	go func() {
+		checked <- ready()
+	}()
+
+	select {
+	case err := <-waited:
+		return systemd.ExitCode(err), nil
+	case err := <-checked:
+		if err != nil {
+			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				return 1, fmt.Errorf("readiness: %w, kill child: %v", err, killErr)
+			}
+
+			<-waited
+
+			return 1, fmt.Errorf("readiness: %w", err)
+		}
+
+		return systemd.ExitCode(<-waited), nil
+	}
 }

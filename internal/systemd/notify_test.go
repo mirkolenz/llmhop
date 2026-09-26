@@ -54,6 +54,26 @@ func readNotify(t *testing.T, conn *net.UnixConn) string {
 	return string(buf[:n])
 }
 
+func checkReadyAfterProbes(t *testing.T, handler http.Handler, calls *atomic.Int64, want int64) {
+	t.Helper()
+
+	conn := listenNotify(t)
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	if err := ReadyWhenHealthy(parse(t, srv.URL), "/health", time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readNotify(t, conn); got != "READY=1" {
+		t.Fatalf("got %q, want READY=1", got)
+	}
+
+	if got := calls.Load(); got != want {
+		t.Fatalf("probed health %d times, want %d", got, want)
+	}
+}
+
 func TestReadyWithoutSocket(t *testing.T) {
 	t.Setenv("NOTIFY_SOCKET", "")
 
@@ -77,11 +97,9 @@ func TestReady(t *testing.T) {
 // The 5xx a loading model server returns must read as "not yet" rather than as
 // a failure, so readiness is reported only once the endpoint answers 200.
 func TestReadyWhenHealthy(t *testing.T) {
-	conn := listenNotify(t)
-
 	var calls atomic.Int64
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	checkReadyAfterProbes(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if calls.Add(1) < 3 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 
@@ -89,20 +107,27 @@ func TestReadyWhenHealthy(t *testing.T) {
 		}
 
 		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	}), &calls, 3)
+}
 
-	if err := ReadyWhenHealthy(parse(t, srv.URL), "/health", time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
+func TestReadyRedirect(t *testing.T) {
+	var calls atomic.Int64
 
-	if got := readNotify(t, conn); got != "READY=1" {
-		t.Fatalf("got %q, want READY=1", got)
-	}
+	checkReadyAfterProbes(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(http.StatusOK)
 
-	if got := calls.Load(); got != 3 {
-		t.Errorf("probed %d times, want 3", got)
-	}
+			return
+		}
+
+		if calls.Add(1) == 1 {
+			http.Redirect(w, r, "/", http.StatusFound)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}), &calls, 2)
 }
 
 func TestReadyWhenHealthyReturnsNotifyError(t *testing.T) {

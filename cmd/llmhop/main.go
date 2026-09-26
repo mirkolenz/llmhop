@@ -57,7 +57,7 @@ func main() {
 	}
 
 	if err := systemd.Ready(); err != nil {
-		log.Printf("sd_notify: %v", err)
+		log.Fatalf("sd_notify: %v", err)
 	}
 
 	errs := make(chan error, len(listeners))

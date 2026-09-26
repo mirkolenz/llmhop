@@ -53,7 +53,13 @@ func Ready() error {
 // ReadyWhenHealthy polls healthPath on up until it answers 200, then reports
 // readiness on behalf of a server that speaks no sd_notify itself.
 func ReadyWhenHealthy(up *upstream.Upstream, healthPath string, interval time.Duration) error {
-	client := &http.Client{Timeout: probeTimeout, Transport: up.Transport}
+	client := &http.Client{
+		Timeout:   probeTimeout,
+		Transport: up.Transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	defer client.CloseIdleConnections()
 
 	url := up.URL.JoinPath(healthPath).String()

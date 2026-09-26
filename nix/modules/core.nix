@@ -33,10 +33,8 @@ let
       listener.socket
     else if listener.host == "" then
       toString listener.port
-    else if lib.hasInfix ":" listener.host then
-      "[${listener.host}]:${toString listener.port}"
     else
-      "${listener.host}:${toString listener.port}";
+      hostPort listener.host listener.port;
 
   # Shared by the top-level options, which define the `default` listener, and
   # every entry of `listen`.
@@ -95,6 +93,7 @@ let
 
   inherit (import ./lib.nix lib)
     credentialsOption
+    hostPort
     identityConfig
     identityServiceConfig
     mergeCredentialServiceConfig

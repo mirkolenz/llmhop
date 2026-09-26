@@ -14,6 +14,11 @@ let
     attrs: key: entries:
     lib.toList (attrs.${key} or [ ]) ++ entries;
 
+  # `host:port`, with IPv6 literals bracketed.
+  hostPort =
+    host: port:
+    if lib.hasInfix ":" host then "[${host}]:${toString port}" else "${host}:${toString port}";
+
   # Unit name of a model or auxiliary workload. Everything keyed by unit, from
   # its socket path to its credential directory, derives from this.
   workloadUnit = prefix: workload: "${prefix}-${workload.name}";
@@ -960,7 +965,8 @@ let
   # The server binds the host `socket` mounted into the container, else
   # `containerPort`, published on the host `port` unless that is null (host
   # networking). A rootless `socket` needs `podman` to clear it. See "Unix
-  # sockets" in the module internals documentation.
+  # sockets" in the module internals documentation. The health probe reaches
+  # a server bound to `bindAddress`, through loopback for a wildcard.
   mkQuadletWorker =
     {
       cfg,
@@ -969,7 +975,7 @@ let
       socket ? null,
       podman ? null,
       healthPath ? "/health",
-      healthHost ? "localhost",
+      bindAddress ? "localhost",
       healthTLS ? false,
       healthStartPeriod ? "30m",
       serviceConfig ? { },
@@ -981,6 +987,12 @@ let
     let
       rootless = cfg.quadlet.user != null;
       healthScheme = if healthTLS then "https" else "http";
+      healthHost =
+        {
+          "0.0.0.0" = "127.0.0.1";
+          "::" = "::1";
+        }
+        .${bindAddress} or bindAddress;
       mounts =
         lib.optional (
           socket != null
@@ -1013,9 +1025,7 @@ let
           if socket != null then
             "--unix-socket ${containerSocketPath} ${healthScheme}://localhost"
           else
-            "${healthScheme}://${
-              if lib.hasInfix ":" healthHost then "[${healthHost}]" else healthHost
-            }:${toString containerPort}"
+            "${healthScheme}://${hostPort healthHost containerPort}"
         }${healthPath}";
         HealthStartPeriod = healthStartPeriod;
         HealthInterval = "10s";
@@ -1297,6 +1307,7 @@ in
     modelLabel
     containerListen
     hostListen
+    hostPort
     listenerOptions
     renderCliArgs
     renderCliArgsShell

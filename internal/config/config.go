@@ -111,7 +111,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 
 	resolve := secrets.Expand
 	if !expandSecrets {
-		resolve = func(s string) (string, error) { return s, secrets.ValidateReferences(s) }
+		resolve = func(s string) (string, error) { return s, secrets.Validate(s) }
 	}
 
 	if err := cfg.resolveSecrets(resolve); err != nil {

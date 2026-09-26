@@ -3,6 +3,7 @@
 package secrets
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,38 +17,62 @@ const credentialsDirectory = "CREDENTIALS_DIRECTORY"
 // return the first error encountered so misconfiguration fails loudly at
 // startup instead of leaking an empty credential to a backend.
 func Expand(s string) (string, error) {
-	if err := ValidateReferences(s); err != nil {
-		return "", err
-	}
-
-	var firstErr error
-	out := os.Expand(s, func(key string) string {
-		v, err := resolve(key)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-		return v
-	})
-	return out, firstErr
+	return expand(s, resolve)
 }
 
-// ValidateReferences rejects malformed braced references without resolving them.
-func ValidateReferences(s string) error {
-	for rest := s; ; {
-		_, after, found := strings.Cut(rest, "${")
+// Validate checks the reference syntax of s without resolving anything.
+func Validate(s string) error {
+	_, err := expand(s, func(string) (string, error) { return "", nil })
+	return err
+}
+
+// expand is the one parser behind Expand and Validate. A `$` that starts
+// neither `${KEY}` nor `$NAME` is kept literally.
+func expand(s string, resolve func(key string) (string, error)) (string, error) {
+	var out strings.Builder
+
+	for {
+		before, after, found := strings.Cut(s, "$")
+		out.WriteString(before)
+
 		if !found {
-			break
+			return out.String(), nil
 		}
 
-		name, tail, closed := strings.Cut(after, "}")
-		if !closed || name == "" {
-			return fmt.Errorf("malformed secret reference")
+		var key string
+
+		if braced, ok := strings.CutPrefix(after, "{"); ok {
+			name, rest, closed := strings.Cut(braced, "}")
+			if !closed || name == "" {
+				return "", errors.New("malformed secret reference")
+			}
+
+			key, s = name, rest
+		} else {
+			n := strings.IndexFunc(after, func(r rune) bool {
+				return !(r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z')
+			})
+			if n < 0 {
+				n = len(after)
+			}
+
+			if n == 0 {
+				out.WriteByte('$')
+				s = after
+
+				continue
+			}
+
+			key, s = after[:n], after[n:]
 		}
 
-		rest = tail
+		v, err := resolve(key)
+		if err != nil {
+			return "", err
+		}
+
+		out.WriteString(v)
 	}
-
-	return nil
 }
 
 func resolve(key string) (string, error) {
@@ -98,10 +123,5 @@ func readFile(path string) (string, error) {
 		return "", fmt.Errorf("read secret file %q: %w", path, err)
 	}
 
-	value, hasNewline := strings.CutSuffix(string(data), "\n")
-	if hasNewline {
-		value = strings.TrimSuffix(value, "\r")
-	}
-
-	return value, nil
+	return strings.TrimSuffix(strings.TrimSuffix(string(data), "\r\n"), "\n"), nil
 }

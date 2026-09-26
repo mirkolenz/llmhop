@@ -25,6 +25,11 @@ func TestExpand(t *testing.T) {
 			want:  "",
 		},
 		{
+			name:  "dollar without reference",
+			input: "a $ b $",
+			want:  "a $ b $",
+		},
+		{
 			name:    "empty reference",
 			input:   "Bearer ${}",
 			wantErr: true,

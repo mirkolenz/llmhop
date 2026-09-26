@@ -18,7 +18,7 @@ but for another machine, and passes.
 
 import sys
 from argparse import ArgumentParser
-from collections.abc import Iterable, Iterator
+from collections.abc import Container, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from csv import reader
 from fnmatch import fnmatch
@@ -30,7 +30,8 @@ from subprocess import run
 __all__ = ["main"]
 
 # `e_type` values of code the loader maps: executables and shared objects.
-LOADABLE = {2, 3}
+ET_EXEC, ET_DYN = 2, 3
+LOADABLE = {ET_EXEC, ET_DYN}
 
 
 def matches(name: str, patterns: Iterable[str]) -> bool:
@@ -42,18 +43,14 @@ def matches(name: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch(name, pattern) for pattern in patterns)
 
 
-def shared_libraries(root: Path) -> Iterator[Path]:
-    """Yield every host shared library below `root` once, relative to it.
+def shared_libraries(root: Path, host: int) -> Iterator[Path]:
+    """Yield every `host` shared library below `root` once, relative to it.
 
     A virtual environment is assembled from links, so its packages are reached
     through symlinked directories rather than copied into place. Directories
     reached twice, such as through `lib64 -> lib`, are visited once.
     """
     seen: set[tuple[int, int]] = set()
-    host = machine(Path(sys.executable).resolve())
-
-    if host is None:
-        return
 
     for directory, dirs, names in walk(root, followlinks=True):
         info = stat(directory)
@@ -72,7 +69,7 @@ def shared_libraries(root: Path) -> Iterator[Path]:
 
             path = Path(directory, name)
 
-            if path.is_file() and machine(path, shared=True) == host:
+            if path.is_file() and machine(path, {ET_DYN}) == host:
                 yield path.relative_to(root)
 
 
@@ -81,6 +78,7 @@ def unresolved(library: Path) -> list[str]:
 
     `ldd` rejects everything that is not a dynamic ELF, of which an environment
     holds plenty. Those report nothing rather than failing the run.
+    A list rather than a generator, so the pool runs `ldd` in its workers.
     """
     result = run(["ldd", library], capture_output=True, text=True, check=False)
 
@@ -92,18 +90,18 @@ def unresolved(library: Path) -> list[str]:
 
 
 def missing(
-    root: Path, drivers: Iterable[str], optional: Iterable[str]
+    root: Path, host: int, drivers: Iterable[str], optional: Iterable[str]
 ) -> dict[str, Path]:
     """Map each unresolved soname below `root` to one library needing it.
 
     Left out are the sonames the environment ships itself or `drivers` match,
     and whatever the libraries `optional` matches need.
 
-    >>> missing(Path("/var/empty"), [], [])
+    >>> missing(Path("/var/empty"), 62, [], [])
     {}
     """
     workers = int(environ.get("NIX_BUILD_CORES", "0")) or None
-    libraries = list(shared_libraries(root))
+    libraries = list(shared_libraries(root, host))
     checked = [lib for lib in libraries if not matches(str(lib), optional)]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -123,10 +121,8 @@ def missing(
     }
 
 
-def machine(path: Path, *, shared: bool = False) -> int | None:
-    """Return a loadable ELF file's `e_machine`, or `None` otherwise.
-
-    Set `shared` to exclude executables from the libraries a soname can use.
+def machine(path: Path, types: Container[int] = LOADABLE) -> int | None:
+    """Return the `e_machine` of an ELF file of one of `types`, or `None`.
 
     >>> machine(Path(__file__)) is None
     True
@@ -137,9 +133,7 @@ def machine(path: Path, *, shared: bool = False) -> int | None:
     if header[:4] != b"\x7fELF":
         return None
 
-    elf_type = int.from_bytes(header[16:18], "little")
-
-    if elf_type not in LOADABLE or (shared and elf_type != 3):
+    if int.from_bytes(header[16:18], "little") not in types:
         return None
 
     return int.from_bytes(header[18:20], "little")
@@ -163,10 +157,8 @@ def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
         if not tags or not all(tag.endswith("-any") for tag in tags):
             continue
 
-        site_packages = info.parent
-
         with record.open(newline="") as file:
-            paths = [site_packages / row[0] for row in reader(file) if row]
+            paths = [info.parent / row[0] for row in reader(file) if row]
 
         # PEP 503 normalization, as the lock spells the name.
         name = sub(r"[-_.]+", "-", info.name.split("-")[0]).lower()
@@ -174,15 +166,14 @@ def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
         yield name, [path for path in paths if path.is_file()]
 
 
-def host_code(root: Path, exempt: Iterable[str]) -> dict[str, list[Path]]:
-    """Map each pure wheel not in `exempt` to the host code it ships.
+def host_code(
+    root: Path, host: int, exempt: Iterable[str]
+) -> dict[str, list[Path]]:
+    """Map each pure wheel not in `exempt` to the `host` code it ships.
 
-    >>> host_code(Path("/var/empty"), [])
+    >>> host_code(Path("/var/empty"), 62, [])
     {}
     """
-    if (host := machine(Path(sys.executable).resolve())) is None:
-        return {}
-
     found = {
         name: [path for path in paths if machine(path) == host]
         for name, paths in pure_wheels(root)
@@ -202,7 +193,10 @@ def main() -> int:
     args = parser.parse_args()
     errors: list[str] = []
 
-    if hosted := host_code(args.root, args.host_wheels):
+    if (host := machine(Path(sys.executable).resolve())) is None:
+        return 0
+
+    if hosted := host_code(args.root, host, args.host_wheels):
         errors += [
             f"mkUvEnv: {name} is tagged for any platform but ships {path}"
             for name, paths in hosted.items()
@@ -213,7 +207,7 @@ def main() -> int:
             "to have them patched like the others."
         )
 
-    if unexpected := missing(args.root, args.drivers, args.optional):
+    if unexpected := missing(args.root, host, args.drivers, args.optional):
         errors += [
             f"mkUvEnv: unresolved library {soname}, needed by {library}"
             for soname, library in unexpected.items()

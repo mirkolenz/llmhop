@@ -1,6 +1,7 @@
 package systemd
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -21,7 +22,7 @@ func Listeners() ([]net.Listener, error) {
 	}
 
 	if n < 0 {
-		return nil, fmt.Errorf("LISTEN_FDS must not be negative")
+		return nil, errors.New("LISTEN_FDS must not be negative")
 	}
 
 	var listeners []net.Listener

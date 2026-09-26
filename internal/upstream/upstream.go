@@ -5,6 +5,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,7 +35,7 @@ func Parse(raw string) (*Upstream, error) {
 	switch u.Scheme {
 	case "http", "https":
 		if u.User != nil || u.Fragment != "" {
-			return nil, fmt.Errorf("http(s) backend URL must not contain credentials or a fragment")
+			return nil, errors.New("http(s) backend URL must not contain credentials or a fragment")
 		}
 
 		if u.Host != "" {

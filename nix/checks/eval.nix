@@ -9,7 +9,8 @@
 let
   llmhopLib = import ../modules/lib.nix lib;
   apiKeys = pkgs.writeText "api-keys" "secret";
-  detectorScript = pkgs.writeText "watermark_detection_server.py" "";
+  # The fake `package` has no interpreter to check the default against.
+  detectorScript = pkgs.writeText "detector.py" "";
   serverConfig = pkgs.writeText "server.yaml" "api-key: secret";
   tlsKey = pkgs.writeText "tls-key" "encrypted-placeholder";
   # Not `lib.hasInfix`: it compiles the needle into a regex, and `lib.match`
@@ -92,7 +93,7 @@ let
     detectors.watermark = {
       tokenizer = "example/test";
       port = 18002;
-      settings.key = 42;
+      settings.watermark-config.key = 42;
     };
   };
 
@@ -161,7 +162,7 @@ let
         port = 21002;
         script = detectorScript;
         settings = {
-          key = 42;
+          watermark-config.key = 42;
           # Must not reach the command line: it would expose the
           # unauthenticated detector beyond loopback.
           host = "0.0.0.0";
@@ -204,13 +205,14 @@ let
       detectors.shared = {
         tokenizer = "example/test";
         port = 23002;
-        settings.key = 42;
+        settings.watermark-config.key = 42;
       };
     };
   };
 
-  # Without `--key` the script dies at startup, so evaluation must reject it.
-  detectorWithoutKey = mkConfig {
+  # Without a watermark config the script dies at startup, so evaluation must
+  # reject it.
+  detectorWithoutConfig = mkConfig {
     detectors.watermark = {
       tokenizer = "example/test";
       port = 23003;
@@ -238,7 +240,7 @@ let
       detectors.watermark = {
         tokenizer = "example/test";
         script = detectorScript;
-        settings.key = 42;
+        settings.watermark-config.key = 42;
       };
     };
     llama-cpp-quadlet = {
@@ -287,6 +289,10 @@ let
   rootlessSockets = mkConfig {
     quadlet.user.uid = 503;
     models.test.port = null;
+    detectors.watermark = {
+      tokenizer = "example/test";
+      settings.watermark-config.key = 42;
+    };
   };
 
   socketRoot = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
@@ -487,6 +493,15 @@ let
         clear = containsAll [
           "unshare rm -f /run/llmhop/vllm-test/http.sock"
         ] (toString rootlessSocketContainer.serviceConfig.ExecStartPre);
+        # Detectors share the model path, `podman` included.
+        detectorClear =
+          containsAll
+            [
+              "unshare rm -f /run/llmhop/vllm-detector-watermark/http.sock"
+            ]
+            (
+              toString rootlessSockets.virtualisation.quadlet.containers.vllm-detector-watermark.serviceConfig.ExecStartPre
+            );
         runtime = rootlessSocketContainer.serviceConfig ? RuntimeDirectory;
         directory = {
           inherit (rootlessSockets.systemd.tmpfiles.settings."10-vllm"."/run/llmhop/vllm-test".d)
@@ -498,6 +513,7 @@ let
       };
       expected = {
         clear = true;
+        detectorClear = true;
         runtime = false;
         directory = {
           user = "vllm";
@@ -559,10 +575,14 @@ let
     testDetector = {
       expr = {
         arguments = containsAll [
-          "/vllm-workspace/examples/basic/online_serving/watermark_detection_server.py"
-          "--key=42"
+          "/run/llmhop/detector.py"
+          (lib.escapeShellArg "--watermark-config=${lib.toJSON { key = 42; }}")
           "--tokenizer=example/test"
         ] rootfulDetector.containerConfig.Exec;
+        # Appended to the cache mount rather than replacing it.
+        volumes = map (
+          volume: lib.elemAt (lib.splitString ":" volume) 1
+        ) rootfulDetector.containerConfig.Volume;
         port = rootfulDetector.containerConfig.PublishPort;
         registered = rootful.services.llmhop.portsRegistry."vllm-quadlet.detectors.watermark";
         # Reachable through llmhop, so it shares the proxy's auth tokens, but
@@ -572,6 +592,10 @@ let
       };
       expected = {
         arguments = true;
+        volumes = [
+          "/cache"
+          "/run/llmhop/detector.py"
+        ];
         port = [ "127.0.0.1:18002:8000" ];
         registered = 18002;
         routed = {
@@ -684,8 +708,8 @@ let
       expected = false;
     };
 
-    testDetectorWithoutKey = {
-      expr = evaluates detectorWithoutKey.virtualisation.quadlet.containers.vllm-detector-watermark.containerConfig.Exec;
+    testDetectorWithoutConfig = {
+      expr = evaluates detectorWithoutConfig.virtualisation.quadlet.containers.vllm-detector-watermark.containerConfig.Exec;
       expected = false;
     };
 
@@ -704,9 +728,10 @@ let
         command = containsAll [
           "${detectorScript}"
           "-health-path"
-          "/openapi.json"
-          "--key"
-          "42"
+          "/health"
+          "--watermark-config"
+          # Quoted by systemd's escaping, itself JSON.
+          (lib.toJSON (lib.toJSON { key = 42; }))
         ] nativeVllmDetector.serviceConfig.ExecStart;
         # `settings.host` must not displace the managed loopback address.
         exposed = containsAll [ "0.0.0.0" ] nativeVllmDetector.serviceConfig.ExecStart;

@@ -1417,6 +1417,8 @@ let
 in
 {
   inherit
+    baseWorkloadOptions
+    containerRuntimeDirectory
     credentialDirectory
     credentialsOption
     enabled
@@ -1425,6 +1427,9 @@ in
     staticIdentityOptions
     mergeCredentialServiceConfig
     modelLabel
+    nativeWorkloadArgs
+    quadletServiceName
+    socketCapable
     containerListen
     hostListen
     hostPort
@@ -1468,10 +1473,11 @@ in
   # ─── Quadlet (container-based) ───────────────────────────────────────
 
   quadlet = {
-    mkContainerRuntime = mkQuadletContainerRuntime;
     mkObjectOptions = mkQuadletObjectOptions;
     mkImageArgs = mkQuadletImageArgs;
     mkWorker = mkQuadletWorker;
+    mkWorkloadContainer = mkQuadletWorkloadContainer;
+    mkImageOptions = mkQuadletImageOptions;
 
     # Top-level options for a quadlet-based backend. Spread under
     # `options.services.llmhop.<backend>` via `//`; the caller adds `enable`,

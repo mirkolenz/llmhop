@@ -8,7 +8,7 @@ let
   cfg = config.services.llmhop.vllm-quadlet;
 
   inherit (import ../lib.nix lib) enabled quadlet;
-  detector = import ../detector.nix lib;
+  detector = (import ../detectors/vllm.nix lib).quadlet;
 
   # Internal port every worker binds to inside its container.
   workerPort = 8000;
@@ -60,7 +60,11 @@ in
       };
 
       detectors = lib.mkOption {
-        type = lib.types.attrsOf (lib.types.submodule detector.mkQuadletSubmodule);
+        type = lib.types.attrsOf (
+          lib.types.submodule (
+            detector.mkSubmodule { socketDirectory = config.services.llmhop.socketDirectory; }
+          )
+        );
         default = { };
         description = "Standalone watermark detection containers.";
       };
@@ -86,8 +90,8 @@ in
           // lib.listToAttrs (
             map (
               d:
-              detector.mkQuadletContainer {
-                inherit cfg;
+              detector.mkContainer {
+                inherit cfg config;
                 detector = d;
               }
             ) (lib.attrValues detectors)

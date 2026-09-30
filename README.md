@@ -664,54 +664,47 @@ Such values enter the world-readable Nix store and should not be used for produc
 ### vLLM watermark detection
 
 Recent vLLM revisions include watermark generation and detector primitives, but the OpenAI server does not expose the detector as an endpoint.
-Both vLLM modules can run the upstream example server as a named detector service next to their model workers.
-A native service needs nothing beyond the workspace it already builds from:
+Both vLLM modules can run a small detector server as a named service next to their model workers.
+It takes the same `watermark-config` the generating worker receives, so one attribute set configures both sides:
 
 ```nix
-services.llmhop.vllm = {
+services.llmhop.vllm = let
+  watermark-config = {
+    algorithm = "gumbel";
+    key = 123456789;
+    context_width = 4;
+  };
+in {
+  models.qwen = {
+    model = "Qwen/Qwen3-8B";
+    settings = { inherit watermark-config; };
+  };
   detectors.production = {
     tokenizer = "Qwen/Qwen3-8B";
-    port = 18100;
     settings = {
-      key = 123456789;
-      context-width = 4;
+      inherit watermark-config;
       p-value-threshold = 0.01;
     };
   };
 };
 ```
 
-The vLLM wheel intentionally contains only the `vllm` packages and excludes `examples/`, so `mkUvEnv` cannot install the script alongside the interpreter.
-It instead exposes `passthru.sdists`, the source archive of every package the workspace locks one for, fetched from the URL and hash the lock already records.
-`script` defaults to the copy extracted from `sdists.vllm`, so one `uv lock` moves the runtime and the script together and they cannot drift apart, and a release predating the watermark detector fails the build rather than the unit.
+The server validates the configuration with vLLM's own `WatermarkConfig`, so every field and algorithm the installed release accepts is accepted here too, and a typo fails at startup rather than silently changing the key.
+vLLM offers no detector factory, so the server picks the detector class and its arguments by vLLM's naming conventions.
+An algorithm added upstream works without changes when it follows them, and fails loudly rather than detecting with mismatched parameters otherwise.
+`p-value-threshold` is the only detection-side setting.
 
-Override `script` to use a vendored or patched copy, or when the environment comes from somewhere other than `mkUvEnv`:
-
-```nix
-services.llmhop.vllm.detectors.production.script = ./watermark_detection_server.py;
-```
-
-The official vLLM image includes the examples under `/vllm-workspace`, which is where the Quadlet default points:
-
-```nix
-services.llmhop.vllm-quadlet = {
-  tag = "latest";
-  detectors.production = {
-    tokenizer = "Qwen/Qwen3-8B";
-    port = 18100;
-    settings.key = 123456789;
-  };
-};
-```
-
-The tokenizer, key, context width, and PRF must match the generation configuration.
-`key`, `prf` and `context-width` therefore sit in `settings`, next to the generation-side flags they have to agree with, and `key` is required.
-`tokenizer`, `host` and `port` are options of their own, since llmhop owns the last two.
-Only arguments supported by the selected upstream script may be placed in `settings`.
-
-Each detector is a separate `vllm-detector-<name>` service serving the upstream `POST /detect` endpoint.
-Readiness uses FastAPI's `/openapi.json` endpoint.
+`tokenizer`, the key and the rest of the configuration must match the generation side.
+`tokenizer` and the listener are options of their own, since llmhop owns the latter.
+Each detector is a separate `vllm-detector-<name>` service serving `POST /detect`, with readiness taken from `GET /health`.
 They do not receive a GPU device in Quadlet mode.
+
+The server lives in `nix/pkgs/mkVllmDetector` rather than coming from vLLM's example, which has no unix socket support, no health endpoint, no file-based key, and covers only `gumbel`.
+`mkVllmDetector`, exposed under `legacyPackages`, checks it against a vLLM environment at build time: the server must import and detect with every algorithm the release declares, so a `uv lock` that breaks the vLLM modules it relies on fails the build rather than the unit.
+The native default is that checked script, run with the detector's `package`.
+The Quadlet container mounts the unchecked script into the selected image and runs it with the image's interpreter, so there the same failure surfaces at startup.
+`script` replaces it with a server of your own, which receives the same flags.
+Both require a vLLM revision containing `vllm.v1.watermarking`, which no release before 0.30.0 has.
 
 #### Routing detectors through llmhop
 
@@ -728,18 +721,27 @@ curl https://llmhop.example.com/detect \
 ```
 
 The response contains `score`, `p_value`, `num_scored_tokens`, and `is_watermarked`.
-The extra `model` key is ignored by the upstream request model, which is a plain pydantic `BaseModel`.
+The extra `model` key is ignored by the request model.
 
-This puts llmhop's authentication in front of a script that has none of its own.
+This puts llmhop's authentication in front of a server that has none of its own.
 A detector given a `port` is still unauthenticated there, like every model worker given one, so anything else on the host can reach it directly.
 On its default socket, only llmhop can.
-The native detector binds that socket through a small patch adding `--uds` to the upstream script, applied to the copy extracted from the sdist.
 
-The upstream example also has no config file or key-file option.
-Its `--key` value therefore enters the Nix store and process arguments, so this integration is not suitable for a secret production watermark key until upstream adds a file-based option.
-The `--uds` patch leaves that limitation alone rather than hiding it.
+#### Keeping the key secret
 
-The selected script and package or image must come from a vLLM revision containing `vllm.v1.watermarking`, which no release before 0.30.0 has.
+An inline `watermark-config` enters the Nix store and the process arguments.
+`watermark-config-file` instead reads the same configuration as JSON from a file, typically a credential:
+
+```nix
+services.llmhop.vllm.detectors.production = {
+  tokenizer = "Qwen/Qwen3-8B";
+  credentials.watermark = "/etc/llmhop/watermark.json";
+  settings.watermark-config-file = "\${cred:watermark}";
+};
+```
+
+The generating worker takes no such flag, but `vllm serve --config` reads a YAML file whose `watermark-config` key holds the same configuration, and it can be handed over the same way.
+
 SGLang and llama.cpp workers can coexist with the detector, but they only produce detectable text if they implement the same watermark generation algorithm and parameters.
 
 ### Secrets

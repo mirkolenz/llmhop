@@ -12,7 +12,7 @@ let
     enabled
     systemd
     ;
-  detector = import ../detector.nix lib;
+  detector = (import ../detectors/vllm.nix lib).native;
 
   detectors = enabled cfg.detectors;
 in
@@ -63,7 +63,7 @@ in
       detectors = lib.mkOption {
         type = lib.types.attrsOf (
           lib.types.submodule (
-            detector.mkNativeSubmodule {
+            detector.mkSubmodule {
               inherit cfg pkgs;
               socketDirectory = config.services.llmhop.socketDirectory;
             }
@@ -105,7 +105,7 @@ in
           // lib.listToAttrs (
             map (
               d:
-              detector.mkNativeService {
+              detector.mkService {
                 inherit cfg pkgs utils;
                 detector = d;
               }

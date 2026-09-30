@@ -1020,6 +1020,7 @@ let
       containerConfig ? { },
       credentials ? { },
       overrides ? { },
+      mounts ? [ ],
     }:
     let
       rootless = cfg.quadlet.user != null;
@@ -1030,8 +1031,10 @@ let
           "::" = "::1";
         }
         .${bindAddress} or bindAddress;
-      mounts =
-        lib.optional (
+      # Appended after every override, so a user `Volume` cannot drop them.
+      allMounts =
+        mounts
+        ++ lib.optional (
           socket != null
         ) "${dirOf socket}:${containerSocketDirectory}${quadletMountSuffix overrides.mountOptions.socket}"
         ++
@@ -1087,7 +1090,67 @@ let
       extraConfig = lib.recursiveUpdate cfg.quadlet.extraConfig overrides.extraConfig;
       containerConfig =
         mergedContainerConfig
-        // lib.optionalAttrs (mounts != [ ]) { Volume = appendList mergedContainerConfig "Volume" mounts; };
+        // lib.optionalAttrs (allMounts != [ ]) {
+          Volume = appendList mergedContainerConfig "Volume" allMounts;
+        };
+    };
+
+  # One workload's container: `mkQuadletWorker` with the backend's image,
+  # cache and environment, running `arguments` followed by `settings` rendered
+  # as `backend`'s flags under `managed` and the listener. `collection` is the
+  # attribute of `services.llmhop.<backend>` holding the workload, so models
+  # and auxiliaries such as watermark detectors share it.
+  mkQuadletWorkloadContainer =
+    {
+      backend,
+      cfg,
+      config,
+      collection,
+      workload,
+      containerPort,
+      settings,
+      managed ? { },
+      arguments ? [ ],
+      containerConfig ? { },
+      mounts ? [ ],
+      serviceConfig ? { },
+      unitConfig ? { },
+    }:
+    mkQuadletWorker {
+      inherit
+        cfg
+        containerPort
+        mounts
+        serviceConfig
+        unitConfig
+        ;
+      inherit (workload) port socket credentials;
+      inherit (config.virtualisation.quadlet) podman;
+      overrides = workload.quadlet;
+      containerConfig =
+        mkQuadletContainerRuntime cfg workload
+        // mkQuadletImageArgs {
+          inherit (cfg) image;
+          inherit workload;
+          defaultTag = cfg.tag;
+          label = "services.llmhop.${backend}.${collection}.${workload.name}";
+        }
+        // containerConfig
+        // {
+          Exec = lib.escapeShellArgs (
+            arguments
+            ++ renderCliArgsWith "=" backend (workloadFlags {
+              inherit
+                backend
+                managed
+                workload
+                settings
+                ;
+              directory = credentialDirectory;
+              listen = containerListen containerPort workload.socket;
+            })
+          );
+        };
     };
 
   # ─── Native (systemd) helpers (private) ──────────────────────────────
@@ -1254,6 +1317,27 @@ let
       // serviceConfig;
     };
 
+  # The flags a native workload's server receives, the host-side twin of the
+  # `Exec` that `mkQuadletWorkloadContainer` renders.
+  nativeWorkloadArgs =
+    {
+      backend,
+      unit,
+      workload,
+      managed,
+      settings,
+    }:
+    renderCliArgs backend (workloadFlags {
+      inherit
+        backend
+        managed
+        workload
+        settings
+        ;
+      directory = systemdCredentialDirectory unit;
+      listen = hostListen workload;
+    });
+
   # Shared body of `systemd.mkServices`/`mkUvServices`. `wrap` layers a backend
   # flavour (currently `withUv`) onto every worker's args and `previous`
   # resolves the startup chain, or stays null for a backend that does not chain.
@@ -1291,14 +1375,13 @@ let
           previous = previous index;
           execStart =
             command model
-            ++ renderCliArgs serviceName (workloadFlags {
+            ++ nativeWorkloadArgs {
               backend = serviceName;
-              directory = systemdCredentialDirectory (workloadUnit serviceName model);
-              listen = hostListen model;
-              managed = settings model;
+              unit = workloadUnit serviceName model;
               workload = model;
+              managed = settings model;
               settings = cfg.modelSettings // model.settings;
-            });
+            };
         })
       ) models
     );
@@ -1678,40 +1761,20 @@ in
       lib.listToAttrs (
         lib.imap0 (
           index: model:
-          lib.nameValuePair (workloadUnit serviceName model) (mkQuadletWorker {
-            inherit cfg;
-            inherit (model) port socket;
+          lib.nameValuePair (workloadUnit serviceName model) (mkQuadletWorkloadContainer {
+            inherit backend cfg config;
+            collection = "models";
+            workload = model;
             containerPort = workerPort;
-            inherit (model) credentials;
-            inherit (config.virtualisation.quadlet) podman;
-            overrides = model.quadlet;
-            containerConfig =
-              mkQuadletContainerRuntime cfg model
-              // mkQuadletImageArgs {
-                inherit (cfg) image;
-                defaultTag = cfg.tag;
-                workload = model;
-                label = "services.llmhop.${backend}.models.${model.name}";
-              }
-              // {
-                AddDevice = model.devices;
-                ShmSize = model.shmSize;
-                Ulimit = "host";
-              }
-              // containerConfig
-              // {
-                Exec = lib.escapeShellArgs (
-                  arguments model
-                  ++ renderCliArgsWith "=" backend (workloadFlags {
-                    inherit backend;
-                    directory = credentialDirectory;
-                    listen = containerListen workerPort model.socket;
-                    managed = settings model;
-                    workload = model;
-                    settings = cfg.modelSettings // model.settings;
-                  })
-                );
-              };
+            managed = settings model;
+            settings = cfg.modelSettings // model.settings;
+            arguments = arguments model;
+            containerConfig = {
+              AddDevice = model.devices;
+              ShmSize = model.shmSize;
+              Ulimit = "host";
+            }
+            // containerConfig;
             # Each container waits on its predecessor so GPU-memory profiling
             # never overlaps.
             unitConfig.After =

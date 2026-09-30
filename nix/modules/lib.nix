@@ -185,6 +185,9 @@ let
 
   cliDialect = backend: cliDialects.${quadletServiceName backend};
 
+  # Whether `backend`'s server can bind a unix socket instead of a port.
+  socketCapable = backend: (cliDialect backend).socketSettings != null;
+
   # Listener flags binding `socket`, or `host:port` when `socket` is null.
   listenSettings =
     backend:
@@ -504,30 +507,32 @@ let
       };
     };
 
-  # Per-model options every backend exposes, regardless of kind. `backend` is
-  # the (possibly suffixed) option namespace used in cross-references;
-  # `serviceName` is the unsuffixed prefix of the generated unit names.
-  baseModelOptions =
+  # Per-workload options every model and auxiliary workload exposes, whatever
+  # the backend. `backend` is the (possibly suffixed) option namespace used in
+  # cross-references, `serviceName` the unsuffixed prefix of the generated unit
+  # names, and `noun` names the workload in the prose.
+  baseWorkloadOptions =
     {
       backend,
       serviceName ? backend,
+      noun,
       name,
       workload,
       socketDirectory ? null,
       portDescription,
     }:
     {
-      enable = mkEnableOption "serving of model ${name}" // {
+      enable = mkEnableOption "${noun} ${name}" // {
         default = true;
       };
       name = mkOption {
         type = modelLabel;
         default = name;
         description = ''
-          Canonical identifier for this model. Used for the unit name
-          (`${serviceName}-<name>`) and as the routing key registered with llmhop
-          (clients select the backend by sending this value in the OpenAI
-          `model` field).
+          Canonical identifier for this ${noun}. Used for the unit name
+          (`${serviceName}-<name>`) and as the routing key registered with llmhop,
+          which clients send in the `model` field. Shares one namespace with
+          every other routing key, so a collision fails evaluation.
 
           Defaults to the attribute key, so the key itself must match the
           required label format.
@@ -540,9 +545,36 @@ let
         portDescription
         workload
         ;
-      socketCapable = (cliDialect backend).socketSettings != null;
+      socketCapable = socketCapable backend;
       unitPrefix = serviceName;
     }
+    // {
+      environment = mkOption {
+        type = with types; attrsOf str;
+        default = { };
+        description = ''
+          Additional environment variables set on this ${noun}'s service.
+          Merged with `services.llmhop.${backend}.environment`; per-${noun} entries
+          take precedence.
+        '';
+      };
+      environmentFile = mkOption {
+        type = with types; nullOr path;
+        default = null;
+        description = ''
+          File in `KEY=VALUE` format forwarded to this ${noun}'s service.
+          Loaded after `services.llmhop.${backend}.environmentFile`, so its entries
+          override global ones. Use `credentials` for file-capable secret
+          settings. Must be readable by the user systemd reads it as.
+        '';
+      };
+      credentials = credentialsOption;
+    };
+
+  # Per-model options every backend exposes, regardless of kind.
+  baseModelOptions =
+    args@{ backend, ... }:
+    baseWorkloadOptions (args // { noun = "model"; })
     // {
       settings = mkOption {
         type = with types; attrsOf anything;
@@ -555,26 +587,6 @@ let
           (its served name and listener) always win over both.
         '';
       };
-      environment = mkOption {
-        type = with types; attrsOf str;
-        default = { };
-        description = ''
-          Additional environment variables set on this model's service.
-          Merged with `services.llmhop.${backend}.environment`; per-model entries
-          take precedence.
-        '';
-      };
-      environmentFile = mkOption {
-        type = with types; nullOr path;
-        default = null;
-        description = ''
-          File in `KEY=VALUE` format forwarded to this model's service.
-          Loaded after `services.llmhop.${backend}.environmentFile`, so its entries
-          override global ones. Use `credentials` for file-capable secret
-          settings. Must be readable by the user systemd reads it as.
-        '';
-      };
-      credentials = credentialsOption;
     };
 
   # Per-workload escape hatches for native units: extra `[Service]` and `[Unit]`
@@ -927,6 +939,29 @@ let
 
   quadletMountSuffix =
     options: lib.optionalString (options != [ ]) ":${lib.concatStringsSep "," options}";
+
+  # Per-workload overrides of the backend's image.
+  mkQuadletImageOptions =
+    { noun }:
+    {
+      tag = mkOption {
+        type = with types; nullOr str;
+        default = null;
+        description = ''
+          Tag of the container image used for this ${noun}.
+          Mutually exclusive with `digest`.
+        '';
+      };
+      digest = mkOption {
+        type = with types; nullOr str;
+        default = null;
+        example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
+        description = ''
+          Immutable digest of the container image (e.g. `sha256:…`).
+          Mutually exclusive with `tag`.
+        '';
+      };
+    };
 
   # Image reference and pull policy for one container. Digest-locked images use
   # `Pull=missing`; tag-tracking ones use `Pull=newer`.
@@ -1577,24 +1612,8 @@ in
               ;
             workload = config;
           })
+          // mkQuadletImageOptions { noun = "model"; }
           // {
-            tag = mkOption {
-              type = with types; nullOr str;
-              default = null;
-              description = ''
-                Tag of the container image used for this model.
-                Mutually exclusive with `digest`.
-              '';
-            };
-            digest = mkOption {
-              type = with types; nullOr str;
-              default = null;
-              example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
-              description = ''
-                Immutable digest of the container image (e.g. `sha256:…`).
-                Mutually exclusive with `tag`.
-              '';
-            };
             devices = mkOption {
               type = with types; listOf str;
               default = cfg.devices;
@@ -1621,7 +1640,7 @@ in
             };
             quadlet = mkQuadletObjectOptions {
               description = "this model container";
-              socket = (cliDialect backend).socketSettings != null;
+              socket = socketCapable backend;
             };
           }
           // lib.optionalAttrs hasModel {

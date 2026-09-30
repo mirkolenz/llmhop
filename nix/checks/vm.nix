@@ -35,6 +35,8 @@ let
             self.end_headers()
 
         def do_POST(self):
+            # Closing with the body unread races the proxy still sending it.
+            self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"socket ok")

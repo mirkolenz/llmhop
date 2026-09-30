@@ -28,7 +28,9 @@ let
   modelLabel = types.strMatching "[[:alnum:]][[:alnum:].-]*";
 
   credentialReferencePrefix = "\${cred:";
-  credentialDirectory = "/run/llmhop/credentials";
+  # Root of everything llmhop mounts into a container.
+  containerRuntimeDirectory = "/run/llmhop";
+  credentialDirectory = "${containerRuntimeDirectory}/credentials";
 
   credentialType = types.either types.path (
     types.submodule {
@@ -630,7 +632,7 @@ let
 
   # Where a container sees its socket directory. Beside, not over, the
   # credential mount.
-  containerSocketDirectory = "/run/llmhop/socket";
+  containerSocketDirectory = "${containerRuntimeDirectory}/socket";
   containerSocketPath = "${containerSocketDirectory}/${socketName}";
 
   # Mode of the socket directory, search only: llmhop knows the name.

@@ -147,25 +147,6 @@ let
         )
       );
 
-  # Pinned by version rather than by name alone, so a lock that forks a package
-  # across versions yields the entry the environment actually installs.
-  lockedSdist =
-    name: version:
-    (lib.findFirst (package: package.name == name && package.version == version)
-      (throw "mkUvEnv: the lock pins no sdist for ${name} ${version}.")
-      (lib.filter (package: package.sdist.url or null != null) uvLock.package)
-    ).sdist;
-
-  # Source archive of every package the environment installs, keyed by name.
-  # Wheels carry only the importable packages, so auxiliary files such as vLLM's
-  # `examples/` are reachable nowhere else. URL and hash both come from the lock,
-  # so these stay in step with the environment without a second pin. Each is
-  # fetched only if something asks for it, and left packed, so a consumer after
-  # one file does not materialise the whole tree.
-  sdists = lib.genAttrs (lib.filter (name: pythonSet ? ${name}) lockedNames) (
-    name: pkgs.fetchurl { inherit (lockedSdist name pythonSet.${name}.version) url hash; }
-  );
-
   cudaRuntime = pythonSet."nvidia-cuda-runtime".version or null;
 
   # nixpkgs' package set for the CUDA line the wheels were built for, named the
@@ -197,7 +178,7 @@ let
             --host-wheels ${lib.escapeShellArgs hostWheels}
         '';
         passthru = (old.passthru or { }) // {
-          inherit sdists cudaPackagesAttr;
+          inherit cudaPackagesAttr;
           python = interpreter;
         };
       });

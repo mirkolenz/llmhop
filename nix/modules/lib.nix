@@ -1796,8 +1796,7 @@ in
 
     # Cross-cutting NixOS config produced by every quadlet backend:
     # the quadlet-enabled assertion, llmhop registration, resource registries,
-    # cache and socket directories, and optional rootless account and operator
-    # helper.
+    # cache and socket directories, and the optional rootless account.
     #
     # `auxiliaries` describes the non-model services this backend runs; see
     # `mkSharedConfig`.
@@ -1806,12 +1805,12 @@ in
         backend,
         cfg,
         config,
-        pkgs,
         auxiliaries ? { },
       }:
       let
         serviceName = quadletServiceName backend;
         user = cfg.quadlet.user;
+        sockets = socketWorkloads cfg auxiliaries;
       in
       lib.mkMerge [
         (mkSharedConfig {
@@ -1859,34 +1858,17 @@ in
                       mode = socketDirectoryMode;
                     };
                   }
-                ) (socketWorkloads cfg auxiliaries)
+                ) sockets
               )
             );
 
           # A container maps to no host group known in advance, so its socket
           # is reachable through a default ACL on the root instead. See "Unix
           # sockets" in the module internals documentation.
-          systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (socketWorkloads cfg auxiliaries != [ ]) {
+          systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (sockets != [ ]) {
             ${config.services.llmhop.socketDirectory}.a.argument =
               "default:user:${config.services.llmhop.user}:-wx";
           };
-
-          environment.systemPackages = lib.optional (user != null) (
-            pkgs.writeShellApplication {
-              name = "${serviceName}-shell";
-              text = ''
-                if [ "$#" -eq 0 ]; then
-                  echo "Entering the ${serviceName} user shell. Useful commands:"
-                  echo "  systemctl --user status ${serviceName}-<model>    # service state"
-                  echo "  journalctl --user -u ${serviceName}-<model> -f    # tail logs"
-                  echo "  podman ps                                     # list containers"
-                  echo "  exit                                          # back to host"
-                  exec sudo machinectl --quiet shell ${user.name}@.host
-                fi
-                exec sudo machinectl --quiet shell ${user.name}@.host /usr/bin/env "$@"
-              '';
-            }
-          );
         }
         (lib.mkIf (user != null && user.manage) {
           users.users.${user.name} = {
@@ -1894,8 +1876,6 @@ in
             inherit (user) uid group home;
             isSystemUser = true;
             createHome = true;
-            shell = config.users.defaultUserShell;
-            extraGroups = [ "systemd-journal" ];
             linger = true;
             # Rootless Podman needs subordinate IDs; `mkDefault` leaves the
             # native `users.users.<name>.subUidRanges` route open.

@@ -1,7 +1,6 @@
 {
   config,
   lib,
-  pkgs,
   ...
 }:
 let
@@ -60,7 +59,7 @@ in
     lib.mkMerge [
       (quadlet.mkConfig {
         backend = "llama-cpp-quadlet";
-        inherit cfg config pkgs;
+        inherit cfg config;
       })
       {
         virtualisation.quadlet.containers = quadlet.mkModelContainers {

@@ -1,7 +1,6 @@
 {
   lib,
   config,
-  pkgs,
   ...
 }:
 let
@@ -248,7 +247,7 @@ in
     lib.mkMerge [
       (quadlet.mkConfig {
         backend = "sglang-quadlet";
-        inherit cfg config pkgs;
+        inherit cfg config;
         auxiliaries =
           lib.optionalAttrs cfg.gateway.enable {
             gateway = {

@@ -1,7 +1,6 @@
 {
   lib,
   config,
-  pkgs,
   ...
 }:
 let
@@ -75,7 +74,7 @@ in
       (quadlet.mkConfig (
         {
           backend = "vllm-quadlet";
-          inherit cfg config pkgs;
+          inherit cfg config;
         }
         // detector.registry detectors
       ))

@@ -214,10 +214,9 @@ The dedicated user mode remains useful for NVIDIA systems affected by [NVIDIA/nv
 `nvidia-cdi-hook` runs as an OCI `createContainer` hook inside the container's user namespace and can fail to read the OCI bundle's `config.json` with some UID-mapped namespaces.
 Running the Quadlet under a real user's systemd manager avoids that system-manager launch path while retaining rootless Podman.
 
-For convenience, a rootless Quadlet backend adds a tiny per-backend helper to `environment.systemPackages`:
-
-- Native workers (`llama-cpp`, `vllm`, `sglang`) are plain system units, so they are managed with the usual `systemctl status <backend>-<model>` and `journalctl -u <backend>-<model>`.
-- For the container variants, `<backend>-shell` is a `writeShellApplication` wrapper around `machinectl shell` that drops you into the backend user's session, where `systemctl --user`, `journalctl --user` and `podman ps` see the worker units directly. Run it with no arguments for an interactive shell, or pass a command to execute it inside the session.
+Native workers (`llama-cpp`, `vllm`, `sglang`) are plain system units, so they are managed with the usual `systemctl status <backend>-<model>` and `journalctl -u <backend>-<model>`.
+The container variants are managed with the `quadletctl` command of quadlet-nix, which finds the manager of each unit on its own, whether rootful or rootless, for example `quadletctl systemctl status <backend>-<model>`, `quadletctl journalctl <backend>-<model> -f`, or `quadletctl podman <backend>-<model> ps`.
+`quadletctl list` shows all units with their owner and state, and `quadletctl shell <backend>-<model>` opens a shell as the owner of a unit.
 
 ```nix
 services.llmhop = {

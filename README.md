@@ -634,10 +634,12 @@ That is an ordinary file-taking setting, so it needs no dedicated option:
 ```nix
 services.llmhop.vllm-quadlet.models."qwen3-8b" = {
   model = "Qwen/Qwen3-8B";
-  credentials.config = "/run/secrets/qwen-vllm.yaml";
-  settings.config = "\${cred:config}";
+  credentials."config.yaml" = "/run/secrets/qwen-vllm.yaml";
+  settings.config = "\${cred:config.yaml}";
 };
 ```
+
+vLLM requires the `.yaml` or `.yml` extension, which the credential name carries into its path.
 
 llama.cpp has no general server config file, so use its file-taking settings such as `api-key-file`, `ssl-key-file`, and `ssl-cert-file` instead.
 

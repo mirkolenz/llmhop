@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.1](https://github.com/mirkolenz/llmhop/compare/v2.2.0...v2.2.1) (2026-10-01)
+
+### Bug Fixes
+
+* **nixos:** configure vllm watermarking declaratively with a key credential ([4a6aa6a](https://github.com/mirkolenz/llmhop/commit/4a6aa6a146d774f22f7401faf08211e12df93dea))
+* **nixos:** import credentials by name and keep them out of the nix store ([6bc97ad](https://github.com/mirkolenz/llmhop/commit/6bc97addc9dd4d4978be8598e7988bcf452c47cd))
+* **router:** select the backend by a /route/{model} path prefix ([60174bd](https://github.com/mirkolenz/llmhop/commit/60174bd1154a40e261532b9c70198a115913e045))
+
 ## [2.2.0](https://github.com/mirkolenz/llmhop/compare/v2.1.2...v2.2.0) (2026-10-01)
 
 ### Features

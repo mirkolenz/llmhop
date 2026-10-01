@@ -1,7 +1,8 @@
 // Package router builds the HTTP handler that authenticates incoming
 // requests, serves the OpenAI models API from the configured models and
 // forwards every other request through a per-model reverse proxy with
-// injected headers.
+// injected headers, selected by the /route/{model} path prefix or the JSON
+// "model" field.
 package router
 
 import (
@@ -11,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 
 	"github.com/mirkolenz/llmhop/internal/authz"
 	"github.com/mirkolenz/llmhop/internal/config"
@@ -20,9 +23,9 @@ import (
 )
 
 // New returns an http.Handler that serves the OpenAI models API from the
-// configured models and proxies every other request to the backend matching
-// its JSON "model" field, all guarded by the configured auth tokens. Only
-// GET /health is served unauthenticated.
+// configured models and proxies every other request to the backend named by
+// its /route/{model} path prefix or else its JSON "model" field, all guarded
+// by the configured auth tokens. Only GET /health is served unauthenticated.
 func New(cfg *config.Config) (http.Handler, error) {
 	proxies := make(map[string]*httputil.ReverseProxy, len(cfg.Models))
 	for name, m := range cfg.Models {
@@ -52,7 +55,8 @@ func New(cfg *config.Config) (http.Handler, error) {
 					r.Out.Header[k] = v
 				}
 			},
-			Transport: up.Transport,
+			Transport:    up.Transport,
+			ErrorHandler: proxyError,
 		}
 	}
 
@@ -66,7 +70,9 @@ func New(cfg *config.Config) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	registerModels(mux, listed)
-	mux.HandleFunc("/", proxyHandler(proxies, cfg.MaxBodyBytes, cfg.MaxConcurrentRequests))
+	proxy := proxyHandler(proxies, cfg.MaxBodyBytes, cfg.MaxConcurrentRequests)
+	mux.Handle(routePrefix+"{model}/{path...}", proxy)
+	mux.Handle("/", proxy)
 
 	// Health sits outside the auth middleware: liveness probes and downstream
 	// load balancers must be able to check the proxy without a token.
@@ -77,10 +83,13 @@ func New(cfg *config.Config) (http.Handler, error) {
 	return root, nil
 }
 
-// proxyHandler buffers each request body so it can peek at the JSON "model"
-// field, then forwards the request verbatim to the matching backend.
-//
-// Full buffering validates the entire JSON body before forwarding.
+// routePrefix starts path-routed requests, chosen so it cannot collide with
+// OpenAI paths such as GET /v1/models/{model}.
+const routePrefix = "/route/"
+
+// proxyHandler forwards each request to the backend named by its
+// /route/{model} path prefix, which is stripped and the body streamed,
+// or else by its JSON "model" field, for which the body is buffered.
 func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64, maxConcurrent int) http.HandlerFunc {
 	var slots chan struct{}
 
@@ -90,7 +99,7 @@ func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64, max
 
 	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 && req.ContentLength > maxBytes {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			bodyTooLarge(w)
 			return
 		}
 
@@ -107,44 +116,82 @@ func proxyHandler(proxies map[string]*httputil.ReverseProxy, maxBytes int64, max
 		if maxBytes > 0 {
 			req.Body = http.MaxBytesReader(w, req.Body, maxBytes)
 		}
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+
+		name := req.PathValue("model")
+		if name == "" {
+			var ok bool
+			if name, ok = bodyModel(w, req); !ok {
 				return
 			}
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
-			return
+		} else {
+			// Cut the escaped path, so escapes such as %2F in the remainder survive.
+			_, rest, _ := strings.Cut(strings.TrimPrefix(req.URL.EscapedPath(), routePrefix), "/")
+			req.URL.RawPath = "/" + rest
+			req.URL.Path = "/" + req.PathValue("path")
 		}
 
-		var request struct {
-			Model *string `json:"model"`
-		}
-		if err := json.Unmarshal(body, &request); err != nil {
-			http.Error(w, "invalid JSON request body", http.StatusBadRequest)
-			return
-		}
-
-		if request.Model == nil {
-			http.Error(w, "missing model", http.StatusBadRequest)
-			return
-		}
-
-		proxy, ok := proxies[*request.Model]
+		proxy, ok := proxies[name]
 		if !ok {
-			http.Error(w, fmt.Sprintf("unknown model %q", *request.Model), http.StatusNotFound)
+			http.Error(w, fmt.Sprintf("unknown model %q", name), http.StatusNotFound)
 			return
-		}
-
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		req.ContentLength = int64(len(body))
-		if len(req.Trailer) > 0 {
-			req.ContentLength = -1
 		}
 
 		proxy.ServeHTTP(w, req)
 	}
+}
+
+// bodyModel buffers the body to read its JSON "model" field and restores it
+// for forwarding, or writes an error response and reports false.
+//
+// Full buffering validates the entire JSON body before forwarding.
+func bodyModel(w http.ResponseWriter, req *http.Request) (string, bool) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			bodyTooLarge(w)
+			return "", false
+		}
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return "", false
+	}
+
+	var request struct {
+		Model *string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+		return "", false
+	}
+
+	if request.Model == nil {
+		http.Error(w, "missing model", http.StatusBadRequest)
+		return "", false
+	}
+
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	if len(req.Trailer) > 0 {
+		req.ContentLength = -1
+	}
+
+	return *request.Model, true
+}
+
+// bodyTooLarge reports a request body exceeding the size limit.
+func bodyTooLarge(w http.ResponseWriter) {
+	http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+}
+
+// proxyError maps a streamed body exceeding the size limit to 413, and every
+// other upstream failure to 502 like the default ReverseProxy handler.
+func proxyError(w http.ResponseWriter, _ *http.Request, err error) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		bodyTooLarge(w)
+		return
+	}
+
+	log.Printf("http: proxy error: %v", err)
+	w.WriteHeader(http.StatusBadGateway)
 }
 
 // authMiddleware gates next with the configured bearer tokens and strips the

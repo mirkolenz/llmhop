@@ -8,6 +8,7 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 ## Features
 
 - OpenAI-compatible reverse proxy, model router and request dispatcher for self-hosted LLM inference.
+- Path-based routing under `/route/{model}/` for clients and services that cannot put a `model` field into the body.
 - Native `GET /v1/models` and `GET /v1/models/{model}` endpoints served directly from the config, so clients can discover every backend behind the single endpoint.
 - Unauthenticated `GET /health` for load balancers and probes, plus `sd_notify` readiness so systemd reports the service as started only once the port answers.
 - Stateless single-binary HTTP service: no database, no cache, no background workers, safe behind any load balancer.
@@ -23,10 +24,22 @@ It is primarily designed for single-model inference servers like [vLLM](https://
 4. Unknown models return `404`.
 
 `GET /v1/models` and `GET /v1/models/{model}` are answered by LLMhop itself from the configured models, never proxied, so the catalog reflects exactly what clients may ask for.
-Everything else is dispatched by its `model` field as above.
+Everything else is dispatched by its `model` field as above, unless it is [path routed](#path-routing).
 Invalid JSON request bodies return `400 Bad Request`.
 Missing or non-string `model` values also return `400 Bad Request`.
 When `authTokens` is set, all routes (the models API included) require a valid bearer token.
+
+### Path routing
+
+A request under `/route/{model}/` selects its backend by path instead of body.
+LLMhop strips the `/route/{model}` prefix and forwards the rest unchanged (method, query, headers and body), so `POST /route/production/detect` reaches the `production` backend as `POST /detect`.
+The body is never parsed or rewritten, so it need not be JSON or carry a `model` field.
+Unknown models return `404`, and authentication, request limits, header injection and unix socket upstreams apply exactly as for body routing.
+A model name containing `/` is written as `%2F`, as in `/route/Qwen%2FQwen3-8B/v1/chat/completions`.
+
+```sh
+curl $LLMHOP/route/production/detect -d '{"text": "..."}'
+```
 
 A backend marked `"unlisted": true` is routed like any other but left out of both model endpoints.
 That is for services that are not inference models and should not look like one, such as the watermark detector below: they still reach clients through LLMhop's listener, bearer tokens and header injection, but never show up as something to send a completion to.
@@ -83,7 +96,7 @@ IPv6 literals are written plain (`"host": "::1"`) and bracketed internally.
 A model `url` is either an absolute `http(s)` URL or `unix:///<socket path>`.
 A socket URL carries no path prefix, so requests go to the root of the server listening on it.
 
-Each model additionally takes `"unlisted": true`, which keeps the backend routable by name while hiding it from `GET /v1/models` and `GET /v1/models/{model}`.
+Each model additionally takes `"unlisted": true`, which keeps the backend routable by name, in the body or the path, while hiding it from `GET /v1/models` and `GET /v1/models/{model}`.
 
 ### Secret references
 
@@ -116,7 +129,8 @@ The NixOS module uses exactly this to validate the generated config at build tim
 ### Request limits
 
 LLMhop buffers each request body in memory so it can peek at the `model` field before forwarding.
-To keep a single request from exhausting memory, the body is capped at 100 MiB by default.
+Path-routed bodies are streamed instead, since the backend is known from the path.
+To keep a single request from exhausting memory, the body is capped at 100 MiB by default, whether buffered or streamed.
 Bodies beyond the cap are rejected with `413 Request Entity Too Large`.
 A declared `Content-Length` above the cap is rejected before reading the body.
 At most 8 proxied requests are active at once by default.
@@ -713,16 +727,15 @@ A detector binds only to a unix socket or host loopback and is registered with l
 The attribute name is the routing key, so it shares one namespace with every backend's model names and a collision fails evaluation.
 
 Detectors are registered `unlisted`, so they never appear in `GET /v1/models`.
-Select one the same way a model is selected, by naming it in the request body:
+Select one by [path routing](#path-routing), so the body carries only the candidate text:
 
 ```sh
-curl https://llmhop.example.com/detect \
+curl https://llmhop.example.com/route/production/detect \
   -H "Authorization: Bearer $LLMHOP_TOKEN" \
-  -d '{"model":"production","text":"candidate text"}'
+  -d '{"text":"candidate text"}'
 ```
 
 The response contains `score`, `p_value`, `num_scored_tokens`, and `is_watermarked`.
-The extra `model` key is ignored by the request model.
 
 This puts llmhop's authentication in front of a server that has none of its own.
 A detector given a `port` is still unauthenticated there, like every model worker given one, so anything else on the host can reach it directly.

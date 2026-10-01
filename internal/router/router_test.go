@@ -40,10 +40,12 @@ func newBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
 	return srv, captured
 }
 
-func post(t *testing.T, handler http.Handler, body, authHeader string) *httptest.ResponseRecorder {
+func send(t *testing.T, handler http.Handler, method, path, body, authHeader string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
@@ -52,15 +54,14 @@ func post(t *testing.T, handler http.Handler, body, authHeader string) *httptest
 	return rec
 }
 
+func post(t *testing.T, handler http.Handler, body, authHeader string) *httptest.ResponseRecorder {
+	t.Helper()
+	return send(t, handler, http.MethodPost, "/", body, authHeader)
+}
+
 func get(t *testing.T, handler http.Handler, path, authHeader string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-	}
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec
+	return send(t, handler, http.MethodGet, path, "", authHeader)
 }
 
 func newHandler(t *testing.T, auth []string, models ...string) http.Handler {
@@ -470,6 +471,43 @@ func TestUnlistedModel(t *testing.T) {
 		}
 		if h2.Models != 1 {
 			t.Fatalf("got %d models", h2.Models)
+		}
+	})
+}
+
+func TestPathRouting(t *testing.T) {
+	chat, _ := newBackend(t)
+	detector, captured := newBackend(t)
+	h, err := New(&config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
+		"chat":     {URL: chat.URL},
+		"detector": {URL: detector.URL + "/base", Unlisted: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	route := func(path, auth string) *httptest.ResponseRecorder {
+		return send(t, h, http.MethodPost, path, `{"text":"candidate"}`, auth)
+	}
+
+	t.Run("strips the prefix and forwards the rest", func(t *testing.T) {
+		if rec := route("/route/detector/detect?x=1", "Bearer secret"); rec.Code != http.StatusOK {
+			t.Fatalf("got status %d", rec.Code)
+		}
+		if captured.path != "/base/detect" || captured.query != "x=1" || captured.body != `{"text":"candidate"}` {
+			t.Fatalf("backend saw %+v", captured)
+		}
+	})
+
+	t.Run("unknown model returns 404", func(t *testing.T) {
+		if rec := route("/route/nope/detect", "Bearer secret"); rec.Code != http.StatusNotFound {
+			t.Fatalf("got status %d", rec.Code)
+		}
+	})
+
+	t.Run("auth is enforced", func(t *testing.T) {
+		if rec := route("/route/detector/detect", "Bearer nope"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("got status %d", rec.Code)
 		}
 	})
 }

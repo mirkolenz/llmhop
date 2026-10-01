@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.2.0](https://github.com/mirkolenz/llmhop/compare/v2.1.2...v2.2.0) (2026-10-01)
+
+### Features
+
+* **config:** validate inputs and expose request limits ([6bec84a](https://github.com/mirkolenz/llmhop/commit/6bec84ae96fdad5fe2cc1343d91045ce23b1f6c9))
+* **nixos:** vendor the vllm watermark detector server ([c53fdeb](https://github.com/mirkolenz/llmhop/commit/c53fdeb92df662f137b0e2cb04cfdc6ad3f23312))
+* **nix:** reach backends and serve clients over unix sockets ([62d47a1](https://github.com/mirkolenz/llmhop/commit/62d47a1e65f9ed2f2d5b39a0f2e3a348677dad6d))
+* **nix:** unify service identities across backends and llmhop ([6651e22](https://github.com/mirkolenz/llmhop/commit/6651e228e12b7345a3cefe808a0cd8fd173d0bd3))
+* **router:** bound and validate proxied requests ([d1acfd1](https://github.com/mirkolenz/llmhop/commit/d1acfd1e9984adb5157c610f491636a669751d16))
+* **secrets:** expand only scheme references through os.Expand ([89738d3](https://github.com/mirkolenz/llmhop/commit/89738d32bc7689c1c96c240093fb538acb9bfd67))
+* serve every socket passed by systemd socket activation ([c8c05fa](https://github.com/mirkolenz/llmhop/commit/c8c05fa93c3c2e0c4c3b1e092010fdaf38ef1ee3))
+* support unix socket model urls ([c07d2d2](https://github.com/mirkolenz/llmhop/commit/c07d2d25126e63dd5cecec0cc63959648bb567c3))
+
+### Bug Fixes
+
+* **authz:** match the bearer scheme case-insensitively ([4dde6e4](https://github.com/mirkolenz/llmhop/commit/4dde6e44af8952487d6568e48fffcfa1ea1cccb5))
+* check ignored close and unsetenv errors ([1098cde](https://github.com/mirkolenz/llmhop/commit/1098cde481078e781ec33001f8ce25ec0fc81bd9))
+* drop quadlet user helpers in favor of quadletctl ([8593ac7](https://github.com/mirkolenz/llmhop/commit/8593ac7b102237fa842b6767b929bb0bce80c7ed))
+* **nix:** count only loadable ELF libraries as providers ([96d3e37](https://github.com/mirkolenz/llmhop/commit/96d3e375cf24db7633f5a00990915dbb9d3ae532))
+* **nix:** omit unsupported x86 Darwin outputs ([787406b](https://github.com/mirkolenz/llmhop/commit/787406b7500d26d19b9929d0a92d9b178beb7b64))
+* **nix:** probe SGLang gateways at their configured address ([7a84f91](https://github.com/mirkolenz/llmhop/commit/7a84f91eea015dfc6824cf37a313c609414b60ad))
+* **nix:** reach native worker sockets through backend groups ([2401443](https://github.com/mirkolenz/llmhop/commit/2401443d56dcdbd6dbe24eff43116b25b8acfe28))
+* **nix:** reject unsafe socket directory paths ([731a050](https://github.com/mirkolenz/llmhop/commit/731a0501e5c6290164c618054bca73ec16af793d))
+* **secrets:** trim exactly one line terminator from secret files ([a92f9bd](https://github.com/mirkolenz/llmhop/commit/a92f9bd75752d765d03453cebdd88af869d75e6a))
+* **systemd:** handle readiness and activation failures ([02c7be3](https://github.com/mirkolenz/llmhop/commit/02c7be3b78fa65da4d7cbff8b906af8059df9f39))
+
 ## [2.1.2](https://github.com/mirkolenz/llmhop/compare/v2.1.1...v2.1.2) (2026-09-23)
 
 ### Bug Fixes

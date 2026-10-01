@@ -38,7 +38,7 @@ DETECTION_ONLY = frozenset({"p_value_threshold", "deduplicate_contexts"})
 
 
 class DetectionRequest(BaseModel):
-    """Candidate text, extra keys such as llmhop's `model` are ignored."""
+    """Candidate text, extra keys are ignored."""
 
     text: str
 

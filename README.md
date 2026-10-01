@@ -698,49 +698,60 @@ services.llmhop.sglang.models.test.settings.api-key = "development-only";
 
 Such values enter the world-readable Nix store and should not be used for production secrets.
 
-### vLLM watermark detection
+### vLLM watermarking
 
 Recent vLLM revisions include watermark generation and detector primitives, but the OpenAI server does not expose the detector as an endpoint.
-Both vLLM modules can run a small detector server as a named service next to their model workers.
-It takes the same `watermark-config` the generating worker receives, so one attribute set configures both sides:
+Both vLLM modules can watermark a model's output and run a small detector server as a named service next to their model workers.
+Both sides take the same `watermark` option, an attribute set of vLLM's `WatermarkConfig` fields without the key:
 
 ```nix
 services.llmhop.vllm = let
-  watermark-config = {
-    algorithm = "gumbel";
-    key = 123456789;
-    context_width = 4;
-  };
+  watermark.algorithm = "dual_key_gumbel";
 in {
   models.qwen = {
     model = "Qwen/Qwen3-8B";
-    settings = { inherit watermark-config; };
+    inherit watermark;
   };
   detectors.production = {
     tokenizer = "Qwen/Qwen3-8B";
-    settings = {
-      inherit watermark-config;
-      p-value-threshold = 0.01;
-    };
+    inherit watermark;
+    settings.p-value-threshold = 0.01;
   };
 };
 ```
 
-The server validates the configuration with vLLM's own `WatermarkConfig`, so every field and algorithm the installed release accepts is accepted here too, and a typo fails at startup rather than silently changing the key.
-vLLM offers no detector factory, so the server picks the detector class and its arguments by vLLM's naming conventions.
+The key is the credential `vllm.watermark-key`, an unsigned 64-bit integer that every service with a `watermark` imports from the system credential store:
+
+```sh
+(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key)
+```
+
+An [encrypted credential](#inference-server-credentials) works the same, under the same name.
+
+To load it from elsewhere, give the services the credential through any of the [credential sources](#inference-server-credentials), e.g. `credentials."vllm.watermark-key" = "/run/secrets/watermark-key";`.
+That is also how two models use different keys.
+
+The key never enters the Nix store, the command line, or the journal.
+`nix/pkgs/mkVllmWatermark` reads it from the credential: its `serve` command merges the key into the `--watermark-config` of `vllm serve` in-process, and its `detect` command runs the detector.
+vLLM redacts the configuration in its own logs, and validation errors omit their input.
+Setting `watermark-config` in `settings` or `key` in `watermark` fails evaluation.
+
+Both commands validate the configuration with vLLM's own `WatermarkConfig`, so every field and algorithm the installed release accepts is accepted here too, and a typo fails at startup rather than silently changing the watermark.
+Speculative decoding needs `dual_key_gumbel`, or `allow_target_only_watermarking = true` for the others.
+vLLM offers no detector factory, so the detector picks its class and arguments by vLLM's naming conventions.
 An algorithm added upstream works without changes when it follows them, and fails loudly rather than detecting with mismatched parameters otherwise.
 `p-value-threshold` is the only detection-side setting.
 
-`tokenizer`, the key and the rest of the configuration must match the generation side.
+`tokenizer` and `watermark` must match the generation side.
 `tokenizer` and the listener are options of their own, since llmhop owns the latter.
 Each detector is a separate `vllm-detector-<name>` service serving `POST /detect`, with readiness taken from `GET /health`.
 They do not receive a GPU device in Quadlet mode.
 
-The server lives in `nix/pkgs/mkVllmDetector` rather than coming from vLLM's example, which has no unix socket support, no health endpoint, no file-based key, and covers only `gumbel`.
-`mkVllmDetector`, exposed under `legacyPackages`, checks it against a vLLM environment at build time: the server must import and detect with every algorithm the release declares, so a `uv lock` that breaks the vLLM modules it relies on fails the build rather than the unit.
-The native default is that checked script, run with the detector's `package`.
-The Quadlet container mounts the unchecked script into the selected image and runs it with the image's interpreter, so there the same failure surfaces at startup.
-`script` replaces it with a server of your own, which receives the same flags.
+The script lives in `nix/pkgs/mkVllmWatermark` rather than coming from vLLM's example, which has no unix socket support, no health endpoint, no file-based key, and covers only `gumbel`.
+`mkVllmWatermark`, exposed under `legacyPackages`, checks it against a vLLM environment at build time: the detector must import and detect with every algorithm the release declares, so a `uv lock` that breaks the vLLM modules it relies on fails the build rather than the unit.
+Native services run that checked script with their `package`.
+Quadlet containers mount the unchecked script into the selected image and run it with the image's interpreter, so there the same failure surfaces at startup.
+A detector's `script` replaces it with a server of your own, which receives the same flags after `detect`.
 Both require a vLLM revision containing `vllm.v1.watermarking`, which no release before 0.30.0 has.
 
 #### Routing detectors through llmhop
@@ -762,21 +773,6 @@ The response contains `score`, `p_value`, `num_scored_tokens`, and `is_watermark
 This puts llmhop's authentication in front of a server that has none of its own.
 A detector given a `port` is still unauthenticated there, like every model worker given one, so anything else on the host can reach it directly.
 On its default socket, only llmhop can.
-
-#### Keeping the key secret
-
-An inline `watermark-config` enters the Nix store and the process arguments.
-`watermark-config-file` instead reads the same configuration as JSON from a file, typically a credential:
-
-```nix
-services.llmhop.vllm.detectors.production = {
-  tokenizer = "Qwen/Qwen3-8B";
-  credentials.watermark = "/etc/llmhop/watermark.json";
-  settings.watermark-config-file = "\${cred:watermark}";
-};
-```
-
-The generating worker takes no such flag, but `vllm serve --config` reads a YAML file whose `watermark-config` key holds the same configuration, and it can be handed over the same way.
 
 SGLang and llama.cpp workers can coexist with the detector, but they only produce detectable text if they implement the same watermark generation algorithm and parameters.
 

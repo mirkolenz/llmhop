@@ -1,22 +1,25 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/examples/basic/online_serving/watermark_detection_server.py
-"""Watermark detection server configured like `vllm serve`.
+"""vLLM watermarking with the key read from a file.
 
-It reads the `--watermark-config` JSON of the generating worker,
-validated by vLLM's own `WatermarkConfig`,
-and serves `POST /detect` on a TCP port or a unix socket.
+`serve` runs `vllm serve` and `detect` a server detecting its watermark.
+Both take the `--watermark-config` JSON of `vllm serve` without its `key`,
+which `--watermark-key-file` supplies instead,
+so the key never appears on a command line.
 """
 
 import argparse
 import dataclasses
 import inspect
-from collections.abc import Container
+import json
+import sys
+from collections.abc import Callable, Container, Mapping, Sequence
 from pathlib import Path
-from typing import get_args
+from typing import Any, get_args
 
 import uvicorn
 import vllm.v1.watermarking
 from fastapi import FastAPI
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from vllm.config.watermarking import WatermarkConfig, WatermarkingAlgorithm
 from vllm.tokenizers import TokenizerLike, cached_get_tokenizer
 from vllm.v1.watermarking import WatermarkDetection, WatermarkDetector
@@ -41,6 +44,56 @@ class DetectionRequest(BaseModel):
     """Candidate text, extra keys are ignored."""
 
     text: str
+
+
+def read_key(path: Path) -> int:
+    """Watermark key of a file holding only the integer, errors omitting it."""
+    text = path.read_text().strip()
+
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(
+            f"{path} must hold only the watermark key, an unsigned integer"
+        )
+
+    return int(text)
+
+
+def load_config(config: Mapping[str, Any], key_file: Path) -> WatermarkConfig:
+    """`config` completed with the key of `key_file` and validated by vLLM.
+
+    Errors omit the input, since it holds the key.
+    """
+    if "key" in config:
+        raise ValueError("pass the watermark key as --watermark-key-file")
+
+    try:
+        return TypeAdapter(WatermarkConfig).validate_python(
+            {**config, "key": read_key(key_file)}
+        )
+    except ValidationError as error:
+        messages = (
+            f"{'.'.join(map(str, details['loc'])) or 'config'}: {details['msg']}"
+            for details in error.errors(include_input=False)
+        )
+        raise ValueError(f"invalid watermark config: {', '.join(messages)}") from None
+
+
+def watermark_parser(**kwargs: Any) -> argparse.ArgumentParser:
+    """Parser of the watermark arguments both commands share."""
+    parser = argparse.ArgumentParser(allow_abbrev=False, **kwargs)
+    parser.add_argument(
+        "--watermark-config",
+        type=json.loads,
+        default={},
+        help="JSON watermark configuration of `vllm serve`, without `key`.",
+    )
+    parser.add_argument(
+        "--watermark-key-file",
+        type=Path,
+        required=True,
+        help="File holding only the watermark key.",
+    )
+    return parser
 
 
 def config_field(fields: Container[str], algorithm: str, parameter: str) -> str:
@@ -111,29 +164,39 @@ def create_app(tokenizer: TokenizerLike, detector: WatermarkDetector) -> FastAPI
     return app
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tokenizer", required=True)
-    config = parser.add_mutually_exclusive_group(required=True)
-    config.add_argument(
+def serve(argv: Sequence[str]) -> None:
+    """Run `vllm serve` with the key merged into `--watermark-config` in-process.
+
+    vLLM redacts `watermark_config` in its logs,
+    and hands it to its engine processes through multiprocessing.
+    """
+    parser = watermark_parser(prog="watermark.py serve", add_help=False)
+    args, rest = parser.parse_known_args(argv)
+    config = load_config(args.watermark_config, args.watermark_key_file)
+
+    from vllm.entrypoints.cli.main import main
+
+    sys.argv = [
+        "vllm",
+        "serve",
+        *rest,
         "--watermark-config",
-        help="JSON watermark configuration, as passed to `vllm serve`.",
-    )
-    config.add_argument(
-        "--watermark-config-file",
-        dest="watermark_config",
-        type=lambda path: Path(path).read_text(),
-        help="File holding the JSON of `--watermark-config`.",
-    )
+        json.dumps(dataclasses.asdict(config)),
+    ]
+    main()
+
+
+def detect(argv: Sequence[str]) -> None:
+    """Serve detection for the watermark of `vllm serve`."""
+    parser = watermark_parser(prog="watermark.py detect")
+    parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--p-value-threshold", type=float, default=0.01)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--uds", help="Unix socket to bind instead of a port.")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
 
-
-def main(args: argparse.Namespace) -> None:
-    config = TypeAdapter(WatermarkConfig).validate_json(args.watermark_config)
+    config = load_config(args.watermark_config, args.watermark_key_file)
     app = create_app(
         cached_get_tokenizer(args.tokenizer),
         create_detector(config, args.p_value_threshold),
@@ -141,5 +204,20 @@ def main(args: argparse.Namespace) -> None:
     uvicorn.run(app, host=args.host, port=args.port, uds=args.uds)
 
 
+COMMANDS: dict[str, Callable[[Sequence[str]], None]] = {
+    "serve": serve,
+    "detect": detect,
+}
+
+
+def main() -> None:
+    command, *argv = sys.argv[1:] or [""]
+
+    if command not in COMMANDS:
+        raise SystemExit(f"usage: {sys.argv[0]} {{{','.join(COMMANDS)}}} ...")
+
+    COMMANDS[command](argv)
+
+
 if __name__ == "__main__":
-    main(parse_args())
+    main()

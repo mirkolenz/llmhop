@@ -8,6 +8,7 @@ let
 
   inherit (import ../lib.nix lib) enabled quadlet;
   detector = (import ../detectors/vllm.nix lib).quadlet;
+  watermark = import ../watermark.nix lib;
 
   # Internal port every worker binds to inside its container.
   workerPort = 8000;
@@ -27,8 +28,8 @@ in
 
       models = lib.mkOption {
         type = lib.types.attrsOf (
-          lib.types.submodule (
-            quadlet.mkModelSubmodule {
+          lib.types.submodule [
+            (quadlet.mkModelSubmodule {
               backend = "vllm-quadlet";
               inherit cfg;
               socketDirectory = config.services.llmhop.socketDirectory;
@@ -36,8 +37,9 @@ in
                 Loopback host port forwarded to the container's vLLM API.
                 Must be unique per model.
               '';
-            }
-          )
+            })
+            (watermark.module { optional = true; })
+          ]
         );
         default = { };
         example = lib.literalExpression ''
@@ -79,14 +81,27 @@ in
         // detector.registry detectors
       ))
       {
+        assertions = watermark.assertions "vllm-quadlet" cfg;
+
+        # A watermarking model runs `mkVllmWatermark`'s script, mounted into
+        # the image, instead of the image's `vllm serve` entrypoint.
         virtualisation.quadlet.containers =
           quadlet.mkModelContainers {
             backend = "vllm-quadlet";
             inherit cfg config workerPort;
-            container = model: {
-              arguments = [ model.model ];
-              managed.served-model-name = model.name;
-            };
+            container =
+              model:
+              let
+                script = lib.optionalAttrs (model.watermark != null) (watermark.container watermark.source "serve");
+              in
+              script
+              // {
+                arguments = (script.arguments or [ ]) ++ [ model.model ];
+                managed = {
+                  served-model-name = model.name;
+                }
+                // watermark.flags model.watermark;
+              };
           }
           // lib.listToAttrs (
             map (

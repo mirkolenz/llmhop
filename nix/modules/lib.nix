@@ -337,6 +337,9 @@ let
   # readiness probe and llmhop route to.
   withManagedSettings = managed: settings: settings // managed;
 
+  # A model's effective settings, the backend-wide defaults overridden per model.
+  modelSettings = cfg: model: cfg.modelSettings // model.settings;
+
   # ─── Option builders (private) ───────────────────────────────────────
 
   # Top-level options every backend exposes, regardless of kind.
@@ -1406,7 +1409,7 @@ let
               backend = serviceName;
               workload = model;
               managed = settings model;
-              settings = cfg.modelSettings // model.settings;
+              settings = modelSettings cfg model;
             };
         })
       ) models
@@ -1454,6 +1457,7 @@ in
     staticIdentityOptions
     mergeCredentialServiceConfig
     modelLabel
+    modelSettings
     nativeWorkloadArgs
     quadletServiceName
     socketCapable
@@ -1804,7 +1808,7 @@ in
                 collection = "models";
                 workload = model;
                 containerPort = workerPort;
-                settings = cfg.modelSettings // model.settings;
+                settings = modelSettings cfg model;
                 containerConfig = {
                   AddDevice = model.devices;
                   ShmSize = model.shmSize;

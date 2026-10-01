@@ -13,6 +13,7 @@ let
     systemd
     ;
   detector = (import ../detectors/vllm.nix lib).native;
+  watermark = import ../watermark.nix lib;
 
   detectors = enabled cfg.detectors;
 in
@@ -29,15 +30,16 @@ in
 
       models = lib.mkOption {
         type = lib.types.attrsOf (
-          lib.types.submodule (
-            systemd.mkUvModelSubmodule {
+          lib.types.submodule [
+            (systemd.mkUvModelSubmodule {
               backend = "vllm";
               inherit cfg;
               socketDirectory = config.services.llmhop.socketDirectory;
               modelArgument = "the `vllm serve` positional argument";
               modelExample = "Qwen/Qwen2.5-7B-Instruct";
-            }
-          )
+            })
+            (watermark.module { optional = true; })
+          ]
         );
         default = { };
         example = lib.literalExpression ''
@@ -84,9 +86,12 @@ in
         // detector.registry detectors
       ))
       {
+        assertions = watermark.assertions "vllm" cfg;
+
         # `mkUvServices` owns the shared GPU/cache/hardening service body; vLLM
         # supplies only its `vllm serve <model>` invocation (a real `bin/vllm`
-        # console script) and its own cache-root env vars.
+        # console script, or `mkVllmWatermark`'s script for a watermarking
+        # model) and its own cache-root env vars.
         systemd.services =
           systemd.mkUvServices {
             serviceName = "vllm";
@@ -95,12 +100,24 @@ in
               VLLM_CACHE_ROOT = "${cacheBase}/vllm";
               OUTLINES_CACHE_DIR = "${cacheBase}/outlines";
             };
-            command = model: [
-              (lib.getExe' model.package "vllm")
-              "serve"
-              model.model
-            ];
-            settings = model: { served-model-name = model.name; };
+            command =
+              model:
+              (
+                if model.watermark == null then
+                  [
+                    (lib.getExe' model.package "vllm")
+                    "serve"
+                  ]
+                else
+                  watermark.nativeCommand model.package (watermark.mkScript pkgs model.package) "serve"
+              )
+              ++ [ model.model ];
+            settings =
+              model:
+              {
+                served-model-name = model.name;
+              }
+              // watermark.flags model.watermark;
           }
           // lib.listToAttrs (
             map (

@@ -83,8 +83,10 @@ in
           quadlet.mkModelContainers {
             backend = "vllm-quadlet";
             inherit cfg config workerPort;
-            arguments = model: [ model.model ];
-            settings = model: { served-model-name = model.name; };
+            container = model: {
+              arguments = [ model.model ];
+              managed.served-model-name = model.name;
+            };
           }
           // lib.listToAttrs (
             map (

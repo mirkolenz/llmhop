@@ -65,7 +65,7 @@ in
         virtualisation.quadlet.containers = quadlet.mkModelContainers {
           backend = "llama-cpp-quadlet";
           inherit cfg config workerPort;
-          settings = model: { alias = model.name; };
+          container = model: { managed.alias = model.name; };
         };
       }
     ]

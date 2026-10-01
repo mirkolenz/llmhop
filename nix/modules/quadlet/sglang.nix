@@ -265,14 +265,16 @@ in
           quadlet.mkModelContainers {
             backend = "sglang-quadlet";
             inherit cfg config workerPort;
-            # Override the image's default entrypoint with the `sglang serve` CLI.
-            containerConfig.Entrypoint = lib.toJSON [
-              "sglang"
-              "serve"
-            ];
-            settings = model: {
-              model-path = model.model;
-              served-model-name = model.name;
+            container = model: {
+              # Override the image's default entrypoint with the `sglang serve` CLI.
+              containerConfig.Entrypoint = lib.toJSON [
+                "sglang"
+                "serve"
+              ];
+              managed = {
+                model-path = model.model;
+                served-model-name = model.name;
+              };
             };
           }
           // lib.listToAttrs (lib.optional cfg.gateway.enable mkGatewayContainer);

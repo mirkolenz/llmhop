@@ -1343,8 +1343,8 @@ let
   # resolves the startup chain, or stays null for a backend that does not chain.
   #
   # `command` builds the argv preceding the flags, executable included, and
-  # `settings` the backend's own managed flags from a model, as `arguments`
-  # and `settings` do for `quadlet.mkModelContainers`.
+  # `settings` the backend's own managed flags from a model, as `container`
+  # does for `quadlet.mkModelContainers`.
   mkModelServices =
     {
       serviceName,
@@ -1746,19 +1746,19 @@ in
     # each published on loopback or bound to its socket, chained on its
     # predecessor, and with every `${cred:…}` in its settings already resolved.
     #
-    # `settings` builds the backend's base flags from a model, `arguments` the
-    # positional argv preceding them, and `containerConfig` carries static
-    # `[Container]` extras such as `Entrypoint`. The listener flags are derived
-    # here from `port`, `socket` and `workerPort`, the container-side port.
+    # `container` builds a model's `mkWorkloadContainer` extras: `managed`,
+    # the backend's base flags, and optionally `arguments`, the positional
+    # argv preceding them, `containerConfig`, its `[Container]` extras such as
+    # `Entrypoint`, and `mounts`, its extra volumes. The listener flags are
+    # derived here from `port`, `socket` and `workerPort`, the container-side
+    # port.
     mkModelContainers =
       {
         backend,
         cfg,
         config,
         workerPort,
-        settings,
-        arguments ? (_model: [ ]),
-        containerConfig ? { },
+        container,
       }:
       let
         serviceName = quadletServiceName backend;
@@ -1767,30 +1767,36 @@ in
       lib.listToAttrs (
         lib.imap0 (
           index: model:
-          lib.nameValuePair (workloadUnit serviceName model) (mkQuadletWorkloadContainer {
-            inherit backend cfg config;
-            collection = "models";
-            workload = model;
-            containerPort = workerPort;
-            managed = settings model;
-            settings = cfg.modelSettings // model.settings;
-            arguments = arguments model;
-            containerConfig = {
-              AddDevice = model.devices;
-              ShmSize = model.shmSize;
-              Ulimit = "host";
-            }
-            // containerConfig;
-            # Each container waits on its predecessor so GPU-memory profiling
-            # never overlaps.
-            unitConfig.After =
-              lib.optional (cfg.startupOrdering && index > 0)
-                "${
-                  config.virtualisation.quadlet.containers.${
-                    workloadUnit serviceName (lib.elemAt models (index - 1))
-                  }.serviceName
-                }.service";
-          })
+          let
+            extras = container model;
+          in
+          lib.nameValuePair (workloadUnit serviceName model) (
+            mkQuadletWorkloadContainer (
+              extras
+              // {
+                inherit backend cfg config;
+                collection = "models";
+                workload = model;
+                containerPort = workerPort;
+                settings = cfg.modelSettings // model.settings;
+                containerConfig = {
+                  AddDevice = model.devices;
+                  ShmSize = model.shmSize;
+                  Ulimit = "host";
+                }
+                // extras.containerConfig or { };
+                # Each container waits on its predecessor so GPU-memory profiling
+                # never overlaps.
+                unitConfig.After =
+                  lib.optional (cfg.startupOrdering && index > 0)
+                    "${
+                      config.virtualisation.quadlet.containers.${
+                        workloadUnit serviceName (lib.elemAt models (index - 1))
+                      }.serviceName
+                    }.service";
+              }
+            )
+          )
         ) models
       );
 

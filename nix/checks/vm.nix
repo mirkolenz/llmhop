@@ -6,9 +6,13 @@
   ...
 }:
 let
-  clientToken = pkgs.writeText "client-token" "client-secret";
-  upstreamKey = pkgs.writeText "upstream-key" "upstream-secret";
-  workerKey = pkgs.writeText "worker-key" "worker-secret";
+  # Root-only copies outside the Nix store, as credentials are deployed:
+  # llmhop imports its own from the system credential store by name, the
+  # worker loads its key from a path.
+  secretFile = text: {
+    inherit text;
+    mode = "0400";
+  };
 
   notify = lib.getExe' (pkgs.callPackage ../package.nix { }) "llmhop-notify";
 
@@ -24,6 +28,8 @@ let
     import sys
 
     socket = sys.argv[sys.argv.index("--host") + 1]
+    # Reached through `%d`, so this fails unless systemd expanded it.
+    open(sys.argv[sys.argv.index("--api-key-file") + 1]).read()
 
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -56,6 +62,12 @@ testers.nixosTest {
     {
       imports = [ self.nixosModules.default ];
 
+      environment.etc = {
+        "credstore/llmhop.client-token" = secretFile "client-secret";
+        "credstore/llmhop.upstream-key" = secretFile "upstream-secret";
+        "llmhop/worker-key" = secretFile "worker-secret";
+      };
+
       # Started by hand so the `activating` window is observable rather than
       # racing the rest of the test script.
       systemd.services.llama-cpp-fake-model.wantedBy = lib.mkForce [ ];
@@ -76,8 +88,8 @@ testers.nixosTest {
             enable = true;
             package = fakeServer;
             models."fake-model" = {
-              credentials.apiKeys = workerKey;
-              settings.api-key-file = "\${cred:apiKeys}";
+              credentials.api-keys = "/etc/llmhop/worker-key";
+              settings.api-key-file = "\${cred:api-keys}";
             };
           };
 
@@ -86,14 +98,14 @@ testers.nixosTest {
           host = "127.0.0.1";
           listen.local = { };
           credentials = {
-            client_token = clientToken;
-            upstream_key = upstreamKey;
+            "llmhop.client-token" = { };
+            "llmhop.upstream-key" = { };
           };
           settings = {
-            authTokens = [ "\${cred:client_token}" ];
+            authTokens = [ "\${cred:llmhop.client-token}" ];
             models."test-model" = {
               url = "http://127.0.0.1:9000";
-              headers.Authorization = "Bearer \${cred:upstream_key}";
+              headers.Authorization = "Bearer \${cred:llmhop.upstream-key}";
             };
           };
         };

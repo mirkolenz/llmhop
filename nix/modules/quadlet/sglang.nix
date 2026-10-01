@@ -215,8 +215,9 @@ in
           example = "/etc/sglang/gateway.env";
           description = ''
             File in `KEY=VALUE` format forwarded to the gateway via `--env-file`.
-            Use for secrets like API keys; the gateway's `--api-key` flag may also be passed via
-            `settings` if the value is non-secret.
+            Use only for upstream features that require environment variables,
+            and prefer `credentials` for any secret the gateway can read from a
+            file.
           '';
         };
 
@@ -226,8 +227,8 @@ in
           type = with lib.types; attrsOf anything;
           default = { };
           example = {
-            api-key = "secret";
             tls-cert-path = "/etc/sglang/tls/server.crt";
+            tls-key-path = "\${cred:tls-key}";
           };
           description = ''
             Additional CLI flags forwarded to `sgl-model-gateway`.

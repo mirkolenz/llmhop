@@ -72,7 +72,7 @@ Create a `config.json`:
 {
   "host": "127.0.0.1",
   "port": 8080,
-  "authTokens": ["${cred:client_token}"],
+  "authTokens": ["${cred:llmhop.client-token}"],
   "models": {
     "llama-3-8b": {
       "url": "http://localhost:30000"
@@ -83,7 +83,7 @@ Create a `config.json`:
     "openai-gpt-4o": {
       "url": "https://api.openai.com",
       "headers": {
-        "Authorization": "Bearer ${env:OPENAI_KEY}"
+        "Authorization": "Bearer ${cred:openai-key}"
       }
     }
   }
@@ -102,7 +102,7 @@ Each model additionally takes `"unlisted": true`, which keeps the backend routab
 
 String values inside `authTokens` and `models.*.headers` are expanded at startup, so no plaintext secret ever has to live in the config file:
 
-- `${cred:name}`: read the systemd credential `name` from `$CREDENTIALS_DIRECTORY`, where `LoadCredential=` puts it.
+- `${cred:name}`: read the systemd credential `name` from `$CREDENTIALS_DIRECTORY`, where systemd puts it.
   This is the same reference the NixOS module rewrites for the model backends, so one spelling covers every service: those servers receive the credential's path because they open the file themselves, while llmhop reads its own config and so receives its contents.
 - `${env:NAME}`: read from the `NAME` environment variable.
 - `${file:/absolute/path}`: read from a file llmhop is pointed at directly. The path must be absolute, since credentials are addressed by name with `${cred:name}`.
@@ -617,29 +617,51 @@ Assign the same Nix value to multiple models when sharing is intentional.
 
 ```nix
 services.llmhop.llama-cpp.models."qwen3-8b" = {
-  credentials.apiKeys = "/run/secrets/qwen-api-keys";
+  credentials.api-keys = "/run/secrets/qwen-api-keys";
   settings = {
     hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
-    api-key-file = "\${cred:apiKeys}";
+    api-key-file = "\${cred:api-keys}";
   };
 };
 ```
 
-`credentials.<name>` accepts a source path for `LoadCredential=` or an extended value for an encrypted systemd credential:
+`credentials.<name>` takes one of three sources:
 
 ```nix
-credentials.tlsKey = {
-  source = "/etc/credstore.encrypted/qwen-tls-key";
-  encrypted = true;
+credentials = {
+  # A file, loaded with `LoadCredential=`.
+  api-keys = "/run/secrets/qwen-api-keys";
+  # An encrypted file, loaded with `LoadCredentialEncrypted=`.
+  tls-key = {
+    source = "/run/secrets/qwen-tls-key.cred";
+    encrypted = true;
+  };
+  # The credential of the same name in the system credential store, imported with `ImportCredential=`.
+  "llmhop.hf-token" = { };
 };
 ```
 
-For rootless Quadlets, the selected user's systemd manager must be able to read the source.
-Encrypted credentials for a user manager must be created with `systemd-creds encrypt --user`.
+Sources must lie outside the Nix store, which every local user can read, so a store path fails evaluation.
+An imported credential is looked up in `/etc/credstore`, `/etc/credstore.encrypted` and the other credential store directories, and among the credentials passed to the system, and decrypted as needed.
+That store is shared by every service, so prefix an imported name with its service, as in `llmhop.hf-token` or `vllm.watermark-key`.
+It needs no path in Nix at all, so it is the simplest way to provision a secret, as a plain file in the root-only `/etc/credstore`:
+
+```sh
+(umask 077; systemd-ask-password -n > /etc/credstore/llmhop.hf-token)
+```
+
+To keep it encrypted at rest with the host key, and the TPM if present, write it to `/etc/credstore.encrypted` instead:
+
+```sh
+systemd-ask-password -n | systemd-creds encrypt --name=llmhop.hf-token - /etc/credstore.encrypted/llmhop.hf-token
+```
+
+`systemd-creds` embeds the name into an encrypted credential, and systemd refuses to load it under any other, so encrypt with `--name=<name>`.
+For rootless Quadlets, the selected user's systemd manager must be able to read the source, and its encrypted credentials must be created with `systemd-creds encrypt --user`.
 
 `${cred:name}` expands to the read-only credential path, not its contents.
 Unknown references fail evaluation.
-Native workers use their systemd credential directory.
+Native workers use their systemd credential directory through the `%d` specifier.
 Quadlet workers mount only that unit's credential directory at `/run/llmhop/credentials`.
 
 vLLM and SGLang also accept a per-model YAML file through their `--config` flag.
@@ -758,33 +780,27 @@ The generating worker takes no such flag, but `vllm serve --config` reads a YAML
 
 SGLang and llama.cpp workers can coexist with the detector, but they only produce detectable text if they implement the same watermark generation algorithm and parameters.
 
-### Secrets
+### llmhop credentials
 
 The generated config file lives in the world-readable Nix store, so secrets should never be placed in `services.llmhop.settings` directly.
-Instead, reference them via `${cred:...}` and hand the files to the service through the `credentials` option, which maps a path to systemd's `LoadCredential=` and an entry with `encrypted = true` to `LoadCredentialEncrypted=`.
-The right-hand side is just a file path, so anything that produces a file works: [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs, a manually-managed file under `/etc/llmhop/`, or a path emitted by your own secret-provisioning tool.
+Instead, reference them via [`${cred:...}`](#secret-references) and hand them to llmhop through its `credentials` option, which takes the same [three sources](#inference-server-credentials) as the model backends: a path for systemd's `LoadCredential=`, an entry with `encrypted = true` for `LoadCredentialEncrypted=`, and `{ }` for `ImportCredential=` from the system credential store.
+A path is any file outside the Nix store, so anything that produces one works: [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs, a manually-managed file, or a path emitted by your own secret-provisioning tool.
 
 ```nix
 services.llmhop = {
-  credentials.client_token = "/etc/llmhop/client-token";
+  credentials = {
+    "llmhop.client-token" = { };
+    openai-key = "/run/secrets/openai-key";
+  };
   settings = {
-    authTokens = [ "\${cred:client_token}" ];
+    authTokens = [ "\${cred:llmhop.client-token}" ];
     models."openai-gpt-4o" = {
       url = "https://api.openai.com";
-      headers.Authorization = "Bearer \${env:OPENAI_KEY}";
+      headers.Authorization = "Bearer \${cred:openai-key}";
     };
   };
 };
-
-systemd.services.llmhop.serviceConfig.EnvironmentFile = [ "/etc/llmhop/openai.env" ];
-```
-
-`/etc/llmhop/openai.env` is a plain `KEY=VALUE` file:
-
-```env
-OPENAI_KEY=sk-...
 ```
 
 `${cred:...}` references are resolved against `$CREDENTIALS_DIRECTORY`, which systemd exposes as a per-unit tmpfs accessible only to this service, compatible with `DynamicUser` and the rest of the sandbox.
-`${env:...}` picks up anything the unit inherits, typically via `EnvironmentFile=`.
-Pick whichever matches how your secret tooling hands you the data; mixing both in one config is fine.
+`${env:...}` picks up variables the unit inherits, for example through `systemd.services.llmhop.serviceConfig.EnvironmentFile`, for secret tooling that only produces environment files.

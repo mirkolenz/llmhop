@@ -127,7 +127,6 @@ in
         command
         ++ nativeWorkloadArgs {
           inherit backend managed settings;
-          unit = unitName backend detector;
           workload = detector;
         };
     };

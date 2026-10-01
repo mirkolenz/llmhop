@@ -92,6 +92,7 @@ let
     };
 
   inherit (import ./lib.nix lib)
+    credentialSources
     credentialsOption
     hostPort
     identityConfig
@@ -164,13 +165,12 @@ in
 
     credentials = credentialsOption // {
       description = ''
-        Credentials granted to llmhop through systemd. Reference them from
-        `settings` as `''${cred:<name>}`, the same spelling the model backends
-        use: llmhop reads its own config, so the reference expands to the
-        credential's contents rather than to its path.
+        Credentials granted to llmhop through systemd.
+        ${credentialSources "llmhop.client-token"}
 
-        A path uses `LoadCredential=`. The attribute form can select
-        `LoadCredentialEncrypted=` for a `systemd-creds` encrypted source.
+        Reference them from `settings` as `''${cred:<name>}`, the same spelling
+        the model backends use: llmhop reads its own config, so the reference
+        expands to the credential's contents rather than to its path.
       '';
     };
 

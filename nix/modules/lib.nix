@@ -32,17 +32,31 @@ let
   containerRuntimeDirectory = "/run/llmhop";
   credentialDirectory = "${containerRuntimeDirectory}/credentials";
 
-  credentialType = types.either types.path (
+  # A plain path is shorthand for `source`, so every value reaches the module
+  # in one shape. Every path is coerced, as a submodule would import one as a
+  # module, and `source` keeps it outside the Nix store, which every local
+  # user can read.
+  credentialType = types.coercedTo types.path (source: { inherit source; }) (
     types.submodule {
       options = {
         source = mkOption {
-          type = types.path;
-          description = "File or socket from which systemd loads the credential.";
+          type = types.nullOr types.externalPath;
+          default = null;
+          description = ''
+            File or socket from which systemd loads the credential. `null`
+            imports the credential of the same name with `ImportCredential=`
+            from the system credential store, such as `/etc/credstore` and
+            `/etc/credstore.encrypted`, and from the credentials passed to the
+            system.
+          '';
         };
         encrypted = mkOption {
           type = types.bool;
           default = false;
-          description = "Whether to load and decrypt the source with `LoadCredentialEncrypted=`.";
+          description = ''
+            Whether to load and decrypt `source` with `LoadCredentialEncrypted=`.
+            Imported credentials are decrypted as needed.
+          '';
         };
       };
     }
@@ -58,23 +72,33 @@ let
     lib.throwIfNot (lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}" name != null)
       "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters.";
 
+  # How a credential's source maps onto systemd, shared by every `credentials`
+  # description. `example` names an imported credential.
+  credentialSources = example: ''
+    A path outside the Nix store uses `LoadCredential=`. The attribute form
+    can select `LoadCredentialEncrypted=` for a `systemd-creds` encrypted
+    source, which must be encrypted under the same name, or omit `source`
+    to import the credential of that name from the system credential store.
+    That store is shared by every service, so prefix an imported name with
+    its service, as in `${example}`.'';
+
   credentialsOption = mkOption {
     type = types.attrsOf credentialType;
     default = { };
     apply = lib.mapAttrs checkCredentialName;
     example = lib.literalExpression ''
       {
-        apiKeys = "/run/secrets/api-keys";
-        tlsKey = {
-          source = "/etc/credstore.encrypted/tls-key";
+        api-keys = "/run/secrets/api-keys";
+        tls-key = {
+          source = "/run/secrets/tls-key.cred";
           encrypted = true;
         };
+        "llmhop.hf-token" = { };
       }
     '';
     description = ''
       Credentials granted exclusively to this service through systemd.
-      A path uses `LoadCredential=`. The attribute form can select
-      `LoadCredentialEncrypted=` for a `systemd-creds` encrypted source.
+      ${credentialSources "llmhop.hf-token"}
 
       Reference the resulting read-only file from `settings` as
       `''${cred:<name>}`. The module resolves the reference to the native or
@@ -83,32 +107,25 @@ let
     '';
   };
 
-  normalizeCredential =
-    value:
-    if value ? source then
-      value
-    else
-      {
-        source = value;
-        encrypted = false;
-      };
-
-  # Append this workload's `LoadCredential=`/`LoadCredentialEncrypted=` entries
-  # to whatever `serviceConfig` already declares.
+  # Append this workload's `LoadCredential=`, `LoadCredentialEncrypted=` and
+  # `ImportCredential=` entries to whatever `serviceConfig` already declares.
   mergeCredentialServiceConfig =
     serviceConfig: credentials:
     let
-      normalized = lib.mapAttrs (_: normalizeCredential) credentials;
+      loaded = lib.filterAttrs (_: value: value.source != null) credentials;
       render =
         encrypted:
-        lib.mapAttrsToList (name: value: "${name}:${toString value.source}") (
-          lib.filterAttrs (_: value: value.encrypted == encrypted) normalized
+        lib.mapAttrsToList (name: value: "${name}:${value.source}") (
+          lib.filterAttrs (_: value: value.encrypted == encrypted) loaded
         );
     in
     serviceConfig
     // lib.optionalAttrs (credentials != { }) {
       LoadCredential = appendList serviceConfig "LoadCredential" (render false);
       LoadCredentialEncrypted = appendList serviceConfig "LoadCredentialEncrypted" (render true);
+      ImportCredential = appendList serviceConfig "ImportCredential" (
+        lib.attrNames (lib.filterAttrs (_: value: value.source == null) credentials)
+      );
     };
 
   # Rewrite every `${cred:<name>}` reference in a settings tree to the path the
@@ -139,7 +156,17 @@ let
     in
     resolve;
 
-  systemdCredentialDirectory = unit: "/run/credentials/${unit}.service";
+  # A native unit's credential directory as `${cred:…}` resolves to it. It
+  # survives `utils.escapeSystemdExecArgs`, which would turn systemd's `%d`
+  # specifier into a literal, and `escapeNativeExecArgs` swaps it for `%d`
+  # afterwards.
+  nativeCredentialDirectory = "@llmhopCredentialsDirectory@";
+
+  # `utils.escapeSystemdExecArgs` with `%d` naming the credential directory,
+  # whichever manager runs the unit.
+  escapeNativeExecArgs =
+    utils: args:
+    lib.replaceStrings [ nativeCredentialDirectory ] [ "%d" ] (utils.escapeSystemdExecArgs args);
 
   # Settings as a server receives them: `managed` over `settings`, with every
   # `${cred:…}` resolved against the credential `directory`.
@@ -333,7 +360,8 @@ let
           File in `KEY=VALUE` format forwarded to every service.
           Use only for upstream features that require environment variables,
           such as `HF_TOKEN` for gated Hugging Face repositories. Environment
-          variables are not systemd credentials and are visible to every model.
+          variables are not systemd credentials and are visible to every model,
+          so prefer `credentials` for any secret a server can read from a file.
           Loaded before `services.llmhop.${backend}.models.<name>.environmentFile`, so
           per-model files override these entries.
         '';
@@ -564,8 +592,8 @@ let
         description = ''
           File in `KEY=VALUE` format forwarded to this ${noun}'s service.
           Loaded after `services.llmhop.${backend}.environmentFile`, so its entries
-          override global ones. Use `credentials` for file-capable secret
-          settings. Must be readable by the user systemd reads it as.
+          override global ones. Prefer `credentials` for any secret the server
+          can read from a file. Must be readable by the user systemd reads it as.
         '';
       };
       credentials = credentialsOption;
@@ -1188,7 +1216,7 @@ let
         // {
           KillMode = "control-group";
           Type = "notify";
-          ExecStart = utils.escapeSystemdExecArgs (
+          ExecStart = escapeNativeExecArgs utils (
             [
               (notifyExe pkgs)
               "-url"
@@ -1322,7 +1350,6 @@ let
   nativeWorkloadArgs =
     {
       backend,
-      unit,
       workload,
       managed,
       settings,
@@ -1334,7 +1361,7 @@ let
         workload
         settings
         ;
-      directory = systemdCredentialDirectory unit;
+      directory = nativeCredentialDirectory;
       listen = hostListen workload;
     });
 
@@ -1377,7 +1404,6 @@ let
             command model
             ++ nativeWorkloadArgs {
               backend = serviceName;
-              unit = workloadUnit serviceName model;
               workload = model;
               managed = settings model;
               settings = cfg.modelSettings // model.settings;
@@ -1420,6 +1446,7 @@ in
     baseWorkloadOptions
     containerRuntimeDirectory
     credentialDirectory
+    credentialSources
     credentialsOption
     enabled
     identityConfig
@@ -1441,7 +1468,6 @@ in
     serviceConfigOption
     settingsRendering
     sortedModels
-    systemdCredentialDirectory
     unitConfigOption
     workerUrl
     workloadFlags

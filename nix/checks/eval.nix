@@ -8,11 +8,12 @@
 }:
 let
   llmhopLib = import ../modules/lib.nix lib;
-  apiKeys = pkgs.writeText "api-keys" "secret";
+  # Credentials live outside the Nix store, so only their paths are needed.
+  apiKeys = "/run/secrets/api-keys";
   # The fake `package` has no interpreter to check the default against.
   detectorScript = pkgs.writeText "detector.py" "";
-  serverConfig = pkgs.writeText "server.yaml" "api-key: secret";
-  tlsKey = pkgs.writeText "tls-key" "encrypted-placeholder";
+  serverConfig = "/run/secrets/server.yaml";
+  tlsKey = "/run/secrets/tls-key.cred";
   # Not `lib.hasInfix`: it compiles the needle into a regex, and `lib.match`
   # rejects patterns carrying store-path context. Literal replacement has no
   # such restriction, so store paths can be matched directly.
@@ -29,16 +30,17 @@ let
   # are stated once and asserted on twice.
   credentialed = {
     credentials = {
-      inherit apiKeys serverConfig;
-      tlsKey = {
+      api-keys = apiKeys;
+      server-config = serverConfig;
+      tls-key = {
         source = tlsKey;
         encrypted = true;
       };
     };
     settings = {
-      config = "\${cred:serverConfig}";
-      api-key-file = "\${cred:apiKeys}";
-      ssl-keyfile = "\${cred:tlsKey}";
+      config = "\${cred:server-config}";
+      api-key-file = "\${cred:api-keys}";
+      ssl-keyfile = "\${cred:tls-key}";
     };
   };
 
@@ -114,9 +116,9 @@ let
         enable = true;
         bindAddress = "192.0.2.1";
         port = 19000;
-        credentials.tlsKey = tlsKey;
+        credentials.tls-key = tlsKey;
         settings.tls-cert-path = "/etc/sglang/tls/server.crt";
-        settings.tls-key-path = "\${cred:tlsKey}";
+        settings.tls-key-path = "\${cred:tls-key}";
         quadlet.containerConfig.User = "1000";
         quadlet.mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
       };
@@ -220,6 +222,18 @@ let
   };
 
   invalidCredential = mkConfig { models.test.credentials."tls/key" = tlsKey; };
+
+  # Anyone on the host can read the Nix store. The file parses as a module, so
+  # a submodule importing paths would accept it.
+  storeCredential = mkConfig { models.test.credentials.leak = pkgs.writeText "leak" "{ }"; };
+
+  # Imported by name from the system credential store.
+  importedCredential = mkConfig {
+    models.test = {
+      credentials."llmhop.hf-token" = { };
+      settings.hf-token-file = "\${cred:llmhop.hf-token}";
+    };
+  };
 
   # Without a `port`, workers bind a unix socket below a custom root. `b`
   # sorts after `a` despite being declared first, so it is the one chained on
@@ -553,10 +567,10 @@ let
         UserNS = "auto:size=65536";
         volumes = true;
         LoadCredential = [
-          "apiKeys:${apiKeys}"
-          "serverConfig:${serverConfig}"
+          "api-keys:${apiKeys}"
+          "server-config:${serverConfig}"
         ];
-        LoadCredentialEncrypted = [ "tlsKey:${tlsKey}" ];
+        LoadCredentialEncrypted = [ "tls-key:${tlsKey}" ];
         MemoryMax = "64G";
         StartLimitBurst = 7;
         DefaultDependencies = false;
@@ -565,9 +579,9 @@ let
 
     testCredentialReferences = {
       expr = containsAll [
-        "--api-key-file=/run/llmhop/credentials/apiKeys"
-        "--config=/run/llmhop/credentials/serverConfig"
-        "--ssl-keyfile=/run/llmhop/credentials/tlsKey"
+        "--api-key-file=/run/llmhop/credentials/api-keys"
+        "--config=/run/llmhop/credentials/server-config"
+        "--ssl-keyfile=/run/llmhop/credentials/tls-key"
       ] rootfulWorker.containerConfig.Exec;
       expected = true;
     };
@@ -642,7 +656,7 @@ let
           ;
         arguments = containsAll [
           "--tls-cert-path=/etc/sglang/tls/server.crt"
-          "--tls-key-path=/run/llmhop/credentials/tlsKey"
+          "--tls-key-path=/run/llmhop/credentials/tls-key"
           "http://127.0.0.1:19001"
         ] sglangGateway.containerConfig.Exec;
         load = sglangGateway.serviceConfig.LoadCredential;
@@ -653,7 +667,7 @@ let
         UserNS = "host";
         Volume = [ "%d:/run/llmhop/credentials:ro,idmap=uids=0-1000-1;gids=0-1000-1" ];
         HealthCmd = "curl --fail --silent --show-error --insecure https://192.0.2.1:19000/health";
-        load = [ "tlsKey:${tlsKey}" ];
+        load = [ "tls-key:${tlsKey}" ];
       };
     };
 
@@ -683,10 +697,12 @@ let
         load = nativeVllmWorker.serviceConfig.LoadCredential;
         encrypted = nativeVllmWorker.serviceConfig.LoadCredentialEncrypted;
         paths = containsAll [
-          "/run/credentials/vllm-test.service/apiKeys"
-          "/run/credentials/vllm-test.service/serverConfig"
-          "/run/credentials/vllm-test.service/tlsKey"
+          "%d/api-keys"
+          "%d/server-config"
+          "%d/tls-key"
         ] nativeVllmWorker.serviceConfig.ExecStart;
+        # A doubled `%` would pass the specifier on as a literal.
+        escaped = containsAll [ "%%d" ] nativeVllmWorker.serviceConfig.ExecStart;
         # The engine exits 0 after draining, so a crashed worker needs `always`.
         inherit (nativeVllmWorker.serviceConfig) Restart PrivateDevices;
       };
@@ -695,11 +711,12 @@ let
         PrivateDevices = false;
         load = [
           "manual:/run/manual"
-          "apiKeys:${apiKeys}"
-          "serverConfig:${serverConfig}"
+          "api-keys:${apiKeys}"
+          "server-config:${serverConfig}"
         ];
-        encrypted = [ "tlsKey:${tlsKey}" ];
+        encrypted = [ "tls-key:${tlsKey}" ];
         paths = true;
+        escaped = false;
       };
     };
 
@@ -716,6 +733,28 @@ let
     testRoutingKeyCollision = {
       expr = accepts collidingRoutingKey;
       expected = false;
+    };
+
+    testStoreCredential = {
+      expr = evaluates storeCredential.virtualisation.quadlet.containers.vllm-test.serviceConfig;
+      expected = false;
+    };
+
+    testImportedCredential = {
+      expr =
+        let
+          worker = importedCredential.virtualisation.quadlet.containers.vllm-test;
+        in
+        {
+          inherit (worker.serviceConfig) ImportCredential;
+          path = containsAll [
+            "--hf-token-file=/run/llmhop/credentials/llmhop.hf-token"
+          ] worker.containerConfig.Exec;
+        };
+      expected = {
+        ImportCredential = [ "llmhop.hf-token" ];
+        path = true;
+      };
     };
 
     testInvalidCredentialName = {

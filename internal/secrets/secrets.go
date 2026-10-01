@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// credentialsDirectory is where systemd exposes the unit's LoadCredential= set.
+// credentialsDirectory is where systemd exposes the unit's credentials.
 const credentialsDirectory = "CREDENTIALS_DIRECTORY"
 
 // Expand resolves every secret reference inside s. Unresolved references

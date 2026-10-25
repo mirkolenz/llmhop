@@ -1,10 +1,19 @@
 package router
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 )
+
+// health is the payload of the liveness endpoint. `models` lets a downstream
+// probe assert that the proxy came up with the catalog it expects, not just
+// that the process is listening. It counts what GET /v1/models advertises.
+type health struct {
+	Status string `json:"status"`
+	Models int    `json:"models"`
+}
 
 // model mirrors the OpenAI model object returned by the retrieve endpoint:
 //
@@ -24,6 +33,29 @@ type modelList struct {
 	Data   []model `json:"data"`
 }
 
+// jsonBody encodes v once, since every payload served here is immutable
+// after startup. The types encode infallibly.
+func jsonBody(v any) []byte {
+	body, _ := json.Marshal(v)
+	return body
+}
+
+// writeJSON serves a body built by jsonBody.
+func writeJSON(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// registerHealth wires GET /health. The catalog is immutable after startup, so
+// the response is built once and reused.
+func registerHealth(mux *http.ServeMux, models int) {
+	body := jsonBody(health{Status: "ok", Models: models})
+
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, body)
+	})
+}
+
 // registerModels wires the read-only OpenAI models API onto mux for the
 // catalog names it is given. The catalog is immutable after startup, so both
 // responses are built once and reused.
@@ -33,33 +65,20 @@ func registerModels(mux *http.ServeMux, names []string) {
 	created := time.Now().Unix()
 
 	models := make([]model, len(names))
-	byName := make(map[string]model, len(names))
+	byName := make(map[string][]byte, len(names))
 	for i, name := range names {
 		m := model{ID: name, Object: "model", Created: created, OwnedBy: "llmhop"}
 		models[i] = m
-		byName[name] = m
+		byName[name] = jsonBody(m)
 	}
 
-	mux.HandleFunc("GET /v1/models", list(models))
-	mux.HandleFunc("GET /v1/models/{model}", retrieve(byName))
-}
+	list := jsonBody(modelList{Object: "list", Data: models})
 
-// list serves GET /v1/models, returning every configured model:
-//
-// https://developers.openai.com/api/reference/resources/models/methods/list
-func list(models []model) http.HandlerFunc {
-	envelope := modelList{Object: "list", Data: models}
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, envelope)
-	}
-}
+	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, list)
+	})
 
-// retrieve serves GET /v1/models/{model}, returning a single configured model
-// or 404 when it is unknown:
-//
-// https://developers.openai.com/api/reference/resources/models/methods/retrieve
-func retrieve(byName map[string]model) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/models/{model}", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("model")
 		m, ok := byName[name]
 		if !ok {
@@ -67,5 +86,5 @@ func retrieve(byName map[string]model) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, m)
-	}
+	})
 }

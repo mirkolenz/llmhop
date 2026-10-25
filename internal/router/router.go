@@ -8,6 +8,7 @@ package router
 import (
 	"bytes"
 	"cmp"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,6 @@ import (
 	"net/http/httputil"
 	"strings"
 
-	"github.com/mirkolenz/llmhop/internal/authz"
 	"github.com/mirkolenz/llmhop/internal/config"
 	"github.com/mirkolenz/llmhop/internal/upstream"
 )
@@ -203,11 +203,30 @@ func authMiddleware(tokens [][]byte, next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if !authz.CheckBearer(req.Header.Get("Authorization"), tokens) {
+		if !checkBearer(req.Header.Get("Authorization"), tokens) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		req.Header.Del("Authorization")
 		next.ServeHTTP(w, req)
 	})
+}
+
+// checkBearer reports whether header carries a "Bearer <token>" matching any
+// of the configured tokens. The scheme is case-insensitive (RFC 9110, 11.1).
+// Comparison is constant-time to avoid leaking token contents via timing.
+func checkBearer(header string, tokens [][]byte) bool {
+	scheme, got, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return false
+	}
+
+	gotB := []byte(got)
+	for _, t := range tokens {
+		if subtle.ConstantTimeCompare(gotB, t) == 1 {
+			return true
+		}
+	}
+
+	return false
 }

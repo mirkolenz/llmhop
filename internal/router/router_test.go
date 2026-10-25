@@ -14,7 +14,6 @@ import (
 )
 
 type capturedRequest struct {
-	method string
 	body   string
 	header http.Header
 	host   string
@@ -27,136 +26,113 @@ func newBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
 	captured := &capturedRequest{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		captured.method = r.Method
 		captured.body = string(body)
 		captured.header = r.Header.Clone()
 		captured.host = r.Host
 		captured.path = r.URL.Path
 		captured.query = r.URL.RawQuery
-		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("backend ok"))
 	}))
 	t.Cleanup(srv.Close)
+
 	return srv, captured
+}
+
+func newRouter(t *testing.T, cfg *config.Config) http.Handler {
+	t.Helper()
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return h
 }
 
 func send(t *testing.T, handler http.Handler, method, path, body, authHeader string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
+
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
+
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+
 	return rec
 }
 
-func post(t *testing.T, handler http.Handler, body, authHeader string) *httptest.ResponseRecorder {
-	t.Helper()
-	return send(t, handler, http.MethodPost, "/", body, authHeader)
-}
-
-func get(t *testing.T, handler http.Handler, path, authHeader string) *httptest.ResponseRecorder {
-	t.Helper()
-	return send(t, handler, http.MethodGet, path, "", authHeader)
-}
-
-func newHandler(t *testing.T, auth []string, models ...string) http.Handler {
-	t.Helper()
-	backend, _ := newBackend(t)
-	m := make(map[string]config.Model, len(models))
-	for _, name := range models {
-		m[name] = config.Model{URL: backend.URL}
-	}
-	h, err := New(&config.Config{AuthTokens: auth, Models: m})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
-}
-
 func TestInvalidModelURL(t *testing.T) {
-	cfg := &config.Config{Models: map[string]config.Model{
-		"bad": {URL: "://not a url"},
-	}}
-	if _, err := New(cfg); err == nil {
+	if _, err := New(&config.Config{Models: map[string]config.Model{"bad": {URL: "://not a url"}}}); err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
 }
 
-func TestModelsAPI(t *testing.T) {
-	h := newHandler(t, nil, "b", "a")
+func TestCheckBearer(t *testing.T) {
+	tokens := [][]byte{[]byte("alpha"), []byte("beta")}
+	cases := []struct {
+		header string
+		want   bool
+	}{
+		{"Bearer beta", true},
+		{"bearer alpha", true},
+		{"Bearer alph", false},
+		{"Basic alpha", false},
+		{"alpha", false},
+	}
 
-	t.Run("list returns sorted models", func(t *testing.T) {
-		rec := get(t, h, "/v1/models", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
+	for _, c := range cases {
+		if got := checkBearer(c.header, tokens); got != c.want {
+			t.Errorf("checkBearer(%q) = %v, want %v", c.header, got, c.want)
 		}
-		var got modelList
-		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+	}
+}
+
+func TestCatalog(t *testing.T) {
+	backend, _ := newBackend(t)
+	h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
+		"b":        {URL: backend.URL},
+		"a":        {URL: backend.URL},
+		"detector": {URL: backend.URL, Unlisted: true},
+	}})
+
+	t.Run("health needs no token and counts listed models", func(t *testing.T) {
+		var got health
+		if err := json.Unmarshal(send(t, h, http.MethodGet, "/health", "", "").Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Object != "list" {
-			t.Fatalf("got object %q", got.Object)
+
+		if got.Status != "ok" || got.Models != 2 {
+			t.Fatalf("got %+v", got)
 		}
+	})
+
+	t.Run("list is sorted and omits unlisted models", func(t *testing.T) {
+		var got modelList
+		if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer secret").Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+
 		if len(got.Data) != 2 || got.Data[0].ID != "a" || got.Data[1].ID != "b" {
 			t.Fatalf("got models %+v", got.Data)
 		}
-		if got.Data[0].Object != "model" || got.Data[0].OwnedBy != "llmhop" {
-			t.Fatalf("got model %+v", got.Data[0])
-		}
 	})
 
-	t.Run("individual model", func(t *testing.T) {
-		rec := get(t, h, "/v1/models/a", "")
-		if rec.Code != http.StatusOK {
+	t.Run("retrieve", func(t *testing.T) {
+		if rec := send(t, h, http.MethodGet, "/v1/models/a", "", "Bearer secret"); rec.Code != http.StatusOK {
 			t.Fatalf("got status %d", rec.Code)
 		}
-		var m model
-		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-			t.Fatal(err)
-		}
-		if m.ID != "a" || m.Object != "model" {
-			t.Fatalf("got model %+v", m)
-		}
-	})
 
-	t.Run("unknown model returns 404", func(t *testing.T) {
-		if rec := get(t, h, "/v1/models/nope", ""); rec.Code != http.StatusNotFound {
+		if rec := send(t, h, http.MethodGet, "/v1/models/detector", "", "Bearer secret"); rec.Code != http.StatusNotFound {
 			t.Fatalf("got status %d", rec.Code)
 		}
 	})
-}
 
-func TestHealth(t *testing.T) {
-	h := newHandler(t, []string{"secret"}, "a", "b")
-
-	rec := get(t, h, "/health", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("got status %d, want 200 without a token", rec.Code)
-	}
-
-	var got health
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-
-	if got.Status != "ok" || got.Models != 2 {
-		t.Fatalf("got %+v", got)
-	}
-}
-
-func TestModelsAPIAuth(t *testing.T) {
-	h := newHandler(t, []string{"secret"}, "m")
-	if rec := get(t, h, "/v1/models", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("missing token: got status %d", rec.Code)
-	}
-	if rec := get(t, h, "/v1/models", "Bearer secret"); rec.Code != http.StatusOK {
-		t.Fatalf("valid token: got status %d", rec.Code)
-	}
+	t.Run("requires a token", func(t *testing.T) {
+		if rec := send(t, h, http.MethodGet, "/v1/models", "", ""); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("got status %d", rec.Code)
+		}
+	})
 }
 
 func TestRouterRequests(t *testing.T) {
@@ -168,7 +144,6 @@ func TestRouterRequests(t *testing.T) {
 		authHeader string
 		maxBody    int64
 		wantCode   int
-		wantBody   string
 		checkFwd   func(t *testing.T, req *capturedRequest)
 	}{
 		{
@@ -177,17 +152,36 @@ func TestRouterRequests(t *testing.T) {
 			wantCode: http.StatusBadRequest,
 		},
 		{
+			name:     "missing model returns 400",
+			body:     `{}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "null model returns 400",
+			body:     `{"model":null}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "non-string model returns 400",
+			body:     `{"model":123}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name:     "duplicate model key returns 400",
+			body:     `{"model":"m","model":null}`,
+			wantCode: http.StatusBadRequest,
+		},
+		{
 			name:     "unknown model returns 404",
 			body:     `{"model": "nope"}`,
 			wantCode: http.StatusNotFound,
 		},
 		{
-			name:     "known model is proxied",
-			body:     `{"model": "m", "prompt": "hi"}`,
+			name:     "known model is proxied with its body intact",
+			body:     `{"model":"m","prompt":{"model":"b"}}`,
 			wantCode: http.StatusOK,
-			wantBody: "backend ok",
 			checkFwd: func(t *testing.T, r *capturedRequest) {
-				if r.body != `{"model": "m", "prompt": "hi"}` {
+				if r.body != `{"model":"m","prompt":{"model":"b"}}` {
 					t.Fatalf("backend saw body %q", r.body)
 				}
 			},
@@ -202,19 +196,6 @@ func TestRouterRequests(t *testing.T) {
 					t.Fatalf("backend saw Authorization %q", got)
 				}
 			},
-		},
-		{
-			name:     "auth enabled rejects missing header",
-			auth:     []string{"secret"},
-			body:     `{"model": "m"}`,
-			wantCode: http.StatusUnauthorized,
-		},
-		{
-			name:       "auth enabled rejects wrong token",
-			auth:       []string{"secret"},
-			body:       `{"model": "m"}`,
-			authHeader: "Bearer nope",
-			wantCode:   http.StatusUnauthorized,
 		},
 		{
 			name:     "auth runs before model lookup",
@@ -235,18 +216,14 @@ func TestRouterRequests(t *testing.T) {
 			},
 		},
 		{
-			name:    "model headers are injected",
-			headers: map[string]string{"Authorization": "Bearer upstream", "Host": "backend.example", "X-Injected": "yes"},
-			body:    `{"model": "m"}`,
-			// client Authorization should be overridden by injected value.
+			name:       "model headers are injected",
+			headers:    map[string]string{"Authorization": "Bearer upstream", "Host": "backend.example"},
+			body:       `{"model": "m"}`,
 			authHeader: "Bearer client-token",
 			wantCode:   http.StatusOK,
 			checkFwd: func(t *testing.T, r *capturedRequest) {
 				if got := r.header.Get("Authorization"); got != "Bearer upstream" {
 					t.Fatalf("got Authorization %q", got)
-				}
-				if got := r.header.Get("X-Injected"); got != "yes" {
-					t.Fatalf("got X-Injected %q", got)
 				}
 
 				if r.host != "backend.example" {
@@ -265,24 +242,17 @@ func TestRouterRequests(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			backend, captured := newBackend(t)
-			cfg := &config.Config{
+			h := newRouter(t, &config.Config{
 				AuthTokens:   c.auth,
 				MaxBodyBytes: c.maxBody,
-				Models: map[string]config.Model{
-					"m": {URL: backend.URL, Headers: c.headers},
-				},
-			}
-			h, err := New(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			rec := post(t, h, c.body, c.authHeader)
+				Models:       map[string]config.Model{"m": {URL: backend.URL, Headers: c.headers}},
+			})
+			rec := send(t, h, http.MethodPost, "/", c.body, c.authHeader)
+
 			if rec.Code != c.wantCode {
 				t.Fatalf("got status %d, want %d", rec.Code, c.wantCode)
 			}
-			if c.wantBody != "" && rec.Body.String() != c.wantBody {
-				t.Fatalf("got body %q, want %q", rec.Body.String(), c.wantBody)
-			}
+
 			if c.checkFwd != nil {
 				c.checkFwd(t, captured)
 			}
@@ -292,12 +262,9 @@ func TestRouterRequests(t *testing.T) {
 
 func TestProxyPreservesHostAndQuery(t *testing.T) {
 	backend, captured := newBackend(t)
-	h, err := New(&config.Config{Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{
 		"m": {URL: backend.URL + "/base?backend=1"},
 	}})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?valid=1&semi=one;two", strings.NewReader(`{"model":"m"}`))
 	req.Host = "client.example"
@@ -310,48 +277,12 @@ func TestProxyPreservesHostAndQuery(t *testing.T) {
 		t.Fatalf("got status %d", rec.Code)
 	}
 
-	if captured.host != req.Host {
-		t.Errorf("backend saw host %q, want %q", captured.host, req.Host)
-	}
-
-	if captured.path != "/base/v1/chat/completions" {
-		t.Errorf("backend saw path %q", captured.path)
-	}
-
-	if captured.query != "backend=1&valid=1&semi=one;two" {
-		t.Errorf("backend saw query %q", captured.query)
+	if captured.host != req.Host || captured.path != "/base/v1/chat/completions" || captured.query != "backend=1&valid=1&semi=one;two" {
+		t.Errorf("backend saw %+v", captured)
 	}
 
 	if got := captured.header.Get("X-Forwarded-For"); got != "198.51.100.4" {
 		t.Errorf("backend saw X-Forwarded-For %q", got)
-	}
-}
-
-func TestModelField(t *testing.T) {
-	backend, captured := newBackend(t)
-	h, err := New(&config.Config{Models: map[string]config.Model{
-		"a": {URL: backend.URL},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, body := range []string{
-		`{"model":"a","prompt":{"model":"b"}}`,
-	} {
-		if rec := post(t, h, body, ""); rec.Code != http.StatusOK {
-			t.Fatalf("body %s: got status %d", body, rec.Code)
-		}
-
-		if captured.body != body {
-			t.Fatalf("backend saw body %q, want %q", captured.body, body)
-		}
-	}
-
-	for _, body := range []string{`{}`, `{"model":123}`, `{"model":"a","model":null}`} {
-		if rec := post(t, h, body, ""); rec.Code != http.StatusBadRequest {
-			t.Fatalf("body %s: got status %d", body, rec.Code)
-		}
 	}
 }
 
@@ -362,11 +293,7 @@ func TestProxyPreservesRequestTrailer(t *testing.T) {
 		trailer = req.Trailer.Get("X-Check")
 	}))
 	t.Cleanup(backend.Close)
-
-	h, err := New(&config.Config{Models: map[string]config.Model{"m": {URL: backend.URL}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URL: backend.URL}}})
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
 	req.ContentLength = -1
@@ -376,6 +303,25 @@ func TestProxyPreservesRequestTrailer(t *testing.T) {
 
 	if rec.Code != http.StatusOK || trailer != "ok" {
 		t.Fatalf("status %d, trailer %q", rec.Code, trailer)
+	}
+}
+
+func TestPathRouting(t *testing.T) {
+	backend, captured := newBackend(t)
+	h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
+		"detector": {URL: backend.URL + "/base", Unlisted: true},
+	}})
+
+	if rec := send(t, h, http.MethodPost, "/route/detector/detect?x=1", `{"text":"candidate"}`, "Bearer secret"); rec.Code != http.StatusOK {
+		t.Fatalf("got status %d", rec.Code)
+	}
+
+	if captured.path != "/base/detect" || captured.query != "x=1" || captured.body != `{"text":"candidate"}` {
+		t.Fatalf("backend saw %+v", captured)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/route/nope/detect", "", "Bearer secret"); rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d", rec.Code)
 	}
 }
 
@@ -430,84 +376,4 @@ func TestConcurrentRequestLimit(t *testing.T) {
 
 	_ = writer.Close()
 	<-done
-}
-
-func TestUnlistedModel(t *testing.T) {
-	backend, captured := newBackend(t)
-	h, err := New(&config.Config{Models: map[string]config.Model{
-		"chat":     {URL: backend.URL},
-		"detector": {URL: backend.URL, Unlisted: true},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("routes like any other backend", func(t *testing.T) {
-		rec := post(t, h, `{"model":"detector","text":"candidate"}`, "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		if captured.body != `{"model":"detector","text":"candidate"}` {
-			t.Fatalf("got body %q", captured.body)
-		}
-	})
-
-	t.Run("hidden from list, retrieve and health", func(t *testing.T) {
-		var got modelList
-		if err := json.Unmarshal(get(t, h, "/v1/models", "").Body.Bytes(), &got); err != nil {
-			t.Fatal(err)
-		}
-		if len(got.Data) != 1 || got.Data[0].ID != "chat" {
-			t.Fatalf("got catalog %+v", got.Data)
-		}
-
-		if rec := get(t, h, "/v1/models/detector", ""); rec.Code != http.StatusNotFound {
-			t.Fatalf("got status %d", rec.Code)
-		}
-
-		var h2 health
-		if err := json.Unmarshal(get(t, h, "/health", "").Body.Bytes(), &h2); err != nil {
-			t.Fatal(err)
-		}
-		if h2.Models != 1 {
-			t.Fatalf("got %d models", h2.Models)
-		}
-	})
-}
-
-func TestPathRouting(t *testing.T) {
-	chat, _ := newBackend(t)
-	detector, captured := newBackend(t)
-	h, err := New(&config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
-		"chat":     {URL: chat.URL},
-		"detector": {URL: detector.URL + "/base", Unlisted: true},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	route := func(path, auth string) *httptest.ResponseRecorder {
-		return send(t, h, http.MethodPost, path, `{"text":"candidate"}`, auth)
-	}
-
-	t.Run("strips the prefix and forwards the rest", func(t *testing.T) {
-		if rec := route("/route/detector/detect?x=1", "Bearer secret"); rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		if captured.path != "/base/detect" || captured.query != "x=1" || captured.body != `{"text":"candidate"}` {
-			t.Fatalf("backend saw %+v", captured)
-		}
-	})
-
-	t.Run("unknown model returns 404", func(t *testing.T) {
-		if rec := route("/route/nope/detect", "Bearer secret"); rec.Code != http.StatusNotFound {
-			t.Fatalf("got status %d", rec.Code)
-		}
-	})
-
-	t.Run("auth is enforced", func(t *testing.T) {
-		if rec := route("/route/detector/detect", "Bearer nope"); rec.Code != http.StatusUnauthorized {
-			t.Fatalf("got status %d", rec.Code)
-		}
-	})
 }

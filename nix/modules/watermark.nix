@@ -7,7 +7,7 @@
 lib:
 let
   inherit (lib) mkOption types;
-  inherit (import ./lib.nix lib) containerRuntimeDirectory modelSettings;
+  inherit (import ./lib lib) containerRuntimeDirectory modelSettings;
 
   credential = "vllm.watermark-key";
   containerScript = "${containerRuntimeDirectory}/watermark.py";

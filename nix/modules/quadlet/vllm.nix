@@ -1,12 +1,13 @@
 {
   lib,
   config,
+  pkgs,
   ...
 }:
 let
   cfg = config.services.llmhop.vllm-quadlet;
 
-  inherit (import ../lib.nix lib) enabled quadlet;
+  inherit (import ../lib lib) enabled quadlet;
   detector = (import ../detectors/vllm.nix lib).quadlet;
   watermark = import ../watermark.nix lib;
 
@@ -21,7 +22,6 @@ in
       backend = "vllm-quadlet";
       inherit cfg config;
       defaultImage = "docker.io/vllm/vllm-openai";
-      defaultCacheDir = "/var/cache/vllm";
     }
     // {
       enable = lib.mkEnableOption "vLLM model serving via Quadlet, fronted by llmhop";
@@ -34,9 +34,11 @@ in
               inherit cfg;
               socketDirectory = config.services.llmhop.socketDirectory;
               portDescription = ''
-                Loopback host port forwarded to the container's vLLM API.
+                Loopback host port of the container's vLLM API.
                 Must be unique per model.
               '';
+              modelDescription = "Hugging Face repository passed to `vllm serve`, or an absolute path inside the container.";
+              modelExample = "Qwen/Qwen2.5-7B-Instruct";
             })
             (watermark.module { optional = true; })
           ]
@@ -76,43 +78,41 @@ in
       (quadlet.mkConfig (
         {
           backend = "vllm-quadlet";
-          inherit cfg config;
+          inherit cfg config pkgs;
         }
         // detector.registry detectors
       ))
-      {
-        assertions = watermark.assertions "vllm-quadlet" cfg;
-
-        # A watermarking model runs `mkVllmWatermark`'s script, mounted into
-        # the image, instead of the image's `vllm serve` entrypoint.
-        virtualisation.quadlet.containers =
-          quadlet.mkModelContainers {
-            backend = "vllm-quadlet";
-            inherit cfg config workerPort;
-            container =
-              model:
-              let
-                script = lib.optionalAttrs (model.watermark != null) (watermark.container watermark.source "serve");
-              in
-              script
-              // {
-                arguments = (script.arguments or [ ]) ++ [ model.model ];
-                managed = {
-                  served-model-name = model.name;
-                }
-                // watermark.flags model.watermark;
-              };
+      { assertions = watermark.assertions "vllm-quadlet" cfg; }
+      # A watermarking model runs `mkVllmWatermark`'s script, mounted into the
+      # image, instead of the image's `vllm serve` entrypoint.
+      (quadlet.mergeWorkloads (
+        quadlet.mkModelWorkloads {
+          backend = "vllm-quadlet";
+          inherit
+            cfg
+            config
+            pkgs
+            workerPort
+            ;
+          container =
+            model:
+            let
+              script = lib.optionalAttrs (model.watermark != null) (watermark.container watermark.source "serve");
+            in
+            script
+            // {
+              arguments = (script.arguments or [ ]) ++ [ model.model ];
+              managed = watermark.flags model.watermark;
+            };
+        }
+        ++ map (
+          d:
+          detector.mkWorkload {
+            inherit cfg config pkgs;
+            detector = d;
           }
-          // lib.listToAttrs (
-            map (
-              d:
-              detector.mkContainer {
-                inherit cfg config;
-                detector = d;
-              }
-            ) (lib.attrValues detectors)
-          );
-      }
+        ) (lib.attrValues detectors)
+      ))
     ]
   );
 }

@@ -8,7 +8,11 @@ let
 
   detectors = import ./lib.nix lib;
   watermark = import ../watermark.nix lib;
-  inherit (import ../lib.nix lib) settingsRendering;
+  inherit (import ../lib lib)
+    isRepository
+    repositoriesOption
+    settingsRendering
+    ;
 
   # Internal port the container binds to; the host port is published onto it.
   containerPort = 8000;
@@ -21,10 +25,25 @@ let
       type = types.str;
       example = "Qwen/Qwen3-8B";
       description = ''
-        Tokenizer used to encode candidate text. It must exactly match the
-        tokenizer used for watermarked generation.
+        Tokenizer used to encode candidate text, a Hugging Face repository or
+        an absolute path. It must exactly match the tokenizer used for
+        watermarked generation. The fetcher downloads only the files of a
+        repository that a tokenizer may need, not its weights.
       '';
     };
+    repositories = repositoriesOption (
+      lib.optional (isRepository config.tokenizer) {
+        repo = config.tokenizer;
+        include = [
+          "*.json"
+          "*.jinja"
+          "*.model"
+          "*.py"
+          "*.tiktoken"
+          "*.txt"
+        ];
+      }
+    );
     script = mkOption {
       type = types.path;
       default = defaultScript config;
@@ -110,18 +129,20 @@ in
         (watermark.module { optional = false; })
       ];
 
-    mkContainer =
+    mkWorkload =
       {
         cfg,
         config,
+        pkgs,
         detector,
       }:
-      detectors.mkQuadletContainer (
+      detectors.mkQuadletWorkload (
         {
           backend = "vllm-quadlet";
           inherit
             cfg
             config
+            pkgs
             detector
             containerPort
             ;

@@ -8,7 +8,7 @@
 let
   cfg = config.services.llmhop.sglang;
 
-  inherit (import ../lib.nix lib) systemd;
+  inherit (import ../lib lib) systemd;
 in
 {
   options.services.llmhop.sglang =
@@ -60,7 +60,7 @@ in
     lib.mkMerge [
       (systemd.mkConfig {
         backend = "sglang";
-        inherit cfg;
+        inherit cfg pkgs;
       })
       {
         # `mkUvServices` owns the shared GPU/cache/hardening service body; SGLang
@@ -75,10 +75,6 @@ in
             "-m"
             "sglang.launch_server"
           ];
-          settings = model: {
-            model-path = model.model;
-            served-model-name = model.name;
-          };
         };
       }
     ]

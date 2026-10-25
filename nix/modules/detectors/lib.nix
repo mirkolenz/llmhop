@@ -6,13 +6,12 @@ lib:
 let
   inherit (lib) mkOption types;
 
-  llmhopLib = import ../lib.nix lib;
+  llmhopLib = import ../lib lib;
   inherit (llmhopLib)
     baseWorkloadOptions
     nativeWorkloadArgs
     quadletServiceName
     serviceConfigOption
-    socketCapable
     unitConfigOption
     workloadUnit
     ;
@@ -46,7 +45,7 @@ in
     auxiliaries = lib.mapAttrs' (
       name: d:
       lib.nameValuePair "detectors.${name}" {
-        inherit (d) port socket;
+        inherit (d) port socket repositories;
         unit = unitName backend d;
         model = d.name;
       }
@@ -99,7 +98,7 @@ in
         // {
           quadlet = llmhopLib.quadlet.mkObjectOptions {
             description = "this detector container";
-            socket = socketCapable backend;
+            socket = true;
           };
         };
     };
@@ -119,9 +118,9 @@ in
     }:
     llmhopLib.systemd.mkUvService {
       inherit cfg pkgs utils;
+      serviceName = backend;
       unitName = unitName backend detector;
       description = "${backend} watermark detector ${detector.name}";
-      subdir = "${backend}/detector-${detector.name}";
       workload = detector;
       execStart =
         command
@@ -131,32 +130,13 @@ in
         };
     };
 
-  mkQuadletContainer =
-    {
-      backend,
-      cfg,
-      config,
-      detector,
-      containerPort,
-      arguments,
-      managed,
-      settings,
-      containerConfig ? { },
-      mounts ? [ ],
-    }:
-    lib.nameValuePair (unitName backend detector) (
-      llmhopLib.quadlet.mkWorkloadContainer {
-        inherit
-          backend
-          cfg
-          config
-          containerPort
-          arguments
-          managed
-          settings
-          containerConfig
-          mounts
-          ;
+  # The other arguments pass through to `quadlet.mkWorkload`.
+  mkQuadletWorkload =
+    args@{ backend, detector, ... }:
+    llmhopLib.quadlet.mkWorkload (
+      removeAttrs args [ "detector" ]
+      // {
+        unit = unitName backend detector;
         collection = "detectors";
         workload = detector;
         serviceConfig.Restart = "on-failure";

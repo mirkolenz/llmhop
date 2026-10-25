@@ -16,10 +16,32 @@ let
 
   notify = lib.getExe' (pkgs.callPackage ../package.nix { }) "llmhop-notify";
 
+  # Stands in for `llama download`: writes the commit in `upstream` to the hub
+  # hub cache below the `HF_HOME` the module renders, as one snapshot of the repo.
+  fakeDownload = pkgs.writeScriptBin "llama" ''
+    #!${lib.getExe pkgs.python3Minimal}
+    import os
+    import pathlib
+    import sys
+
+    repo = sys.argv[sys.argv.index("-hf") + 1].split(":")[0]
+    commit = pathlib.Path("${upstream}").read_text().strip()
+    cache = pathlib.Path(os.environ["HF_HOME"], "hub", "models--" + repo.replace("/", "--"))
+    snapshot = cache / "snapshots" / commit
+    snapshot.mkdir(parents=True, exist_ok=True)
+    (snapshot / "model.gguf").write_text(commit)
+    (cache / "refs").mkdir(exist_ok=True)
+    (cache / "refs" / "main").write_text(commit)
+  '';
+
+  upstream = "/var/lib/fake-upstream";
+  hub = "/var/cache/llama-cpp/hub";
+  repo = "${hub}/models--example--fake";
+
   # Stands in for `llama-server`: binds the unix socket the module renders as
   # `--host` and answers 503 while "loading", 200 afterwards. Driving it
   # through the real backend puts the readiness handshake and the socket
-  # permissions under the generated unit's full sandbox (DynamicUser,
+  # permissions under the generated unit's full sandbox (PrivateNetwork,
   # PrivateUsers, SystemCallFilter and all), which is where they actually break.
   fakeServer = pkgs.writeScriptBin "llama-server" ''
     #!${lib.getExe pkgs.python3Minimal}
@@ -37,7 +59,8 @@ let
 
         def do_GET(self):
             type(self).health_checks += 1
-            self.send_response(200 if self.health_checks > 1 else 503)
+            # Long enough for the test to observe the loading state.
+            self.send_response(200 if self.health_checks > 3 else 503)
             self.end_headers()
 
         def do_POST(self):
@@ -68,6 +91,8 @@ testers.nixosTest {
         "llmhop/worker-key" = secretFile "worker-secret";
       };
 
+      systemd.tmpfiles.settings.fake-upstream.${upstream}.f.argument = "a1";
+
       # Started by hand so the `activating` window is observable rather than
       # racing the rest of the test script.
       systemd.services.llama-cpp-fake-model.wantedBy = lib.mkForce [ ];
@@ -86,8 +111,16 @@ testers.nixosTest {
         llmhop = {
           llama-cpp = {
             enable = true;
-            package = fakeServer;
+            package = pkgs.symlinkJoin {
+              name = "fake-llama-cpp";
+              paths = [
+                fakeServer
+                fakeDownload
+              ];
+            };
+            fetch.prune = true;
             models."fake-model" = {
+              model = "example/fake:Q4_K_M";
               credentials.api-keys = "/etc/llmhop/worker-key";
               settings.api-key-file = "\${cred:api-keys}";
             };
@@ -140,7 +173,7 @@ testers.nixosTest {
         machine.succeed("curl -fsS --unix-socket /run/llmhop/local.sock http://localhost/health >/dev/null")
 
     with subtest("health is served without a token"):
-        # `test-model` plus the llama-cpp backend's own registration.
+        # `test-model` plus the llama.cpp model.
         body = machine.succeed("curl -fsS http://127.0.0.1:8080/health")
         assert json.loads(body) == {"status": "ok", "models": 2}, f"unexpected body: {body!r}"
 
@@ -160,8 +193,12 @@ testers.nixosTest {
     # Credential wiring is an evaluation-time property, asserted in `eval`.
     with subtest("a loading model holds its unit in activating"):
         machine.succeed("systemctl start --no-block llama-cpp-fake-model")
-        state = machine.get_unit_info("llama-cpp-fake-model")["ActiveState"]
-        assert state == "activating", f"unexpected state: {state}"
+        machine.wait_until_succeeds("systemctl show -P ActiveState llama-cpp-fake-model | grep -qx activating")
+
+    with subtest("the fetcher downloads before the server starts"):
+        assert machine.succeed("cat ${repo}/refs/main") == "a1"
+        result = machine.get_unit_property("llama-cpp-fake-model-fetch", "Result")
+        assert result == "success", f"unexpected result: {result}"
 
     with subtest("the unit goes active once the model answers 200"):
         # Only reachable if READY=1 crossed the worker sandbox.
@@ -170,6 +207,22 @@ testers.nixosTest {
     with subtest("llmhop reaches the worker through its socket"):
         body = machine.succeed(curl({"model": "fake-model"}, token="client-secret"))
         assert body == "socket ok", f"unexpected body: {body!r}"
+
+    with subtest("an upstream change restarts the server"):
+        invocation = machine.get_unit_property("llama-cpp-fake-model", "InvocationID")
+        machine.succeed("echo b2 > ${upstream}")
+        machine.succeed("systemctl start llama-cpp-update")
+        machine.wait_until_succeeds(f"[ $(systemctl show -P InvocationID llama-cpp-fake-model) != {invocation} ]")
+        machine.wait_for_unit("llama-cpp-fake-model.service")
+        body = machine.succeed(curl({"model": "fake-model"}, token="client-secret"))
+        assert body == "socket ok", f"unexpected body: {body!r}"
+
+    with subtest("pruning keeps only what the configuration references"):
+        machine.succeed("runuser -u llama-cpp -- mkdir -p ${hub}/models--example--stale/snapshots/c3")
+        machine.succeed("systemctl start llama-cpp-update")
+        machine.succeed("test -e ${repo}/snapshots/b2/model.gguf")
+        machine.fail("test -e ${repo}/snapshots/a1")
+        machine.fail("test -e ${hub}/models--example--stale")
 
     with subtest("the worker restarts over its stale socket"):
         machine.succeed("systemctl kill --signal=SIGKILL llama-cpp-fake-model.service")

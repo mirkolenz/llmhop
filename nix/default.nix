@@ -18,7 +18,7 @@
         ./modules/quadlet.nix
       ];
     };
-    lib = import ./modules/lib.nix lib;
+    lib = import ./modules/lib lib;
   };
   perSystem =
     {
@@ -42,7 +42,7 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        inherit (config.legacyPackages) check-elf;
+        inherit (config.legacyPackages) check-elf prune-hub;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs (lib.elem system lib.platforms.linux) {

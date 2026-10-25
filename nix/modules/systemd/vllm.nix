@@ -8,7 +8,7 @@
 let
   cfg = config.services.llmhop.vllm;
 
-  inherit (import ../lib.nix lib)
+  inherit (import ../lib lib)
     enabled
     systemd
     ;
@@ -81,7 +81,7 @@ in
       (systemd.mkConfig (
         {
           backend = "vllm";
-          inherit cfg;
+          inherit cfg pkgs;
         }
         // detector.registry detectors
       ))
@@ -91,15 +91,11 @@ in
         # `mkUvServices` owns the shared GPU/cache/hardening service body; vLLM
         # supplies only its `vllm serve <model>` invocation (a real `bin/vllm`
         # console script, or `mkVllmWatermark`'s script for a watermarking
-        # model) and its own cache-root env vars.
+        # model).
         systemd.services =
           systemd.mkUvServices {
             serviceName = "vllm";
             inherit cfg pkgs utils;
-            environment = cacheBase: {
-              VLLM_CACHE_ROOT = "${cacheBase}/vllm";
-              OUTLINES_CACHE_DIR = "${cacheBase}/outlines";
-            };
             command =
               model:
               (
@@ -112,15 +108,10 @@ in
                   watermark.nativeCommand model.package (watermark.mkScript pkgs model.package) "serve"
               )
               ++ [ model.model ];
-            settings =
-              model:
-              {
-                served-model-name = model.name;
-              }
-              // watermark.flags model.watermark;
+            managed = model: watermark.flags model.watermark;
           }
           // lib.listToAttrs (
-            map (
+            lib.concatMap (
               d:
               detector.mkService {
                 inherit cfg pkgs utils;

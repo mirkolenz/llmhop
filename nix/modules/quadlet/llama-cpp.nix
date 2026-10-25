@@ -1,12 +1,13 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
   cfg = config.services.llmhop.llama-cpp-quadlet;
 
-  inherit (import ../lib.nix lib) quadlet;
+  inherit (import ../lib lib) quadlet;
 
   workerPort = 8080;
 in
@@ -16,9 +17,6 @@ in
       backend = "llama-cpp-quadlet";
       inherit cfg config;
       defaultImage = "ghcr.io/ggml-org/llama.cpp";
-      defaultCacheDir = "/var/cache/llama-cpp";
-      defaultContainerCacheDir = "/root/.cache/llama.cpp";
-      defaultCacheEnvVar = "LLAMA_CACHE";
       tagExample = "server-cuda";
     }
     // {
@@ -31,20 +29,23 @@ in
               backend = "llama-cpp-quadlet";
               inherit cfg;
               socketDirectory = config.services.llmhop.socketDirectory;
-              hasModel = false;
               portDescription = ''
-                Loopback host port forwarded to the container's llama.cpp API.
+                Loopback host port of the container's llama.cpp API.
                 Must be unique per model.
               '';
+              modelDescription = ''
+                Hugging Face repository with an optional quantization tag, passed
+                as `--hf-repo`, or an absolute path to a GGUF file inside the
+                container, passed as `--model`.
+              '';
+              modelExample = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
             }
           )
         );
         default = { };
         example = lib.literalExpression ''
           {
-            "qwen3-8b" = {
-              settings.hf-repo = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
-            };
+            "qwen3-8b".model = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
           }
         '';
         description = ''
@@ -59,15 +60,19 @@ in
     lib.mkMerge [
       (quadlet.mkConfig {
         backend = "llama-cpp-quadlet";
-        inherit cfg config;
+        inherit cfg config pkgs;
       })
-      {
-        virtualisation.quadlet.containers = quadlet.mkModelContainers {
+      (quadlet.mergeWorkloads (
+        quadlet.mkModelWorkloads {
           backend = "llama-cpp-quadlet";
-          inherit cfg config workerPort;
-          container = model: { managed.alias = model.name; };
-        };
-      }
+          inherit
+            cfg
+            config
+            pkgs
+            workerPort
+            ;
+        }
+      ))
     ]
   );
 }

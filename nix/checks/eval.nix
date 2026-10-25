@@ -4,10 +4,9 @@
   nixosSystem,
   pkgs,
   self,
-  stdenv,
 }:
 let
-  llmhopLib = import ../modules/lib.nix lib;
+  llmhopLib = import ../modules/lib lib;
   # Credentials live outside the Nix store, so only their paths are needed.
   apiKeys = "/run/secrets/api-keys";
   # The fake `package` has no interpreter to check the default against.
@@ -34,6 +33,11 @@ let
 
   accepts = system: lib.all (assertion: assertion.assertion) system.assertions;
 
+  # The script a fetcher container mounts last, with no fetch credentials.
+  fetchScript =
+    container:
+    lib.readFile (lib.head (lib.splitString ":" (lib.last container.containerConfig.Volume)));
+
   # Both backends render the same credentials through the same helpers, so they
   # are stated once and asserted on twice.
   credentialed = {
@@ -55,10 +59,11 @@ let
   mkSystem =
     llmhopConfig:
     (nixosSystem {
-      system = stdenv.hostPlatform.system;
       modules = [
         self.nixosModules.quadlet
         {
+          # Shared by every fixture rather than instantiated for each.
+          nixpkgs.pkgs = pkgs;
           system.stateVersion = lib.trivial.release;
           virtualisation.quadlet.enable = true;
           services.llmhop = llmhopConfig;
@@ -80,13 +85,10 @@ let
     };
 
   rootful = mkConfig {
-    cache = {
-      containerDirectory = "/cache";
-      mountOptions = [
-        "idmap"
-        "Z"
-      ];
-    };
+    cache.mountOptions = [
+      "idmap"
+      "Z"
+    ];
     quadlet = {
       containerConfig = {
         User = "2000";
@@ -114,6 +116,7 @@ let
 
   rootless = mkConfig {
     quadlet.user.uid = 503;
+    fetch.prune = true;
   };
 
   sglang = mkSystem {
@@ -157,7 +160,7 @@ let
       tag = "server";
       models.test = {
         port = 20001;
-        settings.hf-repo = "example/test";
+        model = "example/test:Q4_K_M";
       };
     };
   };
@@ -167,8 +170,20 @@ let
       enable = true;
       uid = 504;
       package = pkgs.writeShellScriptBin "vllm" "exit 0";
+      fetch = {
+        prune = true;
+        credentials."llmhop.hf-token" = { };
+        environment.HF_TOKEN_PATH = "\${cred:llmhop.hf-token}";
+      };
+      models.local = {
+        model = "/srv/models/local";
+        port = 21004;
+        offline = false;
+      };
       models.test = credentialed // {
         model = "example/test";
+        revision = "v1";
+        extraModels = [ "example/draft" ];
         port = 21001;
         serviceConfig.LoadCredential = [ "manual:/run/manual" ];
       };
@@ -296,7 +311,7 @@ let
       tag = "server";
       models = {
         b = {
-          settings.hf-repo = "example/b";
+          model = "example/b";
           quadlet = {
             containerConfig.UserNS = "auto";
             mountOptions.socket = [
@@ -305,7 +320,7 @@ let
             ];
           };
         };
-        a.settings.hf-repo = "example/a";
+        a.model = "example/a";
       };
     };
   };
@@ -321,17 +336,17 @@ let
     host = "::1";
   };
 
-  # llama.cpp runs as a `DynamicUser` unless a user is named.
+  # llama.cpp runs as its own user unless another one is named.
   mkLlamaCpp =
     llamaCppConfig:
     mkSystem {
       llama-cpp = {
         enable = true;
-        models.a.settings.hf-repo = "example/a";
+        models.a.model = "example/a:Q4_K_M";
       }
       // llamaCppConfig;
     };
-  dynamicIdentity = mkLlamaCpp { };
+  defaultIdentity = mkLlamaCpp { };
   namedIdentity = mkLlamaCpp { user = "llama"; };
 
   rootlessSockets = mkConfig {
@@ -355,7 +370,11 @@ let
   rootlessWorker = rootless.virtualisation.quadlet.containers.vllm-test;
   sglangGateway = sglang.virtualisation.quadlet.containers.sglang-gateway;
   llamaCppWorker = llamaCpp.virtualisation.quadlet.containers.llama-cpp-test;
+  llamaCppFetcher = llamaCpp.virtualisation.quadlet.containers.llama-cpp-test-fetch;
+  rootfulDetectorFetcher = rootful.virtualisation.quadlet.containers.vllm-detector-watermark-fetch;
   nativeVllmWorker = nativeVllm.systemd.services.vllm-test;
+  nativeVllmFetcher = nativeVllm.systemd.services.vllm-test-fetch;
+  rootfulFetcher = rootful.virtualisation.quadlet.containers.vllm-test-fetch;
   nativeVllmDetector = nativeVllm.systemd.services.vllm-detector-watermark;
   nativeVllmMarked = nativeVllm.systemd.services.vllm-marked;
 
@@ -394,26 +413,27 @@ let
 
     testIdentity = {
       expr = {
-        dynamic = {
-          inherit (dynamicIdentity.systemd.services.llama-cpp-a.serviceConfig) DynamicUser Group;
-          declared = dynamicIdentity.users.groups ? llama-cpp;
+        default = {
+          inherit (defaultIdentity.systemd.services.llama-cpp-a.serviceConfig) User Group;
+          # The fetcher shares the identity, and thereby the cache, of its server.
+          fetcher = defaultIdentity.systemd.services.llama-cpp-a-fetch.serviceConfig.User;
+          declared = defaultIdentity.users.users ? llama-cpp;
         };
         named = {
           inherit (namedIdentity.systemd.services.llama-cpp-a.serviceConfig) User Group;
-          dynamic = namedIdentity.systemd.services.llama-cpp-a.serviceConfig ? DynamicUser;
           declared = namedIdentity.users.users ? llama;
         };
       };
       expected = {
-        dynamic = {
-          DynamicUser = true;
+        default = {
+          User = "llama-cpp";
           Group = "llama-cpp";
+          fetcher = "llama-cpp";
           declared = true;
         };
         named = {
           User = "llama";
-          Group = "llama-cpp";
-          dynamic = false;
+          Group = "llama";
           declared = false;
         };
       };
@@ -464,6 +484,7 @@ let
           RuntimeDirectory
           RuntimeDirectoryMode
           SupplementaryGroups
+          PrivateNetwork
           ;
         bind =
           socketWorker.serviceConfig ? SocketBindAllow && socketWorker.serviceConfig.SocketBindAllow != "tcp";
@@ -475,6 +496,7 @@ let
         command = true;
         tcp = false;
         UMask = "0007";
+        PrivateNetwork = true;
         RuntimeDirectory = [ "sockets/llmhop/vllm-test" ];
         RuntimeDirectoryMode = "0750";
         # The socket belongs to the worker's own group, which llmhop joins.
@@ -513,28 +535,34 @@ let
       expr = {
         inherit (socketContainer.containerConfig)
           Volume
-          Umask
+          PodmanArgs
           UserNS
           HealthCmd
           ;
         inherit (socketContainer.serviceConfig) RuntimeDirectory RuntimeDirectoryMode;
+        inherit (socketContainer.containerConfig) Network;
         published = socketContainer.containerConfig ? PublishPort;
         host = containsAll [ "--host=/run/llmhop/socket/http.sock" ] socketContainer.containerConfig.Exec;
         after = socketContainer.unitConfig.After;
       };
       expected = {
         Volume = [
-          "/var/cache/llama-cpp:/root/.cache/llama.cpp"
+          "/var/cache/llama-cpp:/var/cache/llama-cpp:ro"
+          "/var/cache/llama-cpp-b:/var/cache/llama-cpp-b"
           "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U,z"
         ];
-        Umask = "0007";
+        Network = "none";
+        PodmanArgs = [ "--umask=0007" ];
         UserNS = "auto";
         HealthCmd = "curl --fail --silent --show-error --unix-socket /run/llmhop/socket/http.sock http://localhost/health";
         RuntimeDirectory = [ "sockets/llmhop/llama-cpp-b" ];
         RuntimeDirectoryMode = "0710";
         published = false;
         host = true;
-        after = [ "llama-cpp-a.service" ];
+        after = [
+          "llama-cpp-b-fetch.service"
+          "llama-cpp-a.service"
+        ];
       };
     };
 
@@ -587,7 +615,8 @@ let
       expr = {
         inherit (rootfulWorker.containerConfig) User UserNS;
         volumes = lib.all (volume: lib.elem volume rootfulWorker.containerConfig.Volume) [
-          "/var/cache/vllm:/cache:idmap,Z"
+          "/var/cache/vllm:/var/cache/vllm:ro,idmap,Z"
+          "/var/cache/vllm-test:/var/cache/vllm-test:idmap,Z"
           "%d:/run/llmhop/credentials:ro,idmap=uids=0-1000-1;gids=0-1000-1"
         ];
         inherit (rootfulWorker.serviceConfig)
@@ -634,6 +663,10 @@ let
         # Appended to the cache mount rather than replacing it.
         volumes = volumeTargets rootfulDetector;
         port = rootfulDetector.containerConfig.PublishPort;
+        # Only the tokenizer files, not the weights.
+        fetch = containsAll [ "hf download example/test --include '*.json'" ] (
+          fetchScript rootfulDetectorFetcher
+        );
         registered = rootful.services.llmhop.portsRegistry."vllm-quadlet.detectors.watermark";
         # Reachable through llmhop, so it shares the proxy's auth tokens, but
         # kept out of the OpenAI catalog: it serves `/detect`, not completions.
@@ -644,11 +677,13 @@ let
         arguments = true;
         import = [ "vllm.watermark-key" ];
         volumes = [
-          "/cache"
+          "/var/cache/vllm"
+          "/var/cache/vllm-detector-watermark"
           "/run/llmhop/watermark.py"
           "/run/llmhop/credentials"
         ];
         port = [ "127.0.0.1:18002:8000" ];
+        fetch = true;
         registered = 18002;
         routed = {
           url = "http://127.0.0.1:18002";
@@ -676,7 +711,8 @@ let
         arguments = true;
         Entrypoint = lib.toJSON [ "python" ];
         volumes = [
-          "/cache"
+          "/var/cache/vllm"
+          "/var/cache/vllm-marked"
           "/run/llmhop/watermark.py"
           "/run/llmhop/credentials"
         ];
@@ -700,6 +736,7 @@ let
           ;
         gid = rootless.users.groups.vllm.gid;
         cacheOwner = rootless.systemd.tmpfiles.settings."10-vllm"."/var/cache/vllm".d.user;
+        serverCacheOwner = rootless.systemd.tmpfiles.settings."10-vllm"."/var/cache/vllm-test".d.user;
       };
       expected = {
         uid = 503;
@@ -708,6 +745,7 @@ let
         autoSubUidGidRange = true;
         gid = 503;
         cacheOwner = "vllm";
+        serverCacheOwner = "vllm";
       };
     };
 
@@ -743,17 +781,39 @@ let
 
     testLlamaCpp = {
       expr = {
-        inherit (llamaCppWorker.containerConfig) Image PublishPort Volume;
+        inherit (llamaCppWorker.containerConfig) Volume PublishPort Image;
+        pulled = llamaCpp.virtualisation.quadlet.images.llama-cpp-server.imageConfig.Image;
         arguments = containsAll [
           "--alias=test"
-          "--hf-repo=example/test"
+          "--hf-repo=example/test:Q4_K_M"
+          "--offline"
         ] llamaCppWorker.containerConfig.Exec;
+        fetch = fetchScript llamaCppFetcher;
+        fetchVolumes = volumeTargets llamaCppFetcher;
+        inherit (llamaCppFetcher.containerConfig) Entrypoint;
       };
       expected = {
         arguments = true;
-        Image = "ghcr.io/ggml-org/llama.cpp:server";
+        Image = "llama-cpp-server.image";
+        pulled = "ghcr.io/ggml-org/llama.cpp:server";
+        # A server on a port stays in Podman's default network.
         PublishPort = [ "127.0.0.1:20001:8080" ];
-        Volume = [ "/var/cache/llama-cpp:/root/.cache/llama.cpp" ];
+        Volume = [
+          "/var/cache/llama-cpp:/var/cache/llama-cpp:ro"
+          "/var/cache/llama-cpp-test:/var/cache/llama-cpp-test"
+        ];
+        fetch = ''
+          /app/llama download -hf example/test:Q4_K_M || test -d /var/cache/llama-cpp/hub/models--example--test/snapshots
+        '';
+        fetchVolumes = [
+          "/var/cache/llama-cpp"
+          "/run/llmhop/fetch.sh"
+        ];
+        Entrypoint = lib.toJSON [
+          "/bin/sh"
+          "-e"
+          "/run/llmhop/fetch.sh"
+        ];
       };
     };
 
@@ -873,6 +933,110 @@ let
       expected = false;
     };
 
+    # The fetcher alone gets the fetch credentials and downloads, the server
+    # runs offline. The VM test covers the rest with llama.cpp.
+    testNativeFetch = {
+      expr = {
+        script = containsAll [
+          "/bin/hf download example/test --revision v1 || test -d /var/cache/vllm/hub/models--example--test/snapshots"
+        ] nativeVllmFetcher.serviceConfig.ExecStart.text;
+        inherit (nativeVllmFetcher.environment) HF_TOKEN_PATH;
+        serverCredentials = nativeVllmWorker.serviceConfig.ImportCredential;
+        inherit (nativeVllmWorker.environment) HF_HUB_OFFLINE;
+        inherit (nativeVllmWorker.serviceConfig) IPAddressDeny InaccessiblePaths;
+        # A local path has nothing to fetch, and this server opted out of
+        # the offline mode.
+        local =
+          let
+            server = nativeVllm.systemd.services.vllm-local;
+          in
+          {
+            fetcher = nativeVllm.systemd.services ? vllm-local-fetch;
+            offline = server.environment ? HF_HUB_OFFLINE;
+            restricted = server.serviceConfig ? IPAddressDeny;
+          };
+      };
+      expected = {
+        script = true;
+        HF_TOKEN_PATH = "%d/llmhop.hf-token";
+        serverCredentials = [ ];
+        HF_HUB_OFFLINE = "1";
+        IPAddressDeny = "any";
+        InaccessiblePaths = [
+          "-/run/nscd"
+          "-/run/systemd/resolve"
+        ];
+        local = {
+          fetcher = false;
+          offline = false;
+          restricted = false;
+        };
+      };
+    };
+
+    # A rootless update manages its user's fetchers and prunes in its user
+    # namespace. The VM test covers the rootful native one.
+    testRootlessUpdate =
+      let
+        update = rootless.systemd.user.services.vllm-update;
+      in
+      {
+        expr = {
+          inherit (update.unitConfig) ConditionUser;
+          unshare = containsAll [ "unshare" ] (lib.last update.serviceConfig.ExecStart);
+          user = containsAll [ "systemctl --user restart vllm-test-fetch.service" ] (
+            lib.head update.serviceConfig.ExecStart
+          );
+          timer = rootless.systemd.user.timers.vllm-update.unitConfig.ConditionUser;
+        };
+        expected = {
+          ConditionUser = 503;
+          unshare = true;
+          user = true;
+          timer = 503;
+        };
+      };
+
+    # The image unit pulls for both, the fetcher keeps the server's identity.
+    testQuadletFetch = {
+      expr = {
+        inherit (rootfulWorker.containerConfig) Image Pull AutoUpdate;
+        inherit (rootful.virtualisation.quadlet.images.vllm-latest.imageConfig) Policy;
+        pulled = rootful.virtualisation.quadlet.images.vllm-latest.imageConfig.Image;
+        inherit (rootfulWorker.unitConfig) Wants;
+        offline = lib.elem (lib.toJSON "HF_HUB_OFFLINE=1") rootfulWorker.containerConfig.Environment;
+        fetcher = {
+          inherit (rootfulFetcher.containerConfig) Image User;
+          volume = lib.elem "/var/cache/vllm:/var/cache/vllm:idmap,Z" rootfulFetcher.containerConfig.Volume;
+          inherit (rootfulFetcher.serviceConfig) Type RemainAfterExit;
+          hooks = containsAll [
+            "llmhop-fetch-hook apply vllm-test.service /var/cache/vllm/hub/models--example--test"
+          ] (toString rootfulFetcher.serviceConfig.ExecStartPost);
+          script = containsAll [ "hf download example/test ||" ] (fetchScript rootfulFetcher);
+        };
+        service = rootful.virtualisation.quadlet.images.vllm-latest.serviceName;
+      };
+      expected = {
+        Image = "vllm-latest.image";
+        Pull = "never";
+        AutoUpdate = "registry";
+        Policy = "newer";
+        pulled = "docker.io/vllm/vllm-openai:latest";
+        Wants = [ "vllm-test-fetch.service" ];
+        offline = true;
+        fetcher = {
+          Image = "vllm-latest.image";
+          User = "1000";
+          volume = true;
+          Type = "oneshot";
+          RemainAfterExit = true;
+          hooks = true;
+          script = true;
+        };
+        service = "vllm-latest-image";
+      };
+    };
+
     testNativeDetector = {
       expr = {
         command = containsAll [
@@ -918,7 +1082,8 @@ let
     paths =
       rootful.virtualisation.quadlet.generatedUnits
       ++ rootless.virtualisation.quadlet.generatedUnits
-      ++ llamaCpp.virtualisation.quadlet.generatedUnits;
+      ++ llamaCpp.virtualisation.quadlet.generatedUnits
+      ++ sockets.virtualisation.quadlet.generatedUnits;
   };
 
   result = pkgs.runCommand "llmhop-eval-tests" { } ''
@@ -926,6 +1091,7 @@ let
     test -e ${units}/lib/systemd/system/vllm-detector-watermark.service
     test -e ${units}/lib/systemd/user/vllm-test.service
     test -e ${units}/lib/systemd/system/llama-cpp-test.service
+    grep -q '^Requires=vllm-latest-image.service$' ${units}/lib/systemd/system/vllm-test.service
     touch $out
   '';
 in

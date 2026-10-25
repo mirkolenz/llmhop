@@ -1,12 +1,13 @@
 {
   lib,
   config,
+  pkgs,
   ...
 }:
 let
   cfg = config.services.llmhop.sglang-quadlet;
 
-  inherit (import ../lib.nix lib)
+  inherit (import ../lib lib)
     credentialDirectory
     credentialsOption
     renderCliArgsShell
@@ -45,12 +46,17 @@ let
     worker-urls = map workerUrl models;
   };
 
-  workerServices = map (
-    m: "${config.virtualisation.quadlet.containers.${workloadUnit "sglang" m}.serviceName}.service"
-  ) models;
+  workerServices = map (m: quadlet.service config (workloadUnit "sglang" m)) models;
 
-  mkGatewayContainer = lib.nameValuePair "sglang-gateway" (
-    quadlet.mkWorker {
+  gateway = {
+    images.sglang-gateway = quadlet.mkImage {
+      inherit cfg;
+      inherit (cfg.gateway) image;
+      defaultTag = "latest";
+      workload = cfg.gateway;
+      label = "services.llmhop.sglang-quadlet.gateway";
+    };
+    containers.sglang-gateway = quadlet.mkWorker {
       inherit cfg;
       inherit (cfg.gateway) credentials;
       overrides = cfg.gateway.quadlet;
@@ -64,12 +70,7 @@ let
         ];
       healthStartPeriod = "5m";
       containerConfig =
-        quadlet.mkImageArgs {
-          inherit (cfg.gateway) image;
-          defaultTag = "latest";
-          workload = cfg.gateway;
-          label = "services.llmhop.sglang-quadlet.gateway";
-        }
+        quadlet.imageConfig config.virtualisation.quadlet.images.sglang-gateway (cfg.gateway.digest == null)
         // {
           # Host networking lets the gateway reach each worker at
           # `127.0.0.1:<model.port>` and binds its own listeners directly on
@@ -98,8 +99,8 @@ let
         After = workerServices;
         Requires = workerServices;
       };
-    }
-  );
+    };
+  };
 in
 {
   options.services.llmhop.sglang-quadlet =
@@ -107,7 +108,6 @@ in
       backend = "sglang-quadlet";
       inherit cfg config;
       defaultImage = "docker.io/lmsysorg/sglang";
-      defaultCacheDir = "/var/cache/sglang";
     }
     // {
       enable = lib.mkEnableOption "SGLang model serving via Quadlet, optionally fronted by the SGL Model Gateway";
@@ -119,10 +119,12 @@ in
               backend = "sglang-quadlet";
               inherit cfg;
               portDescription = ''
-                Loopback host port forwarded to the container's SGLang API.
+                Loopback host port of the container's SGLang API.
                 Must be unique per model and must not collide with `gateway.port` /
                 `gateway.metricsPort` when the gateway is enabled.
               '';
+              modelDescription = "Hugging Face repository passed as `--model-path`, or an absolute path inside the container.";
+              modelExample = "Qwen/Qwen3-8B";
             }
           )
         );
@@ -248,7 +250,7 @@ in
     lib.mkMerge [
       (quadlet.mkConfig {
         backend = "sglang-quadlet";
-        inherit cfg config;
+        inherit cfg config pkgs;
         auxiliaries =
           lib.optionalAttrs cfg.gateway.enable {
             gateway = {
@@ -261,25 +263,25 @@ in
             gateway-metrics.port = cfg.gateway.metricsPort;
           };
       })
-      {
-        virtualisation.quadlet.containers =
-          quadlet.mkModelContainers {
-            backend = "sglang-quadlet";
-            inherit cfg config workerPort;
-            container = model: {
-              # Override the image's default entrypoint with the `sglang serve` CLI.
-              containerConfig.Entrypoint = lib.toJSON [
-                "sglang"
-                "serve"
-              ];
-              managed = {
-                model-path = model.model;
-                served-model-name = model.name;
-              };
-            };
-          }
-          // lib.listToAttrs (lib.optional cfg.gateway.enable mkGatewayContainer);
-      }
+      { virtualisation.quadlet = lib.mkIf cfg.gateway.enable gateway; }
+      (quadlet.mergeWorkloads (
+        quadlet.mkModelWorkloads {
+          backend = "sglang-quadlet";
+          inherit
+            cfg
+            config
+            pkgs
+            workerPort
+            ;
+          # Override the image's default entrypoint with the `sglang serve` CLI.
+          container = _model: {
+            containerConfig.Entrypoint = lib.toJSON [
+              "sglang"
+              "serve"
+            ];
+          };
+        }
+      ))
     ]
   );
 }

@@ -1,12 +1,12 @@
 # Pure-eval regression test for the shared `settings` renderer: each backend's
-# entry in `cliDialects` encodes how its parser reads negated booleans and
+# entry in `engines` encodes how its parser reads negated booleans and
 # multi-value flags, which is exactly what is easy to break unnoticed.
 {
   lib,
   mkEvalCheck,
 }:
 let
-  inherit (import ../modules/lib.nix lib) renderCliArgs renderCliArgsShell;
+  inherit (import ../modules/lib lib) renderCliArgs renderCliArgsShell;
 
   settings = {
     temperature = 0.6;

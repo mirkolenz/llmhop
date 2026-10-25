@@ -85,21 +85,20 @@ let
   # The `default` listener and the identity llmhop runs as.
   topLevelOptions =
     listenerOptions "default" 8080
-    // staticIdentityOptions {
+    // identityOptions {
       inherit cfg;
       name = "llmhop";
       prefix = "services.llmhop";
     };
 
-  inherit (import ./lib.nix lib)
+  inherit (import ./lib lib)
     credentialSources
     credentialsOption
     hostPort
     identityConfig
-    identityServiceConfig
     mergeCredentialServiceConfig
     mkRegistryAssertion
-    staticIdentityOptions
+    identityOptions
     systemd
     ;
 in
@@ -203,7 +202,7 @@ in
         auxiliary components (gateways, metrics endpoints). Keyed by the owning
         option path (`<backend>.models.<name>` / `<backend>.<component>`) so the
         global uniqueness assertion can name the colliding owners. Written by
-        `lib.nix:mkSharedConfig`; do not set directly.
+        the backend modules; do not set directly.
       '';
     };
 
@@ -216,7 +215,7 @@ in
         auxiliaries routed through llmhop, keyed like `portsRegistry`. Two
         owners of one key would collapse into a single `settings.models` entry
         and misroute silently, so the global uniqueness assertion rejects it
-        and names both owners. Written by `lib.nix:mkSharedConfig`; do not set
+        and names both owners. Written by the backend modules; do not set
         directly.
       '';
     };
@@ -230,8 +229,8 @@ in
         their auxiliary components, keyed the same way as `portsRegistry`. Two
         backends claiming one unit name — most commonly a native backend and its
         `-quadlet` twin, which share a unit prefix — are mutually exclusive, and
-        the global uniqueness assertion names both owners. Written by
-        `lib.nix:mkSharedConfig`; do not set directly.
+        the global uniqueness assertion names both owners. Written by the
+        backend modules; do not set directly.
       '';
     };
   };
@@ -318,11 +317,10 @@ in
           # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited baseline
           # for the sd_notify datagram and the worker sockets.
           serviceConfig = mergeCredentialServiceConfig (
-            systemd.hardenedServiceConfig
             # Named, not `DynamicUser`, so the Quadlet sockets' ACL can grant
             # this user alone. Never give it a `RuntimeDirectory=` of
             # `socketDirectory`: stopping llmhop would delete every socket.
-            // identityServiceConfig cfg
+            systemd.nativeServiceConfig cfg
             // {
               # Pairs with the binary's sd_notify call: the unit reaches `active`
               # only once llmhop serves, so anything ordered after it can assume
@@ -339,7 +337,6 @@ in
               # The listeners arrive from `llmhop-<name>.socket`, so nothing is
               # bound here.
               Sockets = lib.mapAttrsToList (name: _: "llmhop-${name}.socket") cfg.listen;
-              SocketBindDeny = "any";
               PrivateDevices = true;
               UMask = "0077";
               SystemCallFilter = [

@@ -6,7 +6,7 @@
   mkEvalCheck,
 }:
 let
-  inherit (import ../modules/lib lib) renderCliArgs renderCliArgsShell;
+  inherit (import ../modules/lib lib) engines renderCliArgs;
 
   settings = {
     temperature = 0.6;
@@ -31,7 +31,7 @@ mkEvalCheck {
     # Values-style parser: one flag for the whole list, `false` negated via
     # `--no-`, floats and attribute sets kept exact, `null` and `[ ]` dropped.
     testValuesDialect = {
-      expr = renderCliArgs "vllm" settings;
+      expr = renderCliArgs engines.vllm settings;
       expected = [
         "--lora-paths"
         "x=/p/x"
@@ -48,7 +48,7 @@ mkEvalCheck {
 
     # Repeat-style parser: one flag per element, empty lists still dropped.
     testRepeatDialect = {
-      expr = renderCliArgs "llama-cpp" {
+      expr = renderCliArgs engines.llama-cpp {
         lora-paths = [
           "x=/p/x"
           "y=/p/y"
@@ -65,21 +65,8 @@ mkEvalCheck {
 
     # SGLang pairs `--enable-X` with `--disable-X`, so `false` is dropped.
     testNoNegation = {
-      expr = renderCliArgs "sglang" { enable-prefix-caching = false; };
+      expr = renderCliArgs engines.sglang { enable-prefix-caching = false; };
       expected = [ ];
-    };
-
-    # Quadlet joins scalars onto the flag, but a list still needs one argv
-    # entry per element.
-    testQuadletSeparator = {
-      expr = renderCliArgsShell "sglang-quadlet" {
-        port = 30000;
-        worker-urls = [
-          "http://a"
-          "http://b"
-        ];
-      };
-      expected = "'--port=30000' --worker-urls http://a http://b";
     };
   };
 }

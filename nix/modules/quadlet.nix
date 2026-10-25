@@ -1,8 +1,11 @@
+{ lib, ... }:
+let
+  inherit (import ./lib lib) engines quadlet watermark;
+in
 {
   imports = [
     ./core.nix
-    ./quadlet/llama-cpp.nix
-    ./quadlet/vllm.nix
-    ./quadlet/sglang.nix
-  ];
+    watermark.quadlet
+  ]
+  ++ map quadlet.mkBackend (lib.attrNames engines);
 }

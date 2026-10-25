@@ -18,7 +18,6 @@
         ./modules/quadlet.nix
       ];
     };
-    lib = import ./modules/lib lib;
   };
   perSystem =
     {

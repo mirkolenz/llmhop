@@ -24,6 +24,8 @@ let
     else
       configFile;
 
+  baseServiceConfig = native.serviceConfig cfg;
+
   tcpListeners = lib.filterAttrs (_: listener: listener.port != null) cfg.listen;
 
   # A `ListenStream=`, which takes IP literals only.
@@ -43,9 +45,8 @@ let
       type = with lib.types; nullOr port;
       default = defaultPort;
       description = ''
-        TCP port to listen on, registered in the global port registry so a
-        backend reusing it fails evaluation. `null` listens on the unix socket
-        `socket` instead.
+        TCP port to listen on. `null` listens on the unix socket `socket`
+        instead.
       '';
     };
     host = lib.mkOption {
@@ -82,175 +83,135 @@ let
     };
   };
 
-  # The `default` listener and the identity llmhop runs as.
-  topLevelOptions =
+  inherit (import ./lib lib)
+    credentialServiceConfig
+    credentialsOption
+    engines
+    hostPort
+    identityConfig
+    identityOptions
+    native
+    sharedUnitConfig
+    watermark
+    ;
+in
+{
+  imports = [ watermark.native ] ++ map native.mkBackend (lib.attrNames engines);
+
+  meta = {
+    maintainers = with lib.maintainers; [ mirkolenz ];
+    doc = ../../docs/src/internals.md;
+  };
+
+  # The `default` listener and the identity llmhop runs as, beside the rest.
+  options.services.llmhop =
     listenerOptions "default" 8080
     // identityOptions {
       inherit cfg;
       name = "llmhop";
       prefix = "services.llmhop";
-    };
+    }
+    // {
+      enable = lib.mkEnableOption "llmhop reverse proxy";
 
-  inherit (import ./lib lib)
-    credentialSources
-    credentialsOption
-    hostPort
-    identityConfig
-    mergeCredentialServiceConfig
-    mkRegistryAssertion
-    identityOptions
-    systemd
-    ;
-in
-{
-  imports = [
-    ./systemd/llama-cpp.nix
-    ./systemd/vllm.nix
-    ./systemd/sglang.nix
-  ];
-
-  options.services.llmhop = topLevelOptions // {
-    enable = lib.mkEnableOption "llmhop reverse proxy";
-
-    package = lib.mkPackageOption pkgs "llmhop" { } // {
-      default = pkgs.callPackage ../package.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
-    };
-
-    supplementaryGroups = lib.mkOption {
-      type = with lib.types; listOf str;
-      default = [ ];
-      example = [ "inference" ];
-      description = ''
-        Groups llmhop joins through `SupplementaryGroups=`. Every native
-        backend adds its `group`, which owns the sockets of its workers.
-      '';
-    };
-
-    socketDirectory = lib.mkOption {
-      type = lib.types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
-      default = "/run/llmhop";
-      description = ''
-        Directory of every unix socket llmhop serves or connects to: the
-        default path of each socket listener, and one directory per workload
-        without a `port`. Those are `RuntimeDirectory=`s except under a
-        rootless Quadlet user, hence the `/run` prefix.
-        Each path component must start with a letter, digit, or underscore and
-        contain only those characters, dots, and hyphens.
-      '';
-    };
-
-    listen = lib.mkOption {
-      type = lib.types.attrsOf (
-        lib.types.submodule ({ name, ... }: { options = listenerOptions name null; })
-      );
-      default = { };
-      example.caddy.socketGroup = "caddy";
-      description = ''
-        Addresses llmhop serves besides the `default` listener, which the
-        top-level `port`, `host`, `socket`, `socketUser`, `socketGroup` and
-        `socketMode` options define.
-        Each is a `llmhop-<name>.socket` unit handing its socket to llmhop
-        through socket activation. systemd applies the ownership and mode of a
-        unix socket and removes it on stop.
-      '';
-    };
-
-    openFirewall = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Whether to open the `port` of every TCP listener in the host firewall.";
-    };
-
-    credentials = credentialsOption // {
-      description = ''
-        Credentials granted to llmhop through systemd.
-        ${credentialSources "llmhop.client-token"}
-
-        Reference them from `settings` as `''${cred:<name>}`, the same spelling
-        the model backends use: llmhop reads its own config, so the reference
-        expands to the credential's contents rather than to its path.
-      '';
-    };
-
-    settings = lib.mkOption {
-      inherit (format) type;
-      default = { };
-      example = {
-        models = {
-          "gpt-4".url = "https://api.openai.com";
-        };
+      package = lib.mkPackageOption pkgs "llmhop" { } // {
+        default = pkgs.callPackage ../package.nix { };
+        defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       };
-      description = ''
-        Configuration written to the JSON config file passed to llmhop.
-        See the upstream `Config` struct for available fields. `host` and
-        `port` only apply outside socket activation, so the module's
-        listeners come from the options of the same name and `listen` instead.
 
-        The generated file is validated at build time by the binary itself, so
-        unknown keys and malformed model URLs fail `nixos-rebuild` rather than
-        the service.
-      '';
-    };
+      socketDirectory = lib.mkOption {
+        type = lib.types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
+        default = "/run/llmhop";
+        description = ''
+          Directory of every unix socket llmhop serves or connects to: the
+          default path of each socket listener, and one directory per workload
+          without a `port`. Those are `RuntimeDirectory=`s, hence the `/run`
+          prefix.
+          Each path component must start with a letter, digit, or underscore and
+          contain only those characters, dots, and hyphens.
+        '';
+      };
 
-    portsRegistry = lib.mkOption {
-      type = with lib.types; attrsOf port;
-      default = { };
-      internal = true;
-      description = ''
-        Internal registry of host ports reserved by llmhop backends and their
-        auxiliary components (gateways, metrics endpoints). Keyed by the owning
-        option path (`<backend>.models.<name>` / `<backend>.<component>`) so the
-        global uniqueness assertion can name the colliding owners. Written by
-        the backend modules; do not set directly.
-      '';
-    };
+      listen = lib.mkOption {
+        type = lib.types.attrsOf (
+          lib.types.submodule ({ name, ... }: { options = listenerOptions name null; })
+        );
+        default = { };
+        example.caddy.socketGroup = "caddy";
+        description = ''
+          Addresses llmhop serves besides the `default` listener, which the
+          top-level `port`, `host`, `socket`, `socketUser`, `socketGroup` and
+          `socketMode` options define.
+          Each is a `llmhop-<name>.socket` unit handing its socket to llmhop
+          through socket activation. systemd applies the ownership and mode of a
+          unix socket and removes it on stop.
+        '';
+      };
 
-    modelsRegistry = lib.mkOption {
-      type = with lib.types; attrsOf str;
-      default = { };
-      internal = true;
-      description = ''
-        Internal registry of llmhop routing keys claimed by models and by the
-        auxiliaries routed through llmhop, keyed like `portsRegistry`. Two
-        owners of one key would collapse into a single `settings.models` entry
-        and misroute silently, so the global uniqueness assertion rejects it
-        and names both owners. Written by the backend modules; do not set
-        directly.
-      '';
-    };
+      openFirewall = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Whether to open the `port` of every TCP listener in the host firewall.";
+      };
 
-    unitsRegistry = lib.mkOption {
-      type = with lib.types; attrsOf str;
-      default = { };
-      internal = true;
-      description = ''
-        Internal registry of systemd unit names emitted by llmhop backends and
-        their auxiliary components, keyed the same way as `portsRegistry`. Two
-        backends claiming one unit name — most commonly a native backend and its
-        `-quadlet` twin, which share a unit prefix — are mutually exclusive, and
-        the global uniqueness assertion names both owners. Written by the
-        backend modules; do not set directly.
-      '';
+      credentials = credentialsOption // {
+        description = credentialsOption.description + ''
+
+          llmhop reads its own config, so in `settings` the reference expands to
+          the credential's contents rather than to its path.
+        '';
+      };
+
+      claims = lib.mkOption {
+        type = with lib.types; attrsOf (attrsOf (listOf str));
+        default = { };
+        internal = true;
+        example.port."8080" = [
+          "services.llmhop.listen.default"
+          "services.llmhop.vllm.models.qwen3-8b"
+        ];
+        description = ''
+          Resources that only one owner may hold, by kind (`port`, `unit`,
+          `model`, `directory`) and key, each listing the option paths of its
+          owners. An assertion rejects every key with more than one owner.
+        '';
+      };
+
+      settings = lib.mkOption {
+        inherit (format) type;
+        default = { };
+        example = {
+          models = {
+            "gpt-4".url = "https://api.openai.com";
+          };
+        };
+        description = ''
+          Configuration written to the JSON config file passed to llmhop.
+          See the upstream `Config` struct for available fields. `host` and
+          `port` only apply outside socket activation, so the module's
+          listeners come from the options of the same name and `listen` instead.
+
+          The generated file is validated at build time by the binary itself, so
+          unknown keys and malformed model URLs fail `nixos-rebuild` rather than
+          the service.
+        '';
+      };
     };
-  };
 
   config = lib.mkMerge [
     {
-      assertions = [
-        (mkRegistryAssertion {
-          registry = cfg.portsRegistry;
-          resource = "host port";
-        })
-        (mkRegistryAssertion {
-          registry = cfg.unitsRegistry;
-          resource = "systemd unit";
-        })
-        (mkRegistryAssertion {
-          registry = cfg.modelsRegistry;
-          resource = "llmhop routing key";
-        })
-      ];
+      # Backends claim their resources without llmhop too.
+      assertions = lib.concatLists (
+        lib.mapAttrsToList (
+          kind:
+          lib.mapAttrsToList (
+            key: owners: {
+              assertion = lib.length owners < 2;
+              message = "services.llmhop: ${kind} `${key}` is claimed by ${lib.concatStringsSep ", " owners}.";
+            }
+          )
+        ) cfg.claims
+      );
     }
     (lib.mkIf cfg.enable (identityConfig {
       inherit cfg;
@@ -268,12 +229,11 @@ in
             socketMode
             ;
         };
-
-        # llmhop's listeners compete for host ports with every backend worker,
-        # so they participate in the same collision check.
-        portsRegistry = lib.mapAttrs' (
-          name: listener: lib.nameValuePair "llmhop.listen.${name}" listener.port
-        ) tcpListeners;
+        claims.port = lib.mkMerge (
+          lib.mapAttrsToList (name: listener: {
+            ${toString listener.port} = [ "services.llmhop.listen.${name}" ];
+          }) tcpListeners
+        );
       };
 
       networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
@@ -311,16 +271,17 @@ in
           after = [ "network-online.target" ];
           wants = [ "network-online.target" ];
 
-          unitConfig = systemd.sharedUnitConfig;
+          unitConfig = sharedUnitConfig;
 
           # Tighter than the worker baseline: `@resources` syscalls are blocked
           # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited baseline
-          # for the sd_notify datagram and the worker sockets.
-          serviceConfig = mergeCredentialServiceConfig (
-            # Named, not `DynamicUser`, so the Quadlet sockets' ACL can grant
-            # this user alone. Never give it a `RuntimeDirectory=` of
-            # `socketDirectory`: stopping llmhop would delete every socket.
-            systemd.nativeServiceConfig cfg
+          # for the sd_notify datagram and the worker sockets. Named, not
+          # `DynamicUser`, so the Quadlet sockets' ACL can grant this user
+          # alone. Never give it a `RuntimeDirectory=` of `socketDirectory`:
+          # stopping llmhop would delete every socket.
+          serviceConfig =
+            baseServiceConfig
+            // credentialServiceConfig cfg.credentials
             // {
               # Pairs with the binary's sd_notify call: the unit reaches `active`
               # only once llmhop serves, so anything ordered after it can assume
@@ -333,19 +294,12 @@ in
               ];
               Restart = "on-failure";
               RestartSec = 5;
-              SupplementaryGroups = cfg.supplementaryGroups;
               # The listeners arrive from `llmhop-<name>.socket`, so nothing is
               # bound here.
               Sockets = lib.mapAttrsToList (name: _: "llmhop-${name}.socket") cfg.listen;
-              PrivateDevices = true;
               UMask = "0077";
-              SystemCallFilter = [
-                "@system-service"
-                "~@privileged"
-                "~@resources"
-              ];
-            }
-          ) cfg.credentials;
+              SystemCallFilter = baseServiceConfig.SystemCallFilter ++ [ "~@resources" ];
+            };
         };
       };
     })

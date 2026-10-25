@@ -4,7 +4,7 @@ Why the NixOS module in `nix/modules/` works the way the README describes, recor
 
 ## CLI dialects
 
-Two `settings` shapes have no portable rendering, so each backend declares how its parser reads them, keyed by the unsuffixed service name so a native backend and its Quadlet twin share one entry.
+Two `settings` shapes have no portable rendering, so each engine declares how its parser reads them, shared by its native and Quadlet backend.
 
 `negateBools` marks parsers that register a `--no-<key>` twin for every boolean, as argparse's `BooleanOptionalAction` and llama.cpp's paired flags do.
 SGLang instead pairs `--enable-X` with `--disable-X` and rejects `--no-X`.
@@ -23,7 +23,7 @@ Non-string values go through JSON, which keeps `0.6` from becoming `0.600000` as
 
 Native workers start from a `systemd-exec(5)` baseline shared with the llmhop reverse proxy.
 Quadlet workers skip it, because Podman isolates at the container level.
-`SocketBind*` is not part of the baseline, since only workers with a `port` declare a matching `SocketBindAllow`, and it only governs IP sockets, so a worker on a unix socket keeps `SocketBindDeny = "any"`.
+The baseline denies binding any IP socket with `SocketBindDeny = "any"`, which only a worker with a `port` lifts for that port, and which leaves unix sockets alone.
 
 ### GPU relaxations
 
@@ -50,6 +50,7 @@ RCCL reads the same variables, while oneCCL uses `CCL_*` and ignores them.
 Every accelerator stack caches compiled kernels below `$HOME`, which `ProtectSystem = "strict"` makes read-only, so each is redirected into the unit's own cache directory, the one place `systemctl clean` reaches.
 The variables are set unconditionally, since one of an absent stack is never read.
 MIOpen needs two of them, or its kernel database and compiled-kernel cache land under separate roots.
+transformers keeps the remote code of `trust_remote_code` models in `$HF_HOME/modules`, so `HF_MODULES_CACHE` moves it out of the read-only hub cache.
 SYCL and the Intel compute runtime cache their SPIR-V to ISA compilation only when asked to, which turns a multi-minute JIT into a one-time cost.
 
 ## Unix sockets
@@ -66,15 +67,13 @@ Workers of one backend can therefore reach each other's sockets, but not those o
 
 A container user maps to an unpredictable host ID under `UserNS=`, so Quadlet sockets rely on a default ACL `user:<services.llmhop.user>:-wx` on the root, inherited below it.
 That is why llmhop runs as a named user, since no ACL could name a `DynamicUser` in advance.
-The ACL survives, because systemd never chowns these directories, as rootful units run as root and rootless ones use tmpfiles.
+The ACL survives, because systemd never chowns these directories, as the units run as root.
 The kernel masks a new socket's mode with the umask even below a default ACL, and the ACL mask follows the group bits, so `--umask=0007` keeps the ACL's write.
 The owning group's own entry comes from the root's `0711` and grants no write.
 
 Each directory is a `RuntimeDirectory=` of its unit, removed on stop and crash alike, so no stale socket makes a restarted server fail with `EADDRINUSE`, although neither server removes one itself.
 That is also why `socketDirectory` must stay below `/run`.
 A rootful container mounts its directory with `U`, so Podman hands it to the mapped container user, and ACLs survive the `chown`.
-The mode is a default, so `serviceConfig.RuntimeDirectoryMode` can override it.
-A user manager keeps `RuntimeDirectory=` below its `$XDG_RUNTIME_DIR`, which llmhop cannot enter, so rootless containers use a tmpfiles directory owned by the Podman account, cleared by an `ExecStartPre=` through `podman unshare`, since after the `U` chown only that user namespace may delete there.
 
 ## Python backends built from wheels
 
@@ -104,23 +103,34 @@ A shared `StartLimitBurst` of 3 per hour still breaks crash loops, so journald s
 Startup is chained by ascending `name`, because two workers profiling GPU memory on the same device each see it as free and race into an OOM.
 The chain only works because a worker stays `activating` until its server is ready.
 
-`llmhop-notify` comes from this flake rather than `services.llmhop.package`, since it is a module implementation detail and a deployer's llmhop build need not ship it, which `getExe'` would not catch, leaving every worker `activating` until `TimeoutStartSec`.
+A native worker is `Type=exec` with a `postStart` loop that polls `/health` until it answers 200, the readiness idiom of nixpkgs.
+The loop also watches `$MAINPID`, since systemd waits for `ExecStartPost=` to finish even after the main process died, which would otherwise hold a crashed server in `activating` until `TimeoutStartSec`.
 
 ## Fetching
 
 A fetcher mirrors a Quadlet image unit, a oneshot with `RemainAfterExit=`.
 The server `Wants=` its fetcher and is ordered after it, but does not `Requires=` it as a container does its image, since that would propagate every restart by `<backend>-update` to the server, changed model or not.
-The fetcher shares its server's identity, a named user natively and the same `quadlet` identity overrides in a container, so both see the cache under one owner.
+The fetcher shares its server's identity, a named user natively and, in a container, whatever `User=` and `UserNS=` the deployer gives both, so both see the cache under one owner.
 That is why llama.cpp does not use `DynamicUser` either.
+
+A failed download keeps the cache only while it holds the requested revision, a ref of that name or a snapshot of that commit, with `main` standing for the default branch, as huggingface_hub records it.
+llama.cpp names the default branch's ref after the branch, but pins no revision, so any of its refs will do.
 
 The fetcher records the refs and snapshot files of its repositories before downloading and compares them afterwards.
 A change runs `try-restart`, which leaves a stopped server alone, and a failed server is reset and started again.
 Both run with full privileges, since a native fetcher's user may not manage units, and with `--no-block`, since the server is ordered after the fetcher.
 
-`<backend>-update` restarts every fetcher with full privileges, waits for them, and then prunes, deleting repositories no enabled workload references and snapshots that neither a ref nor a pinned `revision` names, then every blob no remaining snapshot resolves to, including the shared blob store of recent `huggingface_hub` releases.
+`<backend>-update` restarts every fetcher with full privileges, one at a time in startup order, so each server restart is queued after that of its predecessor and the startup chain holds.
+It then prunes, deleting repositories no enabled workload references, refs and snapshots of revisions none of them caches, except for llama.cpp, whose refs all name a default branch, then every blob no remaining snapshot resolves to, including the shared blob store of recent `huggingface_hub` releases.
 It only deletes extensionless blobs, so a concurrent download keeps its `.incomplete` files.
-A rootless user's files belong to its subordinate IDs once a container wrote them, so its pruning runs through `podman unshare`.
 Every workload defines the image unit of its image, which the module system merges into one per distinct image, referenced through quadlet-nix's `ref`.
+
+## Claims
+
+Ports, unit names, routing keys and cache directories each admit only one owner, but nothing in NixOS would reject a second one at evaluation.
+A port clash fails at boot, a unit or routing key clash merges silently or fails with an opaque conflict, and a shared cache directory lets one backend prune the other's models.
+So every owner adds its option path to the internal `services.llmhop.claims.<kind>.<key>`, and one assertion per key names all owners of a clash.
+This also keeps a native backend and its Quadlet twin apart, which share unit names and the default cache directory.
 
 ## Directory layout
 
@@ -128,12 +138,12 @@ The layout follows systemd, Hugging Face and the engines' own defaults, and ever
 The shared directory is no `CacheDirectory=`, since systemd ties those to one unit, so `systemctl clean` on any fetcher would wipe every model of the backend, and systemd would chown it recursively whenever an owner differs.
 Fetchers and the update unit write it through `ReadWritePaths=`, while servers only read it, natively through `ProtectSystem=strict`.
 Xet keeps its chunk cache in `xet/` beside `hub/`.
-A rootless container finds its per-unit cache below `~/.cache` through `%C`, as a user unit's `CacheDirectory=` does.
-Each per-unit directory carries its unit's name, which the units registry keeps unique, so `systemctl clean <unit>` removes exactly what that server regenerates.
+Each per-unit directory carries its unit's name, so `systemctl clean <unit>` removes exactly what that server regenerates.
 
 ## Offline servers
 
-`HF_HUB_OFFLINE` makes vLLM and SGLang resolve a repository from the cache without any request.
+`HF_HUB_OFFLINE` makes vLLM and SGLang resolve a repository from the cache without any request, and llama.cpp gets `--offline`.
+Both apply even with `offline = false`, since only the fetcher writes the hub cache.
 `DO_NOT_TRACK` disables vLLM's usage statistics, and `VLLM_HOST_IP` keeps vLLM from deriving its address from a route to a public host, which an offline server lacks.
 A socket server's own network namespace keeps `lo` for NCCL, while the socket stays reachable through the filesystem.
 A native server on a port is limited through the cgroup IP filter to `127.0.0.1` and `::1` rather than all of `localhost`, since `127.0.0.53` is the resolver stub of systemd-resolved.

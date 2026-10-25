@@ -1,53 +1,12 @@
-# The helpers shared by llmhop's modules. Every file contributes to one fixed
-# point, `self`, through which the files reference each other's bindings.
+# The helpers shared by llmhop's modules, each file instantiated once.
 lib:
 let
-  self = lib.fix (
-    self:
-    lib.mergeAttrsList (
-      map (file: import file lib self) [
-        ./common.nix
-        ./engines.nix
-        ./options.nix
-        ./fetch.nix
-        ./units.nix
-        ./quadlet-options.nix
-        ./quadlet.nix
-        ./systemd-options.nix
-        ./systemd.nix
-      ]
-    )
-  );
+  common = import ./common.nix lib;
+  native = import ./native.nix lib common;
+  quadlet = import ./quadlet.nix lib common;
 in
-{
-  inherit (self)
-    baseWorkloadOptions
-    containerRuntimeDirectory
-    credentialDirectory
-    credentialSources
-    credentialsOption
-    enabled
-    hostPort
-    identityConfig
-    identityOptions
-    isRepository
-    mergeCredentialServiceConfig
-    mkRegistryAssertion
-    modelSettings
-    nativeWorkloadArgs
-    quadlet
-    quadletServiceName
-    renderCliArgs
-    renderCliArgsShell
-    repositoriesOption
-    resolveCredentialRefs
-    resolveSettings
-    serviceConfigOption
-    settingsRendering
-    sortedModels
-    systemd
-    unitConfigOption
-    workerUrl
-    workloadUnit
-    ;
+common
+// {
+  inherit native quadlet;
+  watermark = import ./watermark.nix lib { inherit common native quadlet; };
 }

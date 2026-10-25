@@ -139,13 +139,11 @@ The module and the binary are coupled in these places:
 - Every listener is a `llmhop-<name>.socket` unit handed over through socket activation, so llmhop binds nothing itself and runs with `SocketBindDeny=any`.
   The top-level `port`, `host`, `socket`, `socketUser`, `socketGroup` and `socketMode` options define the `default` listener, and each entry of `listen` adds another with the same options.
 - A listener with a `port` binds `host:port`, with `host` an IP literal and `8080` as the `default` port, and `openFirewall` opens it.
-  The port joins the global port registry of the inference backends, so a model reusing it fails evaluation.
 - A listener without a `port` is a unix socket at `socket`, `<socketDirectory>/<name>.sock` by default, with the given owner and mode and removed on stop, so `listen.caddy.socketGroup = "caddy"` grants Caddy access.
   TCP and socket listeners combine freely.
 - The generated config is validated at build time with `llmhop -check`, so a typo fails `nixos-rebuild` rather than the service and the schema lives only in the Go `Config` struct.
   Cross-compiled deployments skip this check.
-- `llmhop-notify` prefixes every native model server, polls its `/health` and reports readiness, so worker units are `Type=notify` too.
-  It exits with the server's status, so a model that dies while loading fails its unit immediately.
+- A native model server's `postStart` polls its `/health`, so the unit stays `activating` until the model is servable, and fails at once if the server exits before.
 
 `nixosModules.default` ships the proxy and the native backends without depending on quadlet-nix, so it also works with [system-manager](https://github.com/numtide/system-manager).
 `nixosModules.quadlet` includes it and adds the container variants `llama-cpp-quadlet`, `vllm-quadlet` and `sglang-quadlet`.
@@ -153,7 +151,7 @@ The module and the binary are coupled in these places:
 ### Inference backends
 
 Each backend exposes a `models` attrset under `services.llmhop.<backend>`, and every entry becomes an isolated worker on a unix socket or loopback port, registered with llmhop automatically.
-All backends can be enabled side by side, but a backend's native and container variants emit the same units, so enable at most one of them.
+All backends can be enabled side by side, while a backend's native and container variants share unit names and the default `cache.directory`, so evaluation rejects any port, unit, routing key or cache directory that two of them claim.
 See the [options reference](https://mirkolenz.github.io/llmhop/) for every option.
 
 ```nix
@@ -183,29 +181,37 @@ services.llmhop = {
 Native workers are hardened system units running as the backend's `user` and `group`, named after the backend by default, optionally pinned with `uid` and `gid`, and declared by the module while they keep their default names.
 llama.cpp comes from nixpkgs, vLLM and SGLang from [prebuilt wheels](#native-vllm-and-sglang-from-prebuilt-wheels).
 Manage them with `systemctl status <backend>-<model>` and `journalctl -u <backend>-<model>`.
-The container variants run through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix), rootful by default or rootless with [`quadlet.user`](#quadlet-execution-and-user-namespaces).
+The container variants run through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) as rootful system units.
 Manage them with `quadletctl`, which finds the manager of each unit, as in `quadletctl systemctl status <unit>`, `quadletctl journalctl <unit> -f`, `quadletctl podman <unit> ps`, `quadletctl list` and `quadletctl shell <unit>`.
 
-A worker stays `activating` until its server answers `/health`, through `llmhop-notify` natively and `Notify=healthy` in a container, with an hour of `TimeoutStartSec` for loading.
+A worker stays `activating` until its server answers `/health`, through `postStart` natively and `Notify=healthy` in a container, with an hour of `TimeoutStartSec` for loading.
 With `startupOrdering`, on by default, workers therefore boot one at a time in ascending `name` order, so two models sharing a GPU do not race into an OOM while profiling memory.
 Servers restart with `Restart=always`.
+
+The module exposes no escape hatches for unit settings, since NixOS merges definitions of the generated units themselves.
+Lists such as `SupplementaryGroups` extend what the module sets, and `lib.mkForce` replaces a setting:
+
+```nix
+systemd.services.vllm-qwen3-8b.serviceConfig.MemoryHigh = "64G";
+virtualisation.quadlet.containers.vllm-qwen3-8b.containerConfig.GroupAdd = [ "keep-groups" ];
+```
 
 #### Listeners
 
 llama.cpp and vLLM models and native watermark detectors default to `port = null`, which binds `<socketDirectory>/<unit>/http.sock`, exposed as the read-only `socket` option.
 `services.llmhop.socketDirectory` defaults to `/run/llmhop`, shared with llmhop's own socket listeners, and must stay below `/run`.
-Only llmhop and the backend's own workers can connect, through the backend's `group` that llmhop joins via `services.llmhop.supplementaryGroups`, or through a default ACL for `services.llmhop.user` on Quadlet sockets.
+Only llmhop and the backend's own workers can connect, through the backend's `group` that llmhop joins, or through a default ACL for `services.llmhop.user` on Quadlet sockets.
 Set `port` to bind `127.0.0.1:<port>` instead, for example to reach a worker without llmhop.
 SGLang has no socket support upstream, so its models need a `port`.
 
 Containers see their socket directory at `/run/llmhop/socket`, mounted with Podman's `U` option, so sockets work with any `User=` and `UserNS=`.
-`quadlet.mountOptions.socket` replaces those options, for example with `[ "U" "z" ]` on SELinux hosts.
+`mountOptions.socket` replaces those options, for example with `[ "U" "z" ]` on SELinux hosts.
 
 #### Fetching and offline servers
 
 Every model runs as two units, the fetcher `<backend>-<model>-fetch`, which downloads everything the server loads, and the offline server `<backend>-<model>`.
 The fetcher runs before its server and stays active, like an image unit, so a restarted server does not fetch again.
-A failed download keeps what the cache holds, as `Policy=newer` keeps a local image.
+A failed download keeps what the cache holds, as `Policy=newer` keeps a local image, as long as it holds the requested revision.
 Fetchers use `hf download` from the backend's package or image, or `llama download`, which resolves quantization tags, split files and the mmproj as `llama-server` would.
 A `model` that is an absolute path is served as is without a fetcher.
 
@@ -227,17 +233,18 @@ Only the fetchers get the backend's `fetch` credentials and environment, such as
 
 ```nix
 services.llmhop.vllm.fetch = {
-  credentials."llmhop.hf-token" = { };
+  credentials."llmhop.hf-token" = null;
   environment.HF_TOKEN_PATH = "\${cred:llmhop.hf-token}";
 };
 ```
 
 llama.cpp reads no token file, so pass `HF_TOKEN` through `fetch.environmentFile`.
 
-Servers get `HF_HUB_OFFLINE`, llama.cpp also `--offline`, and native servers have no DNS resolver.
+Servers only read the cache, so they always get `HF_HUB_OFFLINE`, llama.cpp also `--offline`.
+Native servers also have no DNS resolver.
 On its default unix socket, a server runs without any network, natively in a network namespace of its own and in a container with `Network=none`.
 A native server on a `port` can only reach `127.0.0.1` and `::1`, while a container on a `port` stays in Podman's default network, which publishes the port on loopback, so prefer the socket.
-Set `offline = false` on a model or detector that needs network access, which lifts all of these restrictions for that server alone.
+Set `offline = false` on a model or detector that needs network access, which lifts these network restrictions for that server alone.
 
 Native and container units share this layout, with containers mounting each directory at its host path:
 
@@ -251,9 +258,9 @@ Native and container units share this layout, with containers mounting each dire
 systemd-tmpfiles creates `cache.directory`, which fetchers write and servers only read, in containers through a read-only mount.
 Point it at a data disk for large models, and use the standard `hf cache` tooling on it.
 
-`<backend>-update`, the counterpart of `podman auto-update` for models, restarts every fetcher of its backend on the `fetch.interval` schedule, daily by default.
+`<backend>-update`, the counterpart of `podman auto-update` for models, restarts every fetcher of its backend one after another on the `fetch.interval` schedule, daily by default.
 A fetcher restarts its server when the downloaded revision changed, and starts it if it failed, such as after a first boot without network.
-With `fetch.prune = true`, the update then deletes every repository and revision that no enabled workload references, so the cache must belong to that backend alone.
+With `fetch.prune = true`, the update then deletes every repository and revision that no enabled workload references, including the refs of revisions no longer configured.
 llama.cpp keeps every downloaded quantization of a referenced repository.
 
 Containers do not pull either.
@@ -269,7 +276,9 @@ Features that download at runtime need another source:
 
 #### Settings rendering
 
-`modelSettings` and `settings` are rendered into the server's CLI flags, as explained in the [internals](https://mirkolenz.github.io/llmhop/internals.html#cli-dialects).
+`settings` is rendered into the server's CLI flags, as explained in the [internals](https://mirkolenz.github.io/llmhop/internals.html#cli-dialects).
+The flags derived from the other options, such as the listener and the served model name, are defaults of `settings`, under the backend's `modelSettings`, so a definition replaces them with the usual module priorities.
+llmhop keeps routing to `port` or `socket`, so a changed listener needs a matching route.
 Strings and paths are passed verbatim and everything else as JSON, so `0.6` stays `0.6` and an attribute set becomes the JSON object that options like vLLM's `--speculative-config` parse.
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.
@@ -281,7 +290,7 @@ Strings and paths are passed verbatim and everything else as JSON, so `0.6` stay
 
 #### Quadlet execution and user namespaces
 
-Without `quadlet.user`, quadlet-nix installs system units and Podman runs rootfully:
+quadlet-nix installs system units and Podman runs rootfully:
 
 ```nix
 services.llmhop = {
@@ -299,44 +308,23 @@ services.llmhop = {
 };
 ```
 
-A positive `quadlet.user.uid` runs the units rootless under a dedicated user, which llmhop creates with its group, home, linger and NixOS-allocated subordinate IDs.
-This also avoids [NVIDIA/nvidia-container-toolkit#648](https://github.com/NVIDIA/nvidia-container-toolkit/issues/648), where `nvidia-cdi-hook` fails to read the OCI bundle in some UID-mapped namespaces.
-Every account detail is configurable, and `manage = false` selects an existing account without changing it:
+User namespaces and other [`[Container]` keys](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html#container-units-container) go on the generated containers, the server and its fetcher alike, so both see the cache under one owner:
 
 ```nix
-services.llmhop.vllm-quadlet.quadlet.user = {
-  name = "inference";
-  uid = 503;
-  group = "inference";
-  gid = 503;
-  home = "/var/lib/inference";
-};
-```
-
-To pick the subordinate ID ranges yourself, set `users.users.<name>.subUidRanges` and `subGidRanges` with `autoSubUidGidRange = false`.
-
-Native Quadlet sections exist at backend level and per model, where model settings override individual keys:
-
-```nix
-services.llmhop.vllm-quadlet = {
-  quadlet.containerConfig = {
+virtualisation.quadlet.containers = lib.genAttrs [ "vllm-qwen3-8b" "vllm-qwen3-8b-fetch" ] (_: {
+  containerConfig = {
     User = "1000";
     UserNS = "auto:size=65536";
   };
-  models."qwen3-8b".quadlet.containerConfig.GroupAdd = [ "keep-groups" ];
-  # Cache ownership depends on the selected mapping.
-  cache = {
-    user = "100000";
-    group = "100000";
-    mountOptions = [ "idmap" ];
-  };
+});
+# Cache ownership depends on the selected mapping.
+services.llmhop.vllm-quadlet.cache = {
+  user = "100000";
+  group = "100000";
+  mountOptions = [ "idmap" ];
 };
 ```
 
-`containerConfig` accepts every [upstream `[Container]` key](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html#container-units-container), and `serviceConfig`, `unitConfig`, `quadletConfig` and `extraConfig` are the systemd and Quadlet escape hatches.
-The SGLang gateway has the same options under `gateway.quadlet`.
-A fetcher takes only the identity keys (`User`, `Group`, `GroupAdd`, `UserNS` and the ID maps) of these overrides, so it sees the cache as its server does.
-Set `cache.manage = false` when another module owns the host directory.
 Podman validates incompatible namespace combinations at build time.
 
 ### Native vLLM and SGLang from prebuilt wheels
@@ -485,7 +473,7 @@ buildInputs = [ pkgs.rdma-core ];            # nvshmem, cuFile
 
 Credentials are granted per model, never inherited from a backend, so a compromised worker cannot read another model's keys.
 Assign the same value to several models to share one.
-`credentials.<name>` takes one of three sources, and `${cred:name}` in `settings` or `environment` expands to the read-only credential path:
+Like the `credentials` options of nixpkgs, `credentials.<name>` maps a name to a file, and `${cred:name}` in `settings` or `environment` expands to the read-only credential path:
 
 ```nix
 services.llmhop.llama-cpp.models."qwen3-8b" = {
@@ -493,20 +481,15 @@ services.llmhop.llama-cpp.models."qwen3-8b" = {
   credentials = {
     # A file, loaded with `LoadCredential=`.
     api-keys = "/run/secrets/qwen-api-keys";
-    # An encrypted file, loaded with `LoadCredentialEncrypted=`.
-    tls-key = {
-      source = "/run/secrets/qwen-tls-key.cred";
-      encrypted = true;
-    };
     # The credential of this name in the system credential store, imported with `ImportCredential=`.
-    "llmhop.hf-token" = { };
+    "llmhop.hf-token" = null;
   };
   settings.api-key-file = "\${cred:api-keys}";
 };
 ```
 
-Sources must lie outside the world-readable Nix store, and unknown references fail evaluation.
-Imported credentials come from `/etc/credstore`, `/etc/credstore.encrypted` and the other credential store directories, or from those passed to the system.
+Files must lie outside the world-readable Nix store, and unknown references fail evaluation.
+Imported credentials come from `/etc/credstore`, `/etc/credstore.encrypted` and the other credential store directories, or from those passed to the system, and systemd decrypts encrypted ones.
 The store is shared by every service, so prefix names with their service, as in `llmhop.hf-token`.
 Provision one as a root-only file, or encrypted with the host key and TPM:
 
@@ -516,14 +499,13 @@ systemd-ask-password -n | systemd-creds encrypt --name=llmhop.hf-token - /etc/cr
 ```
 
 systemd refuses an encrypted credential under another name than the one given with `--name`.
-For rootless Quadlets, the user's systemd manager must be able to read the source, and encrypted credentials need `systemd-creds encrypt --user`.
 
 Native workers read credentials from their systemd credential directory, and containers get only their unit's directory mounted at `/run/llmhop/credentials`.
 Root inside a container, rootful or mapped, can read that mount.
 For another `User=`, the user namespace must map the unit owner to that UID, since the module never weakens credential modes, so add an idmapped mount otherwise:
 
 ```nix
-models."qwen3-8b".quadlet.mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+models."qwen3-8b".mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
 ```
 
 vLLM and SGLang take a per-model YAML file through the ordinary file-taking setting `config`, as in `credentials."config.yaml" = "/run/secrets/qwen-vllm.yaml"` with `settings.config = "\${cred:config.yaml}"`.
@@ -559,8 +541,8 @@ The key is the unsigned 64-bit integer credential `vllm.watermark-key`, imported
 (umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key)
 ```
 
-It may also be [encrypted](#inference-server-credentials) or given per service through any credential source, as in `credentials."vllm.watermark-key" = "/run/secrets/watermark-key";`, which is also how two models use different keys.
-The key never enters the Nix store, the command line or the journal, and setting `watermark-config` in `settings` or `key` in `watermark` fails evaluation.
+It may also be [encrypted](#inference-server-credentials) or given per service as a file, as in `credentials."vllm.watermark-key" = "/run/secrets/watermark-key";`, which is also how two models use different keys.
+The key never enters the Nix store, the command line or the journal, and a `key` in `watermark` or in `settings.watermark-config` fails evaluation.
 
 `nix/pkgs/mkVllmWatermark` provides the `serve` command, which merges the key into the `--watermark-config` of `vllm serve` in-process, and the `detect` command.
 Both validate the configuration with vLLM's own `WatermarkConfig`, so a typo fails at startup rather than changing the watermark.
@@ -592,13 +574,13 @@ SGLang and llama.cpp output is only detectable if they implement the same algori
 
 ### llmhop credentials
 
-The generated config lives in the world-readable Nix store, so reference secrets in `services.llmhop.settings` via [`${cred:...}`](#secret-references) and provide them through `credentials`, which takes the same [three sources](#inference-server-credentials) as the model backends.
+The generated config lives in the world-readable Nix store, so reference secrets in `services.llmhop.settings` via [`${cred:...}`](#secret-references) and provide them through `credentials`, which takes the same [files and imports](#inference-server-credentials) as the model backends.
 A path can be any file outside the store, such as [agenix](https://github.com/ryantm/agenix) or [sops-nix](https://github.com/Mic92/sops-nix) outputs.
 
 ```nix
 services.llmhop = {
   credentials = {
-    "llmhop.client-token" = { };
+    "llmhop.client-token" = null;
     openai-key = "/run/secrets/openai-key";
   };
   settings = {

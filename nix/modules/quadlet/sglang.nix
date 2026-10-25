@@ -166,17 +166,8 @@ in
           description = "Container image used for the gateway.";
         };
 
-        tag = lib.mkOption {
-          type = with lib.types; nullOr str;
-          default = "latest";
-          description = "Default tag of the gateway image. Mutually exclusive with `digest`.";
-        };
-
-        digest = lib.mkOption {
-          type = with lib.types; nullOr str;
-          default = null;
-          description = "Immutable digest of the gateway image. Mutually exclusive with `tag`.";
-        };
+        # `latest` while both are null.
+        inherit (quadlet.mkImageOptions { noun = "gateway"; }) tag digest;
 
         bindAddress = lib.mkOption {
           type = lib.types.str;

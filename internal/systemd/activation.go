@@ -1,3 +1,5 @@
+// Package systemd implements the sliver of systemd's service protocol llmhop
+// needs: socket activation and sd_notify(3) readiness.
 package systemd
 
 import (

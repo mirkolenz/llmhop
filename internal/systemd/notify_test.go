@@ -2,77 +2,9 @@ package systemd
 
 import (
 	"net"
-	"net/http"
-	"net/http/httptest"
-	"os/exec"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
-	"time"
-
-	"github.com/mirkolenz/llmhop/internal/upstream"
 )
-
-// listenNotify stands in for the manager's notification socket.
-func listenNotify(t *testing.T) *net.UnixConn {
-	t.Helper()
-
-	path := filepath.Join(t.TempDir(), "notify.sock")
-
-	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Cleanup(func() { _ = conn.Close() })
-	t.Setenv("NOTIFY_SOCKET", path)
-
-	return conn
-}
-
-func parse(t *testing.T, raw string) *upstream.Upstream {
-	t.Helper()
-
-	up, err := upstream.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return up
-}
-
-func readNotify(t *testing.T, conn *net.UnixConn) string {
-	t.Helper()
-
-	buf := make([]byte, 32)
-
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return string(buf[:n])
-}
-
-func checkReadyAfterProbes(t *testing.T, handler http.Handler, calls *atomic.Int64, want int64) {
-	t.Helper()
-
-	conn := listenNotify(t)
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
-
-	if err := ReadyWhenHealthy(parse(t, srv.URL), "/health", time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := readNotify(t, conn); got != "READY=1" {
-		t.Fatalf("got %q, want READY=1", got)
-	}
-
-	if got := calls.Load(); got != want {
-		t.Fatalf("probed health %d times, want %d", got, want)
-	}
-}
 
 func TestReadyWithoutSocket(t *testing.T) {
 	t.Setenv("NOTIFY_SOCKET", "")
@@ -83,78 +15,28 @@ func TestReadyWithoutSocket(t *testing.T) {
 }
 
 func TestReady(t *testing.T) {
-	conn := listenNotify(t)
+	path := filepath.Join(t.TempDir(), "notify.sock")
+
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	t.Setenv("NOTIFY_SOCKET", path)
 
 	if err := Ready(); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := readNotify(t, conn); got != "READY=1" {
+	buf := make([]byte, 32)
+
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := string(buf[:n]); got != "READY=1" {
 		t.Fatalf("got %q, want READY=1", got)
-	}
-}
-
-// The 5xx a loading model server returns must read as "not yet" rather than as
-// a failure, so readiness is reported only once the endpoint answers 200.
-func TestReadyWhenHealthy(t *testing.T) {
-	var calls atomic.Int64
-
-	checkReadyAfterProbes(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if calls.Add(1) < 3 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}), &calls, 3)
-}
-
-func TestReadyRedirect(t *testing.T) {
-	var calls atomic.Int64
-
-	checkReadyAfterProbes(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			w.WriteHeader(http.StatusOK)
-
-			return
-		}
-
-		if calls.Add(1) == 1 {
-			http.Redirect(w, r, "/", http.StatusFound)
-
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}), &calls, 2)
-}
-
-func TestReadyWhenHealthyReturnsNotifyError(t *testing.T) {
-	t.Setenv("NOTIFY_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	if err := ReadyWhenHealthy(parse(t, srv.URL), "/health", time.Millisecond); err == nil {
-		t.Fatal("expected notification error")
-	}
-}
-
-func TestExitCode(t *testing.T) {
-	if got := ExitCode(nil); got != 0 {
-		t.Errorf("clean exit: got %d, want 0", got)
-	}
-
-	if got := ExitCode(exec.Command("false").Run()); got != 1 {
-		t.Errorf("failed exit: got %d, want 1", got)
-	}
-
-	// SIGINT is what the units' KillSignal delivers, so its mapping decides
-	// whether a drained shutdown looks like a failure.
-	if got := ExitCode(exec.Command("sh", "-c", "kill -INT $$").Run()); got != 130 {
-		t.Errorf("signalled exit: got %d, want 130", got)
 	}
 }

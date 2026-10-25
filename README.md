@@ -188,7 +188,7 @@ Manage them with `quadletctl`, which finds the manager of each unit, as in `quad
 
 A worker stays `activating` until its server answers `/health`, through `llmhop-notify` natively and `Notify=healthy` in a container, with an hour of `TimeoutStartSec` for loading.
 With `startupOrdering`, on by default, workers therefore boot one at a time in ascending `name` order, so two models sharing a GPU do not race into an OOM while profiling memory.
-Model servers restart with `Restart=always`.
+Servers restart with `Restart=always`.
 
 #### Listeners
 

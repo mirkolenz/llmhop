@@ -98,7 +98,7 @@ It counts a soname that any file in the environment carries as resolved, since w
 
 ## Lifecycle
 
-Model servers restart with `Restart = "always"`, because vLLM and SGLang catch an EngineCore death, shut down gracefully and exit 0, which `on-failure` would leave dead.
+Servers restart with `Restart = "always"`, because vLLM and SGLang catch an EngineCore death, shut down gracefully and exit 0, which `on-failure` would leave dead.
 A shared `StartLimitBurst` of 3 per hour still breaks crash loops, so journald surfaces the underlying error.
 `TimeoutStartSec` allows an hour for loading and GPU memory profiling, since downloads happen in the fetcher beforehand.
 Startup is chained by ascending `name`, because two workers profiling GPU memory on the same device each see it as free and race into an OOM.

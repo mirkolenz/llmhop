@@ -146,7 +146,6 @@ in
         # Its group owns the worker socket, see `systemd.mkConfig`.
         // nativeServiceConfig cfg
         // {
-          Restart = "on-failure";
           CacheDirectory = unitName;
           WorkingDirectory = unitCacheDirectory unitName;
           EnvironmentFile = environmentFiles cfg workload;
@@ -403,12 +402,6 @@ in
           wrap = withUv;
           previous =
             index: if args.cfg.startupOrdering && index > 0 then lib.elemAt models (index - 1) else null;
-          # These frameworks trap SIGINT to drain the engine and then exit 0, so
-          # `on-failure` would leave a crashed worker dead.
-          serviceConfig = {
-            Restart = "always";
-          }
-          // args.serviceConfig or { };
         }
       );
 

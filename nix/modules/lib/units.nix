@@ -51,11 +51,13 @@ in
   };
 
   # `[Service]` settings of every server. An hour-long `TimeoutStartSec`
-  # covers loading a large model plus GPU memory profiling, and
-  # `RestartSec = 30` debounces crash loops.
+  # covers loading a large model plus GPU memory profiling, `RestartSec = 30`
+  # debounces crash loops, and `always` restarts vLLM and SGLang, which shut
+  # down gracefully and exit 0 when their engine dies.
   serverServiceConfig = cfg: {
     TimeoutStartSec = 3600;
     RestartSec = 30;
+    Restart = "always";
     LimitNOFILE = cfg.openFilesLimit;
   };
 

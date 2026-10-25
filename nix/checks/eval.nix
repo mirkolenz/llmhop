@@ -1055,8 +1055,8 @@ let
         exposed = containsAll [ "0.0.0.0" ] nativeVllmDetector.serviceConfig.ExecStart;
         registered = nativeVllm.services.llmhop.portsRegistry."vllm.detectors.watermark";
         routed = nativeVllm.services.llmhop.settings.models.watermark;
-        # An auxiliary service, so no GPU access and no state directory, and a
-        # plain `on-failure` rather than the worker's `always`.
+        # An auxiliary service, so no GPU access and no state directory, but
+        # restarted like every server.
         restart = nativeVllmDetector.serviceConfig.Restart;
         state = nativeVllmDetector.serviceConfig ? StateDirectory;
         devices = nativeVllmDetector.serviceConfig.PrivateDevices or null;
@@ -1070,7 +1070,7 @@ let
           url = "http://127.0.0.1:21002";
           unlisted = true;
         };
-        restart = "on-failure";
+        restart = "always";
         state = false;
         devices = null;
       };

@@ -234,14 +234,8 @@ in
         "healthStartPeriod"
       ]
       // {
-        serviceConfig =
-          serverServiceConfig cfg
-          // {
-            # `Restart = "always"` overrides quadlet-nix's `on-failure` default;
-            # see the module internals documentation.
-            Restart = "always";
-          }
-          // serviceConfig;
+        # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
+        serviceConfig = serverServiceConfig cfg // serviceConfig;
         containerConfig = {
           Notify = "healthy";
           HealthCmd = "curl --fail --silent --show-error ${lib.optionalString healthTLS "--insecure "}${

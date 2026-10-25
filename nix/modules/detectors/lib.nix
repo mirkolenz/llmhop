@@ -139,7 +139,6 @@ in
         unit = unitName backend detector;
         collection = "detectors";
         workload = detector;
-        serviceConfig.Restart = "on-failure";
       }
     );
 }

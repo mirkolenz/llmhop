@@ -110,6 +110,145 @@ let
   # The listener of a native server, on its host or its socket.
   listen = workload: { inherit (workload) host port socket; };
 
+  # The units of the workload of `entry`: its offline server and the
+  # fetcher it starts after. The `environment` and `serviceConfig` of
+  # `entry` extend the server's. See "Offline servers" and "Python
+  # backends built from wheels" in the module internals documentation.
+  units =
+    {
+      engine,
+      cfg,
+      hook,
+      pkgs,
+      utils,
+    }:
+    entry:
+    let
+      inherit (engine.native) uv;
+      inherit (entry) workload;
+      inherit (workload) unit;
+      fetcher = fetcherOf workload;
+      fetch = mkFetcher {
+        inherit
+          engine
+          cfg
+          hook
+          workload
+          ;
+        server = unit;
+        fetcher = engine.native.fetcher workload.package;
+        # `%d` names the credential directory in `Environment=` too.
+        credentialDirectory = "%d";
+      };
+      offline = lib.optionalAttrs workload.offline;
+      # A socket's own network namespace, or else loopback only, unless
+      # the server listens beyond it.
+      network =
+        if workload.socket != null then
+          { UMask = socketUMask; } // offline { PrivateNetwork = true; }
+        else
+          {
+            UMask = "0077";
+          }
+          // lib.optionalAttrs (workload.offline && isLoopback workload.host) {
+            IPAddressDeny = "any";
+            # Not `localhost`, whose `127.0.0.0/8` includes the resolver
+            # stub of systemd-resolved.
+            IPAddressAllow = [
+              "127.0.0.1"
+              "::1"
+            ];
+          };
+    in
+    [
+      (lib.nameValuePair unit {
+        inherit (entry) description;
+        path = lib.optionals uv (
+          with pkgs;
+          [
+            stdenv.cc
+            ninja
+            bash
+          ]
+        );
+        wantedBy = [ "multi-user.target" ];
+        wants = fetcher;
+        after = fetcher ++ entry.after;
+        environment = serverEnvironment {
+          inherit engine cfg workload;
+          environment = {
+            HOME = unitCacheDirectory unit;
+          }
+          // lib.optionalAttrs uv {
+            LD_LIBRARY_PATH = "/run/opengl-driver/lib";
+            TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
+          }
+          // entry.environment;
+        };
+        # Holds the unit in `activating` until the server answers `/health`
+        # with 200, and fails it once the server exits before that.
+        postStart = ''
+          while kill -0 "$MAINPID" 2>/dev/null; do
+            status=$(${lib.getExe pkgs.curl} --silent --output /dev/null --write-out '%{http_code}' --max-time 10 ${healthTarget (listen workload)} || true)
+            if [[ $status == 200 ]]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the server exited before it answered /health" >&2
+          exit 1
+        '';
+        unitConfig = sharedUnitConfig;
+        serviceConfig =
+          serverServiceConfig cfg workload
+          # Its group owns the worker socket, which every client joins.
+          // serviceConfig cfg
+          // {
+            CacheDirectory = unit;
+            EnvironmentFile = environmentFiles cfg workload;
+          }
+          // offline {
+            InaccessiblePaths = [
+              "-/run/nscd"
+              "-/run/systemd/resolve"
+            ];
+          }
+          // network
+          // entry.serviceConfig
+          // {
+            Type = "exec";
+            ExecStart = lib.replaceStrings [ credentialPlaceholder ] [ "%d" ] (
+              utils.escapeSystemdExecArgs (
+                apiKeyWrapper pkgs.runtimeShell engine credentialPlaceholder workload
+                ++ entry.command
+                ++ workloadArgs engine credentialPlaceholder workload
+              )
+            );
+          };
+      })
+    ]
+    # The fetcher shares its server's identity and hub, with network access
+    # and the backend's `fetch` credentials.
+    ++ lib.optional (fetches workload) (
+      lib.nameValuePair (fetchUnit unit) {
+        description = "Fetch the models of ${unit}";
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        environment = fetch.environment // {
+          HOME = "/tmp";
+        };
+        serviceConfig =
+          serviceConfig cfg
+          // fetch.serviceConfig
+          // {
+            ReadWritePaths = [ cfg.cache.directory ];
+            UMask = "0077";
+            EnvironmentFile = fetch.environmentFile;
+            ExecStart = pkgs.writeShellScript (fetchUnit unit) fetch.script;
+          };
+      }
+    );
+
   # The NixOS module of the native backend of the engine `name`. Each model
   # runs its internal `command`, which another module may replace, and the
   # internal `entries` add further workloads, each
@@ -126,7 +265,6 @@ let
       engine = engines.${name};
       inherit (engine.native) uv;
       cfg = config.services.llmhop.${name};
-      hook = fetchHook pkgs;
       entry =
         e:
         {
@@ -157,137 +295,6 @@ let
           map modelEntry (sortedWorkloads cfg.models)
         )
         ++ map entry cfg.entries;
-
-      # The units of the workload of `entry`: its offline server and the
-      # fetcher it starts after. The `environment` and `serviceConfig` of
-      # `entry` extend the server's. See "Offline servers" and "Python
-      # backends built from wheels" in the module internals documentation.
-      units =
-        entry:
-        let
-          inherit (entry) workload;
-          inherit (workload) unit;
-          fetcher = fetcherOf workload;
-          fetch = mkFetcher {
-            inherit
-              engine
-              cfg
-              hook
-              workload
-              ;
-            server = unit;
-            fetcher = engine.native.fetcher workload.package;
-            # `%d` names the credential directory in `Environment=` too.
-            credentialDirectory = "%d";
-          };
-          offline = lib.optionalAttrs workload.offline;
-          # A socket's own network namespace, or else loopback only, unless
-          # the server listens beyond it.
-          network =
-            if workload.socket != null then
-              { UMask = socketUMask; } // offline { PrivateNetwork = true; }
-            else
-              {
-                UMask = "0077";
-              }
-              // lib.optionalAttrs (workload.offline && isLoopback workload.host) {
-                IPAddressDeny = "any";
-                # Not `localhost`, whose `127.0.0.0/8` includes the resolver
-                # stub of systemd-resolved.
-                IPAddressAllow = [
-                  "127.0.0.1"
-                  "::1"
-                ];
-              };
-        in
-        [
-          (lib.nameValuePair unit {
-            inherit (entry) description;
-            path = lib.optionals uv (
-              with pkgs;
-              [
-                stdenv.cc
-                ninja
-                bash
-              ]
-            );
-            wantedBy = [ "multi-user.target" ];
-            wants = fetcher;
-            after = fetcher ++ entry.after;
-            environment = serverEnvironment {
-              inherit engine cfg workload;
-              environment = {
-                HOME = unitCacheDirectory unit;
-              }
-              // lib.optionalAttrs uv {
-                LD_LIBRARY_PATH = "/run/opengl-driver/lib";
-                TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
-              }
-              // entry.environment;
-            };
-            # Holds the unit in `activating` until the server answers `/health`
-            # with 200, and fails it once the server exits before that.
-            postStart = ''
-              while kill -0 "$MAINPID" 2>/dev/null; do
-                status=$(${lib.getExe pkgs.curl} --silent --output /dev/null --write-out '%{http_code}' --max-time 10 ${healthTarget (listen workload)} || true)
-                if [[ $status == 200 ]]; then
-                  exit 0
-                fi
-                sleep 1
-              done
-              echo "the server exited before it answered /health" >&2
-              exit 1
-            '';
-            unitConfig = sharedUnitConfig;
-            serviceConfig =
-              serverServiceConfig cfg workload
-              # Its group owns the worker socket, which every client joins.
-              // serviceConfig cfg
-              // {
-                CacheDirectory = unit;
-                EnvironmentFile = environmentFiles cfg workload;
-              }
-              // offline {
-                InaccessiblePaths = [
-                  "-/run/nscd"
-                  "-/run/systemd/resolve"
-                ];
-              }
-              // network
-              // entry.serviceConfig
-              // {
-                Type = "exec";
-                ExecStart = lib.replaceStrings [ credentialPlaceholder ] [ "%d" ] (
-                  utils.escapeSystemdExecArgs (
-                    apiKeyWrapper pkgs.runtimeShell engine credentialPlaceholder workload
-                    ++ entry.command
-                    ++ workloadArgs engine credentialPlaceholder workload
-                  )
-                );
-              };
-          })
-        ]
-        # The fetcher shares its server's identity and hub, with network access
-        # and the backend's `fetch` credentials.
-        ++ lib.optional (fetches workload) (
-          lib.nameValuePair (fetchUnit unit) {
-            description = "Fetch the models of ${unit}";
-            wants = [ "network-online.target" ];
-            after = [ "network-online.target" ];
-            environment = fetch.environment // {
-              HOME = "/tmp";
-            };
-            serviceConfig =
-              serviceConfig cfg
-              // fetch.serviceConfig
-              // {
-                ReadWritePaths = [ cfg.cache.directory ];
-                UMask = "0077";
-                EnvironmentFile = fetch.environmentFile;
-                ExecStart = pkgs.writeShellScript (fetchUnit unit) fetch.script;
-              };
-          }
-        );
     in
     {
       options.services.llmhop.${name} =
@@ -359,7 +366,19 @@ let
 
       config = lib.mkIf cfg.enable (
         lib.mkMerge [
-          { systemd.services = lib.listToAttrs (lib.concatMap units entries); }
+          {
+            systemd.services = lib.listToAttrs (
+              lib.concatMap (units {
+                inherit
+                  engine
+                  cfg
+                  pkgs
+                  utils
+                  ;
+                hook = fetchHook pkgs;
+              }) entries
+            );
+          }
           # Every socket client joins `group`, which owns the worker sockets.
           {
             users.users = lib.mkIf (lib.any (e: e.workload.socket != null) entries) (

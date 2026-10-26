@@ -126,21 +126,23 @@ let
       package = fakeVllm;
       fetch.credentials."llmhop.hf-token" = null;
       fetch.environment.HF_TOKEN_PATH = "\${cred:llmhop.hf-token}";
-      models.local = {
-        model = "/srv/models/local";
-        port = 21004;
-        offline = false;
-      };
-      models.test = {
-        model = "example/test";
-        revision = "v1";
-        port = 21001;
-      };
-      models.marked = {
-        model = "example/marked";
-        port = 21003;
-        inherit watermark;
-        credentials."vllm.watermark-key" = watermarkKey;
+      models = {
+        local = {
+          model = "/srv/models/local";
+          port = 21004;
+          offline = false;
+        };
+        test = {
+          model = "example/test";
+          revision = "v1";
+          port = 21001;
+        };
+        marked = {
+          model = "example/marked";
+          port = 21003;
+          inherit watermark;
+          credentials."vllm.watermark-key" = watermarkKey;
+        };
       };
       detectors.watermark = {
         tokenizer = "example/test";

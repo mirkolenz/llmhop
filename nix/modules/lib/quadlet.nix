@@ -36,6 +36,7 @@ let
   containerRuntimeDirectory = "/run/llmhop";
   credentialDirectory = "${containerRuntimeDirectory}/credentials";
   containerSocketDirectory = "${containerRuntimeDirectory}/socket";
+  fetchScriptPath = "${containerRuntimeDirectory}/fetch.sh";
 
   mountSuffix = options: lib.optionalString (options != [ ]) ":${lib.concatStringsSep "," options}";
 
@@ -123,6 +124,130 @@ let
     };
   };
 
+  # The Quadlet configuration of the workload of `entry`: its offline
+  # server, which runs the `arguments` of `entry` followed by its settings,
+  # its fetcher, and the image unit pulling for both. See "Offline servers"
+  # in the module internals documentation.
+  quadletConfig =
+    {
+      name,
+      backend,
+      engine,
+      cfg,
+      hook,
+      quadlet,
+    }:
+    entry:
+    let
+      inherit (entry) workload;
+      inherit (workload) unit;
+      fetcher = fetcherOf workload;
+      # A host directory mounted at the same path.
+      cacheMount =
+        directory: options: "${directory}:${directory}${mountSuffix (options ++ cfg.cache.mountOptions)}";
+      fetch = mkFetcher {
+        inherit
+          engine
+          cfg
+          hook
+          workload
+          credentialDirectory
+          ;
+        inherit (engine.quadlet) fetcher;
+        server = quadlet.containers.${unit}.serviceName;
+      };
+      image = imageUnit {
+        inherit (quadlet) images;
+        inherit (cfg) image;
+        inherit (workload) digest;
+        prefix = name;
+        tag =
+          if workload.tag != null && workload.digest != null then
+            throw "services.llmhop.${backend}: `${workload.name}` sets both `tag` and `digest`."
+          else
+            lib.defaultTo cfg.tag workload.tag;
+      };
+      credentials = credentialMount workload.mountOptions.credentials;
+      # A socket in a mounted directory and, offline, no network, or else
+      # the published port.
+      network =
+        if workload.socket != null then
+          {
+            # Quadlet's own `Umask=` is newer than podman 6.1.
+            PodmanArgs = [ "--umask=${socketUMask}" ];
+          }
+          // lib.optionalAttrs workload.offline { Network = "none"; }
+        else
+          { PublishPort = [ "${hostPort workload.host workload.port}:${toString engine.quadlet.port}" ]; };
+      # The entrypoint of `entry`, through the API key script if any.
+      entrypoint = apiKeyWrapper "/bin/sh" engine credentialDirectory workload ++ entry.entrypoint;
+    in
+    {
+      # Defined alike by every workload that shares the image.
+      inherit (image) images;
+      containers = {
+        ${unit} = {
+          # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
+          serviceConfig = serverServiceConfig cfg workload;
+          unitConfig = sharedUnitConfig // {
+            Wants = fetcher;
+            After = fetcher ++ entry.after;
+          };
+          containerConfig =
+            baseContainerConfig
+            // image.containerConfig (workload.digest == null)
+            // {
+              Entrypoint = lib.toJSON entrypoint;
+              Notify = "healthy";
+              HealthCmd = "curl --fail --silent --show-error ${healthTarget (listen engine workload)}";
+              HealthStartPeriod = "30m";
+              HealthInterval = "10s";
+              HealthTimeout = "5s";
+              Volume = [
+                (cacheMount cfg.cache.directory [ "ro" ])
+                (cacheMount (unitCacheDirectory unit) [ ])
+              ]
+              ++ entry.mounts
+              # `U` hands the directory to whatever host UID the container
+              # user maps to, so the socket works under any `User=` and
+              # `UserNS=`.
+              ++ lib.optional (workload.socket != null) "${dirOf workload.socket}:${containerSocketDirectory}:U"
+              ++ credentials workload.credentials;
+              EnvironmentFile = environmentFiles cfg workload;
+              Environment = serverEnvironment {
+                inherit engine cfg workload;
+                environment = engine.quadlet.environment // entry.environment;
+              };
+              Exec = lib.escapeShellArgs (entry.arguments ++ workloadArgs engine credentialDirectory workload);
+            }
+            // network
+            // entry.containerConfig;
+        };
+      }
+      // lib.optionalAttrs (fetches workload) {
+        ${fetchUnit unit} = {
+          inherit (fetch) serviceConfig;
+          unitConfig = sharedUnitConfig;
+          containerConfig =
+            baseContainerConfig
+            // image.containerConfig false
+            // {
+              Entrypoint = lib.toJSON [
+                "/bin/sh"
+                fetchScriptPath
+              ];
+              Volume = [
+                (cacheMount cfg.cache.directory [ ])
+                "${builtins.toFile "fetch.sh" fetch.script}:${fetchScriptPath}:ro"
+              ]
+              ++ credentials cfg.fetch.credentials;
+              EnvironmentFile = fetch.environmentFile;
+              Environment = fetch.environment;
+            };
+        };
+      };
+    };
+
   # The NixOS module of the Quadlet backend of the engine `name`, under
   # `services.llmhop.<name>-quadlet`. Each model runs its internal
   # `container`, which another module may replace, and the internal `entries`
@@ -139,9 +264,7 @@ let
       engine = engines.${name};
       backend = "${name}-quadlet";
       cfg = config.services.llmhop.${backend};
-      hook = fetchHook pkgs;
-      inherit (config.virtualisation.quadlet) containers images;
-      inherit (engine.quadlet) port;
+      inherit (config.virtualisation) quadlet;
       entry =
         e:
         {
@@ -156,147 +279,28 @@ let
         // e;
       modelEntry =
         model:
-        let
-          container = entry model.container;
-        in
-        container
-        // {
-          workload = model;
-          environment = distributedEnvironment;
-          containerConfig = {
-            AddDevice = model.devices;
-            ShmSize = model.shmSize;
-            Ulimit = "host";
+        entry (
+          model.container
+          // {
+            workload = model;
+            environment = distributedEnvironment;
+            containerConfig = {
+              AddDevice = model.devices;
+              ShmSize = model.shmSize;
+              Ulimit = "host";
+            }
+            // model.container.containerConfig or { };
           }
-          // container.containerConfig;
-        };
+        );
       entries =
-        chainEntries cfg.startupOrdering (e: "${containers.${e.workload.unit}.serviceName}.service") (
-          map modelEntry (sortedWorkloads cfg.models)
-        )
+        chainEntries cfg.startupOrdering (
+          e: "${quadlet.containers.${e.workload.unit}.serviceName}.service"
+        ) (map modelEntry (sortedWorkloads cfg.models))
         ++ map entry cfg.entries;
       base = backendOptions {
         serviceName = name;
         inherit engine;
       };
-
-      fetchScriptPath = "${containerRuntimeDirectory}/fetch.sh";
-      # A host directory mounted at the same path.
-      cacheMount =
-        directory: options: "${directory}:${directory}${mountSuffix (options ++ cfg.cache.mountOptions)}";
-
-      # The Quadlet configuration of the workload of `entry`: its offline
-      # server, which runs the `arguments` of `entry` followed by its settings,
-      # its fetcher, and the image unit pulling for both. See "Offline servers"
-      # in the module internals documentation.
-      quadletConfig =
-        entry:
-        let
-          inherit (entry) workload;
-          inherit (workload) unit;
-          fetcher = fetcherOf workload;
-          fetch = mkFetcher {
-            inherit
-              engine
-              cfg
-              hook
-              workload
-              credentialDirectory
-              ;
-            inherit (engine.quadlet) fetcher;
-            server = containers.${unit}.serviceName;
-          };
-          image = imageUnit {
-            inherit images;
-            inherit (cfg) image;
-            inherit (workload) digest;
-            prefix = name;
-            tag =
-              if workload.tag != null && workload.digest != null then
-                throw "services.llmhop.${backend}: `${workload.name}` sets both `tag` and `digest`."
-              else
-                lib.defaultTo cfg.tag workload.tag;
-          };
-          credentials = credentialMount workload.mountOptions.credentials;
-          # A socket in a mounted directory and, offline, no network, or else
-          # the published port.
-          network =
-            if workload.socket != null then
-              {
-                # Quadlet's own `Umask=` is newer than podman 6.1.
-                PodmanArgs = [ "--umask=${socketUMask}" ];
-              }
-              // lib.optionalAttrs workload.offline { Network = "none"; }
-            else
-              { PublishPort = [ "${hostPort workload.host workload.port}:${toString port}" ]; };
-          # The entrypoint of `entry`, through the API key script if any.
-          entrypoint = apiKeyWrapper "/bin/sh" engine credentialDirectory workload ++ entry.entrypoint;
-        in
-        {
-          # Defined alike by every workload that shares the image.
-          inherit (image) images;
-          containers = {
-            ${unit} = {
-              # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
-              serviceConfig = serverServiceConfig cfg workload;
-              unitConfig = sharedUnitConfig // {
-                Wants = fetcher;
-                After = fetcher ++ entry.after;
-              };
-              containerConfig =
-                baseContainerConfig
-                // image.containerConfig (workload.digest == null)
-                // {
-                  Entrypoint = lib.toJSON entrypoint;
-                  Notify = "healthy";
-                  HealthCmd = "curl --fail --silent --show-error ${healthTarget (listen engine workload)}";
-                  HealthStartPeriod = "30m";
-                  HealthInterval = "10s";
-                  HealthTimeout = "5s";
-                  Volume = [
-                    (cacheMount cfg.cache.directory [ "ro" ])
-                    (cacheMount (unitCacheDirectory unit) [ ])
-                  ]
-                  ++ entry.mounts
-                  # `U` hands the directory to whatever host UID the container
-                  # user maps to, so the socket works under any `User=` and
-                  # `UserNS=`.
-                  ++ lib.optional (workload.socket != null) "${dirOf workload.socket}:${containerSocketDirectory}:U"
-                  ++ credentials workload.credentials;
-                  EnvironmentFile = environmentFiles cfg workload;
-                  Environment = serverEnvironment {
-                    inherit engine cfg workload;
-                    environment = engine.quadlet.environment // entry.environment;
-                  };
-                  Exec = lib.escapeShellArgs (entry.arguments ++ workloadArgs engine credentialDirectory workload);
-                }
-                // network
-                // entry.containerConfig;
-            };
-          }
-          // lib.optionalAttrs (fetches workload) {
-            ${fetchUnit unit} = {
-              inherit (fetch) serviceConfig;
-              unitConfig = sharedUnitConfig;
-              containerConfig =
-                baseContainerConfig
-                // image.containerConfig false
-                // {
-                  Entrypoint = lib.toJSON [
-                    "/bin/sh"
-                    fetchScriptPath
-                  ];
-                  Volume = [
-                    (cacheMount cfg.cache.directory [ ])
-                    "${builtins.toFile "fetch.sh" fetch.script}:${fetchScriptPath}:ro"
-                  ]
-                  ++ credentials cfg.fetch.credentials;
-                  EnvironmentFile = fetch.environmentFile;
-                  Environment = fetch.environment;
-                };
-            };
-          };
-        };
     in
     {
       options.services.llmhop.${backend} = base // {
@@ -406,7 +410,18 @@ let
             # Their number depends on the configuration, so they merge below
             # fixed attributes, since a `mkMerge` at the top level would
             # recurse into the configuration it defines.
-            virtualisation.quadlet = lib.mkMerge (map quadletConfig entries);
+            virtualisation.quadlet = lib.mkMerge (
+              map (quadletConfig {
+                inherit
+                  name
+                  backend
+                  engine
+                  cfg
+                  quadlet
+                  ;
+                hook = fetchHook pkgs;
+              }) entries
+            );
             systemd.tmpfiles.settings."10-${name}" = lib.mkMerge (
               map (e: cacheDirectoryRule cfg.cache (unitCacheDirectory e.workload.unit)) entries
             );

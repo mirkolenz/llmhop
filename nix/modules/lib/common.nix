@@ -426,6 +426,32 @@ rec {
     engine: repository:
     if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
 
+  # Directory of `repository` in the hub cache of `cfg`.
+  repoDirectory = cfg: repository: "${hubDirectory cfg}/${repoCacheName repository.repo}";
+
+  # A shell test passing if the hub cache of `cfg` holds the revision of
+  # `repository`, or any ref without one.
+  cachedTest =
+    engine: cfg: repository:
+    let
+      directory = repoDirectory cfg repository;
+      revision = cachedRevision engine repository;
+    in
+    if revision == null then
+      "test -d ${lib.escapeShellArg "${directory}/refs"}"
+    else
+      "test -e ${lib.escapeShellArg "${directory}/refs/${revision}"} || test -d ${lib.escapeShellArg "${directory}/snapshots/${revision}"}";
+
+  # The hub cache entries pruning keeps for `repository`, its directory and
+  # the revision it caches.
+  pruneEntries =
+    engine: repository:
+    let
+      name = repoCacheName repository.repo;
+      revision = cachedRevision engine repository;
+    in
+    [ name ] ++ lib.optional (revision != null) "${name}/${revision}";
+
   # The hook of every fetcher, built once per backend. See `mkFetcher`.
   fetchHook =
     pkgs:
@@ -495,9 +521,8 @@ rec {
       credentialDirectory,
     }:
     let
-      directory = repository: "${hubDirectory cfg}/${repoCacheName repository.repo}";
       args = lib.escapeShellArgs (
-        [ "${server}.service" ] ++ lib.unique (map directory workload.repositories)
+        [ "${server}.service" ] ++ lib.unique (map (repoDirectory cfg) workload.repositories)
       );
     in
     {
@@ -516,20 +541,9 @@ rec {
       environmentFile = lib.optional (cfg.fetch.environmentFile != null) cfg.fetch.environmentFile;
       script =
         "set -e\n"
-        + lib.concatMapStrings (
-          repository:
-          let
-            revision = cachedRevision engine repository;
-            cached =
-              if revision == null then
-                "test -d ${lib.escapeShellArg "${directory repository}/refs"}"
-              else
-                "test -e ${lib.escapeShellArg "${directory repository}/refs/${revision}"} || test -d ${lib.escapeShellArg "${directory repository}/snapshots/${revision}"}";
-          in
-          ''
-            ${lib.escapeShellArgs (engine.fetch fetcher repository)} || ${cached}
-          ''
-        ) workload.repositories;
+        + lib.concatMapStrings (repository: ''
+          ${lib.escapeShellArgs (engine.fetch fetcher repository)} || ${cachedTest engine cfg repository}
+        '') workload.repositories;
     };
 
   # The tmpfiles rule of the root of every socket, which anyone may pass but
@@ -642,29 +656,21 @@ rec {
       workloads = map (e: e.workload) entries;
       # Every repository and the revision each of them caches.
       pruneKeep = lib.unique (
-        lib.concatMap (
-          repository:
-          let
-            name = repoCacheName repository.repo;
-            revision = cachedRevision engine repository;
-          in
-          [ name ] ++ lib.optional (revision != null) "${name}/${revision}"
-        ) (lib.concatMap (w: w.repositories) workloads)
+        lib.concatMap (pruneEntries engine) (lib.concatMap (w: w.repositories) workloads)
       );
       # The routing key, the units and the port of a workload.
       workloadClaims =
         workload:
-        let
-          owners = [ workload.owner ];
-        in
         {
-          model.${workload.name} = owners;
+          model.${workload.name} = [ workload.owner ];
           unit = {
-            ${workload.unit} = owners;
+            ${workload.unit} = [ workload.owner ];
           }
-          // lib.optionalAttrs (fetches workload) { ${fetchUnit workload.unit} = owners; };
+          // lib.optionalAttrs (fetches workload) { ${fetchUnit workload.unit} = [ workload.owner ]; };
         }
-        // lib.optionalAttrs (workload.port != null) { port.${toString workload.port} = owners; };
+        // lib.optionalAttrs (workload.port != null) {
+          port.${toString workload.port} = [ workload.owner ];
+        };
       updateCommands =
         map (
           fetcher:
@@ -700,23 +706,24 @@ rec {
       # and what clients send.
       services.llmhop.endpoints = lib.mkMerge (
         map (
-          e:
-          let
-            w = e.workload;
-          in
+          { workload, unlisted, ... }:
           {
-            ${w.name} = {
-              inherit (w)
+            ${workload.name} = {
+              inherit (workload)
                 name
                 owner
                 socket
                 ;
-              inherit (e) unlisted;
+              inherit unlisted;
               engine = serviceName;
-              url = if w.socket != null then "unix://${w.socket}" else "http://${hostPort w.host w.port}";
+              url =
+                if workload.socket != null then
+                  "unix://${workload.socket}"
+                else
+                  "http://${hostPort workload.host workload.port}";
               # Reachable other than through loopback or the socket.
-              exposed = w.socket == null && (w.openFirewall || !isLoopback w.host);
-              apiKey = w.apiKey or null;
+              exposed = workload.socket == null && (workload.openFirewall || !isLoopback workload.host);
+              apiKey = workload.apiKey or null;
             };
           }
         ) entries

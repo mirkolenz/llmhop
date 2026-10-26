@@ -17,7 +17,7 @@ let
   # and environment variables they name do not exist in a build sandbox.
   validatedConfigFile =
     if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
-      pkgs.runCommand "llmhop.json" { } ''
+      pkgs.runCommandLocal "llmhop.json" { } ''
         ${lib.getExe cfg.package} -check -config ${configFile}
         cp ${configFile} $out
       ''

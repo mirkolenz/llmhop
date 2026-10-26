@@ -50,6 +50,9 @@ func main() {
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Closes idle keep-alive connections, which would otherwise pin a
+		// goroutine and a file descriptor each indefinitely.
+		IdleTimeout: 2 * time.Minute,
 	}
 
 	for _, ln := range listeners {

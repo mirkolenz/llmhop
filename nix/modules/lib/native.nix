@@ -3,7 +3,6 @@ lib: common:
 let
   inherit (lib) mkOption types;
   inherit (common)
-    apiKeyWrapper
     backendOptions
     chainEntries
     engines
@@ -20,6 +19,8 @@ let
     modelModule
     modelsOption
     distributedEnvironment
+    renderCliArgs
+    resolveCredentialRefs
     serverEnvironment
     serverServiceConfig
     sharedConfig
@@ -28,7 +29,6 @@ let
     sortedWorkloads
     startupOrderingOption
     unitCacheDirectory
-    workloadArgs
     ;
 
   # Universal systemd-exec(5) hardening of every native unit, gateways and
@@ -95,6 +95,12 @@ let
   # survives `utils.escapeSystemdExecArgs`, which would turn systemd's `%d`
   # specifier into a literal, and is swapped for `%d` afterwards.
   credentialPlaceholder = "@llmhopCredentialsDirectory@";
+
+  escapeExecArgs =
+    utils: credentials: command:
+    lib.replaceStrings [ credentialPlaceholder ] [ "%d" ] (
+      utils.escapeSystemdExecArgs (resolveCredentialRefs credentialPlaceholder credentials command)
+    );
 
   # The hardened baseline of every native unit, llmhop's own included, running
   # as the identity of `cfg` and binding no IP socket.
@@ -217,12 +223,8 @@ let
           // entry.serviceConfig
           // {
             Type = "exec";
-            ExecStart = lib.replaceStrings [ credentialPlaceholder ] [ "%d" ] (
-              utils.escapeSystemdExecArgs (
-                apiKeyWrapper pkgs.runtimeShell engine credentialPlaceholder workload
-                ++ entry.command
-                ++ workloadArgs engine credentialPlaceholder workload
-              )
+            ExecStart = escapeExecArgs utils workload.credentials (
+              entry.command ++ renderCliArgs engine workload.settings
             );
           };
       })
@@ -409,6 +411,7 @@ let
 in
 {
   inherit
+    escapeExecArgs
     hardenedServiceConfig
     listen
     mkBackend

@@ -33,10 +33,7 @@ rec {
   # `fetch` renders the argv downloading one repository with the given
   # `fetcher` into the hub cache below `HF_HOME`. `modelSettings` are the
   # flags derived from a model and `environment` is set on every server.
-  # `apiKey` hands a model's API key file to its server, either as `settings`
-  # or as a POSIX shell `script` run before the server, which may extend its
-  # arguments through `set --`. `native` and `quadlet` hold what only one kind
-  # of backend needs.
+  # `native` and `quadlet` hold what only one kind of backend needs.
   engines =
     let
       huggingFace = {
@@ -90,7 +87,6 @@ rec {
         };
         revisions = false;
         environment = { };
-        apiKey.settings = path: { api-key-file = path; };
         modelSettings =
           model:
           {
@@ -136,12 +132,6 @@ rec {
         # vLLM otherwise derives the address of its distributed workers from
         # the route to a public one, which an offline server lacks.
         environment.VLLM_HOST_IP = "127.0.0.1";
-        # `--api-key` takes the key itself, which the environment keeps off
-        # the command line.
-        apiKey.script = path: ''
-          VLLM_API_KEY=$(cat ${lib.escapeShellArg path})
-          export VLLM_API_KEY
-        '';
         native = native // {
           uv = true;
           packageEntry = "the `vllm` CLI at `bin/vllm`";
@@ -169,14 +159,6 @@ rec {
         modelSettings = model: huggingFace.modelSettings model // { model-path = model.model; };
         modelDescription = "Hugging Face repository passed as `--model-path`, or an absolute path.";
         modelExample = "Qwen/Qwen3-8B";
-        # SGLang reads its key from neither a file nor the environment, so a
-        # private YAML config with the key as an escaped double-quoted string
-        # carries it off the command line.
-        apiKey.script = path: ''
-          config=$(mktemp)
-          printf 'api-key: "%s"\n' "$(sed 's/[\\"]/\\&/g' ${lib.escapeShellArg path})" >"$config"
-          set -- "$@" --config "$config"
-        '';
         native = native // {
           uv = true;
           packageEntry = "the SGLang Python environment, launched as `bin/python -m sglang.launch_server`";
@@ -300,8 +282,6 @@ rec {
     ImportCredential = lib.attrNames (lib.filterAttrs (_: source: source == null) credentials);
   };
 
-  credentialReferencePrefix = "\${cred:";
-
   # Apply `f` to every string of a settings tree.
   mapStrings =
     f:
@@ -319,52 +299,30 @@ rec {
     in
     walk;
 
-  # Replace every `${cred:<name>}` reference in `value` by `render name`,
-  # rejecting a reference to anything but `credentials`.
-  replaceCredentialRefs =
-    render: credentials: value:
-    let
-      names = lib.attrNames credentials;
-      replaced = lib.replaceStrings (map credentialReference names) (map render names) value;
-    in
-    if lib.hasInfix credentialReferencePrefix replaced then
-      throw "unknown credential reference in `${value}`"
-    else
-      replaced;
-
   # Rewrite every `${cred:<name>}` reference in a settings tree to the path the
   # credential is mounted at, so secrets reach the server as a file name rather
   # than a value on the command line.
   resolveCredentialRefs =
     directory: credentials:
-    mapStrings (replaceCredentialRefs (name: "${directory}/${name}") credentials);
+    mapStrings (
+      value:
+      let
+        names = lib.attrNames credentials;
+        replaced = lib.replaceStrings (map (name: "\${cred:${name}}") names) (map (
+          name: "${directory}/${name}"
+        ) names) value;
+      in
+      if lib.hasInfix "\${cred:" replaced then
+        throw "unknown credential reference in `${value}`"
+      else
+        replaced
+    );
 
   # The flags a workload's server receives: its `settings` with every
   # `${cred:…}` resolved against the credential `directory`.
   workloadArgs =
     engine: directory: workload:
     renderCliArgs engine (resolveCredentialRefs directory workload.credentials workload.settings);
-
-  # The argv prefix running `workload`'s server through `shell` and the
-  # engine's `apiKey` script, with the key's path below the credential
-  # `directory`, or nothing when the server needs no wrapper.
-  apiKeyWrapper =
-    shell: engine: directory: workload:
-    lib.optionals (workload.apiKey or null != null && engine.apiKey ? script) [
-      shell
-      "-c"
-      (
-        engine.apiKey.script (
-          resolveCredentialRefs directory workload.credentials (credentialReference workload.apiKey)
-        )
-        + ''
-          exec "$@"
-        ''
-      )
-      "sh"
-    ];
-
-  credentialReference = name: "${credentialReferencePrefix}${name}}";
 
   isLoopback =
     host:
@@ -732,7 +690,6 @@ rec {
                   "http://${hostPort workload.host workload.port}";
               # Reachable other than through loopback or the socket.
               exposed = workload.socket == null && (workload.openFirewall || !isLoopback workload.host);
-              apiKey = workload.apiKey or null;
             };
           }
         ) entries
@@ -1179,16 +1136,6 @@ rec {
           ++ map (repo: { inherit repo; }) config.extraModels
           ++ extraRepositories
         );
-        apiKey = mkOption {
-          type = with types; nullOr str;
-          default = null;
-          example = "api-key";
-          description = ''
-            Entry of `credentials` holding the bearer token clients must send,
-            kept off the command line. Only allowed without a gateway routing
-            this model.
-          '';
-        };
       }
       // lib.optionalAttrs engine.revisions {
         revision = mkOption {
@@ -1202,8 +1149,5 @@ rec {
           '';
         };
       };
-      config.settings = lib.mkIf (config.apiKey != null && engine.apiKey ? settings) (
-        lib.mapAttrs (_: lib.mkOptionDefault) (engine.apiKey.settings (credentialReference config.apiKey))
-      );
     };
 }

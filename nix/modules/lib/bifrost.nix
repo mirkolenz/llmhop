@@ -3,13 +3,11 @@
 # `services.llmhop.gateway.bifrost-quadlet`.
 lib:
 {
-  common,
   gateway,
   quadlet,
 }:
 let
   inherit (lib) mkOption types;
-  inherit (common) credentialReferencePrefix mapStrings replaceCredentialRefs;
 
   unit = "bifrost";
 
@@ -37,33 +35,6 @@ let
         }
     );
 
-  # Bifrost reads secrets from the environment only, so each credential is
-  # exported as a variable, which its `env.` reference names.
-  variable = name: "CREDENTIAL_${lib.toUpper (lib.replaceStrings [ "." "-" ] [ "_" "_" ] name)}";
-
-  # Shell commands exporting every credential below `directory`, a shell
-  # expression.
-  exports =
-    directory: credentials:
-    lib.concatMapStrings (name: ''
-      ${variable name}=$(cat ${directory}/${name})
-      export ${variable name}
-    '') (lib.attrNames credentials);
-
-  # `config.json` from `settings`, each `${cred:<name>}`, which must be a
-  # whole value, as the `env.` reference of its variable.
-  configFile =
-    pkgs: cfg:
-    (pkgs.formats.json { }).generate "bifrost-config.json" (
-      mapStrings (
-        value:
-        if lib.hasInfix credentialReferencePrefix value && lib.match "\\$\\{cred:[^}]*}" value == null then
-          throw "credential reference in `${value}` must be the whole value"
-        else
-          replaceCredentialRefs (name: "env.${variable name}") cfg.credentials value
-      ) cfg.settings
-    );
-
   # The module of the gateway `name`, whose `options` extend the shared ones
   # and whose `config` runs Bifrost with its `configFile`.
   mkModule =
@@ -75,22 +46,18 @@ let
     gateway.mkModule {
       inherit name unit options;
       displayName = "Bifrost";
-      secrets = ''
-        In `settings`, a reference must be a whole value and becomes the `env.`
-        reference of a variable Bifrost reads it from.
-      '';
       settings =
         pkgs:
         mkOption {
           inherit (pkgs.formats.json { }) type;
           default = { };
           example = {
-            encryption_key = "\${cred:bifrost.encryption-key}";
+            encryption_key = "env.BIFROST_ENCRYPTION_KEY";
             governance.virtual_keys = [
               {
                 id = "default";
                 name = "default";
-                value = "\${cred:bifrost.virtual-key}";
+                value = "env.BIFROST_VIRTUAL_KEY";
                 is_active = true;
               }
             ];
@@ -100,7 +67,8 @@ let
             `vllm` or `sgl` provider. Changes from its web UI or API persist
             until the matching section of this file changes, while
             `source_of_truth = "config.json"` prunes them and
-            `config_store.enabled = false` disables them.
+            `config_store.enabled = false` disables them. Use upstream `env.`
+            references with `environmentFile` for secrets.
           '';
         };
       defaults =
@@ -111,7 +79,14 @@ let
             lib.groupBy (e: provider e.engine) endpoints
           );
         };
-      config = context@{ pkgs, cfg, ... }: config (context // { configFile = configFile pkgs cfg; });
+      config =
+        context@{ pkgs, cfg, ... }:
+        config (
+          context
+          // {
+            configFile = (pkgs.formats.json { }).generate "bifrost-config.json" cfg.settings;
+          }
+        );
     };
 in
 {
@@ -125,25 +100,34 @@ in
       '';
     };
     config =
-      context@{ cfg, configFile, ... }:
+      context@{
+        pkgs,
+        utils,
+        cfg,
+        configFile,
+        ...
+      }:
       gateway.nativeService (
         context
         // {
           description = "Bifrost model gateway";
-          script = ''
-            install -m 600 ${configFile} "$STATE_DIRECTORY/config.json"
-            ${exports ''"$CREDENTIALS_DIRECTORY"'' cfg.credentials}
-            exec ${
-              lib.escapeShellArgs [
-                (lib.getExe cfg.package)
-                "-host"
-                cfg.host
-                "-port"
-                cfg.port
-              ]
-            } -app-dir "$STATE_DIRECTORY"
-          '';
+          command = [
+            (lib.getExe cfg.package)
+            "-host"
+            cfg.host
+            "-port"
+            cfg.port
+            "-app-dir"
+            "/var/lib/${unit}"
+          ];
           serviceConfig = {
+            ExecStartPre = utils.escapeSystemdExecArgs [
+              (lib.getExe' pkgs.coreutils "install")
+              "-m"
+              "600"
+              configFile
+              "/var/lib/${unit}/config.json"
+            ];
             StateDirectory = unit;
             StateDirectoryMode = "0700";
           };
@@ -161,10 +145,6 @@ in
       gateway.quadletContainer (
         context
         // {
-          script = ''
-            ${exports quadlet.credentialDirectory cfg.credentials}
-            exec /app/docker-entrypoint.sh /app/main
-          '';
           # `U` hands the app directory to whatever user the container runs as.
           volumes = [
             "/var/lib/${unit}:/app/data:U"

@@ -220,7 +220,7 @@ let
       smg = {
         package = fakeVllm;
         credentials."smg.api-key" = apiKeys;
-        settings.api-key = "\${cred:smg.api-key}";
+        settings.api-key-file = "\${cred:smg.api-key}";
       };
     };
   };
@@ -229,11 +229,11 @@ let
       type = "bifrost-quadlet";
       bifrost-quadlet = {
         image = "docker.io/maximhq/bifrost:v2.3.2";
-        credentials."bifrost.virtual-key" = null;
+        environmentFile = "/run/secrets/bifrost.env";
         settings.governance.virtual_keys = [
           {
             id = "default";
-            value = "\${cred:bifrost.virtual-key}";
+            value = "env.BIFROST_VIRTUAL_KEY";
           }
         ];
       };
@@ -246,12 +246,12 @@ let
     vllm.models.qwen = {
       host = "0.0.0.0";
       openFirewall = true;
-      credentials.api-key = apiKeys;
-      apiKey = "api-key";
+      credentials."config.yaml" = serverConfig;
+      settings.config = "\${cred:config.yaml}";
     };
     sglang-quadlet.models.llama = {
-      credentials.api-key = apiKeys;
-      apiKey = "api-key";
+      credentials."config.yaml" = serverConfig;
+      settings.config = "\${cred:config.yaml}";
     };
     llama-cpp-quadlet = {
       enable = true;
@@ -606,15 +606,15 @@ let
       };
     };
 
-    # The external gateways route the listed models with secrets from
-    # credentials, and reject what they cannot route or clients could bypass.
+    # External gateways use upstream secret interfaces and reject models
+    # they cannot route or clients could bypass.
     testGateways = {
       expr = {
         smg = containsAll [
-          "--api-key ''\"$(cat \"$CREDENTIALS_DIRECTORY\"/smg.api-key)\"''"
-          "--discovery-provider file"
-          "--host 127.0.0.1 --port 8080"
-        ] smg.systemd.services.smg.serviceConfig.ExecStart.text;
+          ''"--api-key-file" "%d/smg.api-key"''
+          ''"--discovery-provider" "file"''
+          ''"--host" "127.0.0.1" "--port" "8080"''
+        ] smg.systemd.services.smg.serviceConfig.ExecStart;
         bifrost = {
           inherit (bifrost.virtualisation.quadlet.containers.bifrost.finalConfig.Service)
             Restart
@@ -623,9 +623,8 @@ let
           providers = lib.mapAttrs (
             _: provider: lib.concatMap (key: key.models) provider.keys
           ) bifrost.services.llmhop.gateway.bifrost-quadlet.settings.providers;
-          exported = containsAll [
-            "CREDENTIAL_BIFROST_VIRTUAL_KEY=$(cat /run/llmhop/credentials/bifrost.virtual-key)"
-          ] bifrost.virtualisation.quadlet.containers.bifrost.containerConfig.Entrypoint;
+          inherit (bifrost.virtualisation.quadlet.containers.bifrost.containerConfig) EnvironmentFile;
+          entrypoint = bifrost.virtualisation.quadlet.containers.bifrost.containerConfig ? Entrypoint;
         };
         rejected = failing "is routed by the gateway" (mkRoutable {
           gateway = {
@@ -651,7 +650,8 @@ let
             vllm = [ "qwen" ];
             sgl = [ "llama" ];
           };
-          exported = true;
+          EnvironmentFile = [ "/run/secrets/bifrost.env" ];
+          entrypoint = false;
         };
         rejected = 1;
         socket = 1;
@@ -664,14 +664,13 @@ let
       expr = {
         firewall = direct.networking.firewall.allowedTCPPorts;
         vllm = containsAll [
-          "VLLM_API_KEY=$$(cat %d/api-key)"
+          ''"${fakeVllm}/bin/vllm" "serve" "example/qwen"''
+          ''"--config" "%d/config.yaml"''
           "0.0.0.0"
         ] directWorker.ExecStart;
         filtered = directWorker ? IPAddressDeny;
-        sglang = lib.take 2 (
-          builtins.fromJSON direct.virtualisation.quadlet.containers.sglang-llama.containerConfig.Entrypoint
-        );
         probe = containsAll [ "http://127.0.0.1:24001/health" ] direct.systemd.services.vllm-qwen.postStart;
+        sglang = lib.fromJSON direct.virtualisation.quadlet.containers.sglang-llama.containerConfig.Entrypoint;
         acl = direct.systemd.tmpfiles.settings."10-llmhop"."/run/llmhop".a.argument;
       };
       expected = {
@@ -680,8 +679,8 @@ let
         filtered = false;
         probe = true;
         sglang = [
-          "/bin/sh"
-          "-c"
+          "sglang"
+          "serve"
         ];
         acl = "default:user:caddy:-wx";
       };

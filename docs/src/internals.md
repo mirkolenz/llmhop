@@ -142,7 +142,8 @@ Native servers also cannot see `/run/nscd` and `/run/systemd/resolve`, through w
 
 ## Gateways
 
-A gateway in front of another gateway only duplicates routing, auth and limits, and a model reachable beside it voids its auth, so the module runs at most one and keeps every model it routes on loopback without a key of its own.
+A gateway in front of another gateway only duplicates routing, auth and limits, and a model reachable beside it voids its auth, so the module runs at most one and keeps every model it routes on loopback.
+Routed models leave authentication to the gateway.
 Backends never configure a gateway, but publish their workloads to the internal `services.llmhop.endpoints`, which the selected gateway renders into its own configuration, so a new gateway is one more module and no backend changes.
 Each gateway module adds its name to `gateway.type`, an enum whose declarations merge, and lists the endpoints it routes in the internal `gateway.routes`, which the shared assertions check.
 
@@ -151,15 +152,17 @@ The external gateways run on the host network in a container, so they reach the 
 SMG gives up on the workers of `--worker-urls` after its startup timeout, while loading a model may take an hour, so it gets a discovery file instead, and it forwards the client's `Authorization` to the worker, the other reason routed models carry no key.
 Bifrost reconciles its `config.json` into a SQLite store in its app directory, by default in `split` mode, so the file seeds and updates each section while changes made through its UI survive until that section of the file changes.
 It has no llama.cpp provider, but its vLLM one serves any OpenAI-compatible server with a URL per key, as its SGLang one does.
-Each module translates `${cred:<name>}` into the one way its gateway reads secrets, expanded by llmhop itself, by a shell when SMG starts, or as an `env.` reference to a variable exported for Bifrost.
+llmhop resolves its own secret references at startup.
+SMG receives credential file paths through upstream flags such as `--api-key-file` and `--tenant-api-keys-file`, requiring a build that supports them.
+Bifrost receives its native `env.` references unchanged, with secrets loaded from `environmentFile` by systemd or Podman.
+External gateways run directly, without shell wrappers for secrets.
 
 ## API keys
 
-Without a gateway, each model checks the key that its `apiKey` names from a credential, which never enters a command line, the Nix store or the environment of another unit.
-llama.cpp reads it from `--api-key-file`.
-vLLM takes `--api-key` as a value only, so a wrapper exports `VLLM_API_KEY` from the credential.
-SGLang reads it from neither a file nor the environment, so the wrapper writes a private YAML file in the unit's private `/tmp` and passes it as `--config`.
-Containers run the same wrapper as their entrypoint ahead of the image's own.
+Without a gateway, configure each model's authentication through its server's file-based settings.
+llama.cpp reads keys through `settings.api-key-file`.
+vLLM and SGLang read a private YAML credential containing `api-key` through `settings.config`, with a `.yaml` credential name for vLLM.
+Credential references resolve to file paths for both native services and containers, so the server reads its secrets directly without a shell wrapper or a generated temporary config.
 
 ## Watermarking
 

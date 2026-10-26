@@ -143,13 +143,15 @@ The design rationale is collected in the [module internals](https://mirkolenz.gi
 | `"smg"`, `"smg-quadlet"`         | the [Shepherd Model Gateway](https://github.com/smg-project/smg) | no                   | no               |
 | `"bifrost"`, `"bifrost-quadlet"` | [Bifrost](https://github.com/maximhq/bifrost)                    | no                   | no               |
 
-A routed model must stay on loopback without an `apiKey`, so no client bypasses the gateway, and a gateway without socket support requires every routed model to set a `port`.
-Each gateway listens on `127.0.0.1:8080` by default and reads secrets from its `credentials`, referenced in `settings` as `${cred:<name>}`.
+A routed model must stay on loopback so no client bypasses the gateway, and leave authentication to the gateway.
+A gateway without socket support requires every routed model to set a `port`.
+Each gateway listens on `127.0.0.1:8080` by default and uses its own secret interface, configured below.
 
 #### Without a gateway
 
 Each model is served on its own, on its default unix socket or on its `port`, bound to `host`.
-`apiKey` names an entry of its `credentials` holding the bearer token clients must send, which never enters the command line.
+Configure authentication through the server's own credential-backed settings, keeping keys off the command line and out of the Nix store.
+For vLLM and SGLang, provision a private YAML file containing `api-key: "your-secret"` and pass it through `settings.config`:
 
 ```nix
 services.llmhop.vllm.models."qwen3-8b" = {
@@ -157,11 +159,12 @@ services.llmhop.vllm.models."qwen3-8b" = {
   port = 8001;
   host = "0.0.0.0";
   openFirewall = true;
-  credentials.api-key = "/run/secrets/qwen-api-key";
-  apiKey = "api-key";
+  credentials."config.yaml" = "/run/secrets/qwen-vllm.yaml";
+  settings.config = "\${cred:config.yaml}";
 };
 ```
 
+llama.cpp reads its keys directly through `settings.api-key-file`, as shown under [inference server credentials](#inference-server-credentials).
 `services.llmhop.socketClients` lists the users that may connect to every model socket, such as a reverse proxy in front of them.
 
 #### Built-in llmhop
@@ -175,37 +178,40 @@ The generated config is validated at build time with `llmhop -check`, so a typo 
 
 The [Shepherd Model Gateway](https://github.com/smg-project/smg) registers every listed model of any engine from a generated discovery file, retrying each until it serves.
 Natively, its `package` is a Python environment built with [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels), and the container runs the complete reference in `image`.
-`settings` takes SMG's CLI flags, where a credential reference expands to the credential's contents when SMG starts:
+`settings` takes SMG's CLI flags, where a credential reference resolves to a file path:
 
 ```nix
 services.llmhop.gateway = {
   type = "smg-quadlet";
   smg-quadlet = {
-    image = "docker.io/lightseekorg/smg:1.13.0";
+    image = "ghcr.io/smg-project/smg:nightly";
     credentials."smg.api-key" = null;
-    settings.api-key = "\${cred:smg.api-key}";
+    settings.api-key-file = "\${cred:smg.api-key}";
   };
 };
 ```
 
-SMG forwards the client's `Authorization` header to the model, which the module therefore never keys.
+File-based authentication requires an SMG build supporting `--api-key-file` and `--tenant-api-keys-file`, which are available on upstream `main` but absent from v1.13.0.
+Use a package or image built from a revision with those flags when configuring them.
+SMG forwards the client's `Authorization` header to the model, so routed models leave authentication to the gateway.
 
 #### Bifrost
 
 [Bifrost](https://github.com/maximhq/bifrost) gets every listed model as a key of its `vllm` provider, or `sgl` for SGLang, so clients send `vllm/<name>`, or the plain name.
-`settings` is its `config.json`, where a credential reference must be a whole value, since Bifrost reads secrets only from the environment:
+`settings` is its `config.json`, using Bifrost's native `env.NAME` references for secrets loaded from `environmentFile`:
 
 ```nix
 services.llmhop.gateway = {
   type = "bifrost";
   bifrost = {
     package = inputs.bifrost.packages.${pkgs.system}.bifrost-http;
-    credentials."bifrost.encryption-key" = null;
-    settings.encryption_key = "\${cred:bifrost.encryption-key}";
+    environmentFile = "/run/secrets/bifrost.env";
+    settings.encryption_key = "env.BIFROST_ENCRYPTION_KEY";
   };
 };
 ```
 
+Provision that file outside the Nix store with `BIFROST_ENCRYPTION_KEY=<secret>`, readable only by the service manager.
 nixpkgs lacks Bifrost, so the native `package` comes from Bifrost's own flake, and the container's `image` selects a reference such as `docker.io/maximhq/bifrost:v2.3.2`, both with their app directory at `/var/lib/bifrost`.
 
 ### Inference backends

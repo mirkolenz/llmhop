@@ -17,22 +17,15 @@ let
     ;
 
   # Assertions of every routed endpoint, which only the gateway may expose.
-  gatewayAssertions =
+  gatewayAssertion =
     name:
     let
       endpoint = cfg.endpoints.${name};
-      prefix = "services.llmhop: `${endpoint.owner}` is routed by the gateway `${cfg.gateway.type}`, but";
     in
-    [
-      {
-        assertion = !endpoint.exposed;
-        message = "${prefix} sets `host` or `openFirewall`, so clients could bypass the gateway.";
-      }
-      {
-        assertion = endpoint.apiKey == null;
-        message = "${prefix} sets `apiKey`, while the gateway authenticates clients itself.";
-      }
-    ];
+    {
+      assertion = !endpoint.exposed;
+      message = "services.llmhop: `${endpoint.owner}` is routed by the gateway `${cfg.gateway.type}`, but sets `host` or `openFirewall`, so clients could bypass the gateway.";
+    };
 
   endpointModule = {
     options = {
@@ -63,10 +56,6 @@ let
       exposed = lib.mkOption {
         type = lib.types.bool;
         description = "Whether the server is reachable other than through loopback or its socket.";
-      };
-      apiKey = lib.mkOption {
-        type = with lib.types; nullOr str;
-        description = "Credential of the server's own API key.";
       };
     };
   };
@@ -116,7 +105,7 @@ in
           The one gateway in front of every backend, configured by the option
           set of the same name, or `null` for none, so clients connect to each
           workload directly. It routes every listed model, which must then
-          stay on loopback without an `apiKey`.
+          stay on loopback and leave authentication to the gateway.
         '';
       };
 
@@ -164,7 +153,7 @@ in
           )
         ) cfg.claims
       )
-      ++ lib.concatMap gatewayAssertions cfg.gateway.routes;
+      ++ map gatewayAssertion cfg.gateway.routes;
 
     systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (e: e.socket != null) (
       lib.attrValues cfg.endpoints

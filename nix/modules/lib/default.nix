@@ -12,5 +12,5 @@ common
   watermark = import ./watermark.nix lib { inherit common native quadlet; };
   builtin = import ./builtin.nix lib { inherit common gateway native; };
   smg = import ./smg.nix lib { inherit common gateway quadlet; };
-  bifrost = import ./bifrost.nix lib { inherit common gateway quadlet; };
+  bifrost = import ./bifrost.nix lib { inherit gateway quadlet; };
 }

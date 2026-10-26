@@ -11,7 +11,6 @@ let
   inherit (lib) mkOption types;
   inherit (common)
     credentialServiceConfig
-    credentialsOption
     sharedUnitConfig
     ;
 in
@@ -32,7 +31,7 @@ rec {
   # The module of the gateway `name` listening on TCP, which routes the listed
   # endpoints in a stable order and reaches them on TCP only. Its options are
   # the shared ones, `options` and the `settings` option, which `settings`
-  # builds from `pkgs`. `secrets` describes what `${cred:<name>}` expands to.
+  # builds from `pkgs`.
   # Once selected, `defaults` of `settings`, the further `ports` it binds and
   # `config` derive from `{ pkgs, config, cfg, endpoints }`.
   mkModule =
@@ -40,14 +39,13 @@ rec {
       name,
       displayName,
       unit,
-      secrets,
       options,
       settings,
       defaults,
       ports ? _: [ ],
       config,
     }:
-    args@{ pkgs, ... }:
+    args@{ pkgs, utils, ... }:
     let
       cfg = args.config.services.llmhop.gateway.${name};
       endpoints = lib.pipe args.config.services.llmhop.endpoints [
@@ -58,6 +56,7 @@ rec {
       context = {
         inherit
           pkgs
+          utils
           cfg
           endpoints
           name
@@ -91,17 +90,11 @@ rec {
             description = "Environment variables of ${displayName}.";
           };
           environmentFile = mkOption {
-            type = with types; nullOr path;
+            type = with types; nullOr externalPath;
             default = null;
             description = ''
-              File in `KEY=VALUE` format forwarded to ${displayName}. Prefer
-              `credentials` for secrets.
-            '';
-          };
-          credentials = credentialsOption // {
-            description = credentialsOption.description + ''
-
-              ${secrets}
+              File outside the Nix store in `KEY=VALUE` format, loaded by
+              systemd or Podman and forwarded to ${displayName}.
             '';
           };
           settings = settings pkgs;
@@ -132,15 +125,15 @@ rec {
       );
     };
 
-  # The systemd service of a native gateway as a dynamic user, running
-  # `script` with `$CREDENTIALS_DIRECTORY` set, given the `mkModule` context.
+  # The systemd service of a native gateway as a dynamic user.
   nativeService =
     {
-      pkgs,
+      utils,
       cfg,
       unit,
       description,
-      script,
+      command,
+      credentials ? { },
       serviceConfig ? { },
       ...
     }:
@@ -153,12 +146,12 @@ rec {
         unitConfig = sharedUnitConfig;
         serviceConfig =
           native.hardenedServiceConfig
-          // credentialServiceConfig cfg.credentials
+          // credentialServiceConfig credentials
           // restartConfig
           // {
             DynamicUser = true;
             EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-            ExecStart = pkgs.writeShellScript unit script;
+            ExecStart = native.escapeExecArgs utils credentials command;
             UMask = "0077";
           }
           // serviceConfig;
@@ -167,16 +160,15 @@ rec {
 
   # The Quadlet image and container of the gateway `name` on the host network,
   # which reaches every endpoint on loopback and binds its listener there
-  # directly. `script` runs as the container's entrypoint, with the
-  # credentials of `cfg` mounted at `quadlet.credentialDirectory`, given the
-  # `mkModule` context.
+  # directly. A nonempty `command` overrides the image's entrypoint.
   quadletContainer =
     {
       config,
       name,
       cfg,
       unit,
-      script,
+      command ? [ ],
+      credentials ? { },
       environment ? { },
       volumes ? [ ],
       serviceConfig ? { },
@@ -195,7 +187,7 @@ rec {
         inherit (image) images;
         containers.${unit} = {
           unitConfig = sharedUnitConfig;
-          serviceConfig = credentialServiceConfig cfg.credentials // serviceConfig;
+          serviceConfig = credentialServiceConfig credentials // serviceConfig;
           containerConfig =
             quadlet.baseContainerConfig
             // image.containerConfig
@@ -203,16 +195,17 @@ rec {
               Network = "host";
               Environment = cfg.environment // environment;
               EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-              Entrypoint = lib.toJSON [
-                "/bin/sh"
-                "-c"
-                script
-              ];
-              Volume = volumes ++ quadlet.credentialMount [ ] cfg.credentials;
+              Volume = volumes ++ quadlet.credentialMount [ ] credentials;
+            }
+            // lib.optionalAttrs (command != [ ]) {
+              Entrypoint = lib.toJSON [ (lib.head command) ];
+              Exec = lib.escapeShellArgs (
+                common.resolveCredentialRefs quadlet.credentialDirectory credentials (lib.tail command)
+              );
             }
             # The credential mount belongs to host root, so the container runs
             # as root to read it, without any capability like every backend.
-            // lib.optionalAttrs (cfg.credentials != { }) { User = "0:0"; };
+            // lib.optionalAttrs (credentials != { }) { User = "0:0"; };
         };
       };
     };

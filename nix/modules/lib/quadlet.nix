@@ -3,7 +3,6 @@ lib: common:
 let
   inherit (lib) mkOption types;
   inherit (common)
-    apiKeyWrapper
     backendOptions
     cacheDirectoryRule
     chainEntries
@@ -164,8 +163,6 @@ let
           // lib.optionalAttrs workload.offline { Network = "none"; }
         else
           { PublishPort = [ "${hostPort workload.host workload.port}:${toString engine.quadlet.port}" ]; };
-      # The entrypoint of `entry`, through the API key script if any.
-      entrypoint = apiKeyWrapper "/bin/sh" engine credentialDirectory workload ++ entry.entrypoint;
     in
     {
       # Defined alike by every workload that shares the image.
@@ -182,7 +179,7 @@ let
             baseContainerConfig
             // image.containerConfig
             // {
-              Entrypoint = lib.toJSON entrypoint;
+              Entrypoint = lib.toJSON entry.entrypoint;
               Notify = "healthy";
               HealthCmd = "curl --fail --silent --show-error ${healthTarget (listen engine workload)}";
               HealthStartPeriod = "30m";

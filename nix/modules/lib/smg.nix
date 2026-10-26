@@ -9,7 +9,6 @@ lib:
 }:
 let
   inherit (lib) mkOption types;
-  inherit (common) replaceCredentialRefs;
 
   unit = "smg";
 
@@ -40,18 +39,6 @@ let
       }) endpoints;
     };
 
-  # The shell command running `argv`, each `${cred:<name>}` in it replaced at
-  # start by the contents of the credential below `directory`, a shell
-  # expression, since SMG takes its keys on its command line only.
-  credentialCommand =
-    directory: credentials: argv:
-    # `escapeShellArg` single-quotes every reference, which the replacement
-    # closes around a command substitution.
-    "exec "
-    + replaceCredentialRefs (name: "'\"$(cat ${directory}/${name})\"'") credentials (
-      lib.escapeShellArgs argv
-    );
-
   # The module of the gateway `name`, whose `options` extend the shared ones
   # and whose `config` runs it with its `settings` rendered as `argv` and the
   # generated `discovery` file, unless the container mounts it at
@@ -64,27 +51,27 @@ let
       config,
     }:
     gateway.mkModule {
-      inherit name unit options;
+      inherit name unit;
       displayName = "SMG";
-      secrets = ''
-        In `settings`, a reference expands to the credential's contents, read
-        when SMG starts, since SMG takes `--api-key` and `--tenant-api-key`
-        only on its command line.
-      '';
+      options = options // {
+        credentials = common.credentialsOption;
+      };
       settings =
         _:
         mkOption {
           type = with types; attrsOf anything;
           default = { };
           example = {
-            api-key = "\${cred:smg.api-key}";
+            api-key-file = "\${cred:smg.api-key}";
             policy = "cache_aware";
           };
           description = ''
             CLI flags of SMG, rendered as `--<key> <value>` with `false`
             dropped. The listener, the discovery file of every listed model,
             metrics on `127.0.0.1:29000` and disabled tokenizer downloads are
-            defaults here, so a definition replaces them.
+            defaults here, so a definition replaces them. Credential references
+            resolve to file paths for upstream options such as `api-key-file`
+            and `tenant-api-keys-file`, which require a supporting SMG build.
           '';
         };
       defaults =
@@ -137,9 +124,8 @@ in
         context
         // {
           description = "SMG model gateway";
-          script = credentialCommand ''"$CREDENTIALS_DIRECTORY"'' cfg.credentials (
-            [ (lib.getExe' cfg.package "python") ] ++ launcher ++ argv
-          );
+          inherit (cfg) credentials;
+          command = [ (lib.getExe' cfg.package "python") ] ++ launcher ++ argv;
         }
       );
   };
@@ -147,7 +133,7 @@ in
   quadlet = mkModule {
     name = "smg-quadlet";
     options.image = quadlet.imageOption // {
-      example = "docker.io/lightseekorg/smg:1.13.0";
+      example = "ghcr.io/smg-project/smg:nightly";
     };
     discoveryPath = containerDiscoveryFile;
     config =
@@ -160,9 +146,8 @@ in
       gateway.quadletContainer (
         context
         // {
-          script = credentialCommand quadlet.credentialDirectory cfg.credentials (
-            [ "python3" ] ++ launcher ++ argv
-          );
+          inherit (cfg) credentials;
+          command = [ "python3" ] ++ launcher ++ argv;
           volumes = [ "${discovery}:${containerDiscoveryFile}:ro" ];
         }
       );

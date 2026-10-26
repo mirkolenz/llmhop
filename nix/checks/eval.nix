@@ -569,7 +569,7 @@ let
           "--api-key ''\"$(cat \"$CREDENTIALS_DIRECTORY\"/smg.api-key)\"''"
           "--discovery-provider file"
           "--host 127.0.0.1 --port 8080"
-        ] (lib.readFile smg.systemd.services.smg.serviceConfig.ExecStart);
+        ] smg.systemd.services.smg.serviceConfig.ExecStart.text;
         bifrost = {
           providers = lib.mapAttrs (
             _: provider: lib.concatMap (key: key.models) provider.keys

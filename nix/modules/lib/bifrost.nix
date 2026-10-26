@@ -153,9 +153,8 @@ in
 
   quadlet = mkModule {
     name = "bifrost-quadlet";
-    options = gateway.imageOptions {
-      image = "docker.io/maximhq/bifrost";
-      tagExample = "v2.3.2";
+    options.image = quadlet.imageOption // {
+      example = "docker.io/maximhq/bifrost:v2.3.2";
     };
     config =
       context@{ cfg, configFile, ... }:

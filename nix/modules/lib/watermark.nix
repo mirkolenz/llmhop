@@ -258,7 +258,11 @@ in
           listen = quadlet.listen engine;
           inherit (config.services.llmhop) socketDirectory;
           module = {
-            options = quadlet.workloadOptions "detector";
+            options = quadlet.workloadOptions {
+              inherit cfg;
+              backend = "vllm-quadlet";
+              noun = "detector";
+            };
             config.script = lib.mkDefault source;
           };
         };

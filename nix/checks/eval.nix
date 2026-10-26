@@ -15,6 +15,7 @@ let
   detectorScript = pkgs.writeText "watermark.py" "";
   watermark.algorithm = "dual_key_gumbel";
   watermarkConfig = lib.toJSON watermark;
+  pinnedImage = "docker.io/vllm/vllm-openai@sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
 
   # Not `lib.hasInfix`: it compiles the needle into a regex, and `lib.match`
   # rejects patterns carrying store-path context.
@@ -71,7 +72,7 @@ let
     mkSystem {
       vllm-quadlet = lib.recursiveUpdate {
         enable = true;
-        tag = "latest";
+        image = "docker.io/vllm/vllm-openai:latest";
         models.test = {
           model = "example/test";
           port = 18001;
@@ -98,11 +99,13 @@ let
       mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
     };
     models.marked = {
+      image = pinnedImage;
       model = "example/marked";
       port = 18003;
       inherit watermark;
     };
     detectors.watermark = {
+      image = "registry.example/detector:latest";
       tokenizer = "example/test";
       port = 18002;
       inherit watermark;
@@ -169,7 +172,7 @@ let
     };
     llama-cpp-quadlet = {
       enable = true;
-      tag = "server";
+      image = "ghcr.io/ggml-org/llama.cpp:server";
       models = {
         b.model = "example/b";
         a.model = "example/a";
@@ -180,6 +183,8 @@ let
   socketRoot = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
   socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
   quadletWorker = quadlet.virtualisation.quadlet.containers.vllm-test;
+  quadletImage =
+    quadlet.virtualisation.quadlet.images.${lib.removeSuffix ".image" quadletWorker.containerConfig.Image};
   quadletMarked = quadlet.virtualisation.quadlet.containers.vllm-marked;
   quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-detector-watermark;
   nativeWorker = native.systemd.services.vllm-test;
@@ -199,7 +204,7 @@ let
     };
     sglang-quadlet = {
       enable = true;
-      tag = "latest";
+      image = "docker.io/lmsysorg/sglang:latest";
       models.llama = {
         model = "example/llama";
         port = 24002;
@@ -222,7 +227,7 @@ let
     gateway = {
       type = "bifrost-quadlet";
       bifrost-quadlet = {
-        tag = "v2.3.2";
+        image = "docker.io/maximhq/bifrost:v2.3.2";
         credentials."bifrost.virtual-key" = null;
         settings.governance.virtual_keys = [
           {
@@ -249,13 +254,50 @@ let
     };
     llama-cpp-quadlet = {
       enable = true;
-      tag = "server";
+      image = "ghcr.io/ggml-org/llama.cpp:server";
       models.gemma.model = "example/gemma";
     };
   };
   directWorker = direct.systemd.services.vllm-qwen.serviceConfig;
 
   tests = {
+    testImages = {
+      expr = {
+        references = lib.sort lib.lessThan (
+          map (image: image.imageConfig.Image) (lib.attrValues quadlet.virtualisation.quadlet.images)
+        );
+        shared =
+          quadletWorker.containerConfig.Image
+          == quadlet.virtualisation.quadlet.containers.vllm-test-fetch.containerConfig.Image;
+        tagged = quadletWorker.containerConfig.AutoUpdate;
+        pinned = quadletMarked.containerConfig ? AutoUpdate;
+        fetcher = quadlet.virtualisation.quadlet.containers.vllm-test-fetch.containerConfig.AutoUpdate;
+        policy = quadletImage.imageConfig ? Policy;
+        autoStart = map (unit: unit.autoStart) [
+          quadletWorker
+          quadlet.virtualisation.quadlet.containers.vllm-test-fetch
+          quadletImage
+        ];
+      };
+      expected = {
+        references = [
+          "docker.io/vllm/vllm-openai:latest"
+          pinnedImage
+          "registry.example/detector:latest"
+        ];
+        shared = true;
+        tagged = "registry";
+        pinned = false;
+        fetcher = "disabled";
+        policy = false;
+        autoStart = [
+          true
+          false
+          false
+        ];
+      };
+    };
+
     # The VM test covers native sockets with llama.cpp, vLLM binds via `--uds`.
     testSocketRoot = {
       expr = {
@@ -571,6 +613,10 @@ let
           "--host 127.0.0.1 --port 8080"
         ] smg.systemd.services.smg.serviceConfig.ExecStart.text;
         bifrost = {
+          inherit (bifrost.virtualisation.quadlet.containers.bifrost.finalConfig.Service)
+            Restart
+            RestartSec
+            ;
           providers = lib.mapAttrs (
             _: provider: lib.concatMap (key: key.models) provider.keys
           ) bifrost.services.llmhop.gateway.bifrost-quadlet.settings.providers;
@@ -596,6 +642,8 @@ let
       expected = {
         smg = true;
         bifrost = {
+          Restart = "on-failure";
+          RestartSec = 5;
           providers = {
             vllm = [ "qwen" ];
             sgl = [ "llama" ];
@@ -648,7 +696,7 @@ let
         };
         vllm-quadlet = {
           enable = true;
-          tag = "latest";
+          image = "docker.io/vllm/vllm-openai:latest";
           models.container = {
             model = "example/test";
             port = 22001;
@@ -662,14 +710,17 @@ let
   units = pkgs.symlinkJoin {
     name = "llmhop-generated-units";
     paths =
-      quadlet.virtualisation.quadlet.generatedUnits ++ sockets.virtualisation.quadlet.generatedUnits;
+      quadlet.virtualisation.quadlet.generatedUnits
+      ++ sockets.virtualisation.quadlet.generatedUnits
+      ++ bifrost.virtualisation.quadlet.generatedUnits;
   };
 
   result = pkgs.runCommand "llmhop-eval-tests" { } ''
     test -e ${units}/lib/systemd/system/vllm-test.service
     test -e ${units}/lib/systemd/system/vllm-detector-watermark.service
     test -e ${units}/lib/systemd/system/llama-cpp-b.service
-    grep -q '^Requires=vllm-latest-image.service$' ${units}/lib/systemd/system/vllm-test.service
+    test -e ${units}/lib/systemd/system/bifrost.service
+    grep -q '^Requires=${quadletImage.serviceName}.service$' ${units}/lib/systemd/system/vllm-test.service
     touch $out
   '';
 in

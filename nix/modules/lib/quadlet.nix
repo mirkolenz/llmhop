@@ -48,36 +48,28 @@ let
     Tmpfs = [ "/tmp" ];
   };
 
-  # The image unit of `image` at `digest` or else `tag`, named after `prefix`
-  # and either, so that containers sharing an image share the unit, and the
-  # `[Container]` keys of a container running it, tracking the tag with
-  # `autoUpdate`. `newer` keeps the local image when the registry is
-  # unreachable, where Podman's default `always` would fail its containers.
+  imageOption = mkOption {
+    type = types.str;
+    description = "Container image reference, including a tag or digest.";
+  };
+
+  # Hash the complete reference so workloads sharing an image share its unit.
   imageUnit =
     {
       images,
       prefix,
       image,
-      tag,
-      digest,
     }:
     let
-      name = "${prefix}-${
-        if digest != null then lib.substring 0 12 (lib.last (lib.splitString ":" digest)) else tag
-      }";
+      name = "${prefix}-${lib.hashString "sha256" image}";
     in
     {
-      images.${name}.imageConfig = {
-        Image = if digest != null then "${image}@${digest}" else "${image}:${tag}";
-        Policy = "newer";
-      };
-      containerConfig =
-        autoUpdate:
-        {
-          Image = images.${name}.ref;
-          Pull = "never";
-        }
-        // lib.optionalAttrs autoUpdate { AutoUpdate = "registry"; };
+      images.${name}.imageConfig.Image = image;
+      containerConfig = {
+        Image = images.${name}.ref;
+        Pull = "never";
+      }
+      // lib.optionalAttrs (!lib.hasInfix "@" image) { AutoUpdate = "registry"; };
     };
 
   # Assertion that the module of `owner` has Quadlet enabled.
@@ -100,29 +92,29 @@ let
   };
 
   # Options of a workload's container.
-  workloadOptions = noun: {
-    tag = mkOption {
-      type = with types; nullOr str;
-      default = null;
-      description = "Tag of the container image of this ${noun}, instead of the backend's `tag`. Mutually exclusive with `digest`.";
+  workloadOptions =
+    {
+      backend,
+      cfg,
+      noun,
+    }:
+    {
+      image = imageOption // {
+        default = cfg.image;
+        defaultText = lib.literalExpression "config.services.llmhop.${backend}.image";
+        description = "Image reference of this ${noun}, overriding the backend's `image`.";
+      };
+      mountOptions.credentials = mkOption {
+        type = with types; listOf str;
+        default = [ ];
+        example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+        description = ''
+          Podman volume options appended to the credential mount of this
+          ${noun}'s server. Use an `idmap` mapping when `[Container] User=`
+          selects a non-root identity. The mount is always read-only.
+        '';
+      };
     };
-    digest = mkOption {
-      type = with types; nullOr str;
-      default = null;
-      example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
-      description = "Immutable digest of the container image of this ${noun}. Mutually exclusive with `tag`.";
-    };
-    mountOptions.credentials = mkOption {
-      type = with types; listOf str;
-      default = [ ];
-      example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
-      description = ''
-        Podman volume options appended to the credential mount of this
-        ${noun}'s server. Use an `idmap` mapping when `[Container] User=`
-        selects a non-root identity. The mount is always read-only.
-      '';
-    };
-  };
 
   # The Quadlet configuration of the workload of `entry`: its offline
   # server, which runs the `arguments` of `entry` followed by its settings,
@@ -131,7 +123,6 @@ let
   quadletConfig =
     {
       name,
-      backend,
       engine,
       cfg,
       hook,
@@ -158,14 +149,8 @@ let
       };
       image = imageUnit {
         inherit (quadlet) images;
-        inherit (cfg) image;
-        inherit (workload) digest;
+        inherit (workload) image;
         prefix = name;
-        tag =
-          if workload.tag != null && workload.digest != null then
-            throw "services.llmhop.${backend}: `${workload.name}` sets both `tag` and `digest`."
-          else
-            lib.defaultTo cfg.tag workload.tag;
       };
       credentials = credentialMount workload.mountOptions.credentials;
       # A socket in a mounted directory and, offline, no network, or else
@@ -195,7 +180,7 @@ let
           };
           containerConfig =
             baseContainerConfig
-            // image.containerConfig (workload.digest == null)
+            // image.containerConfig
             // {
               Entrypoint = lib.toJSON entrypoint;
               Notify = "healthy";
@@ -230,8 +215,9 @@ let
           unitConfig = sharedUnitConfig;
           containerConfig =
             baseContainerConfig
-            // image.containerConfig false
+            // image.containerConfig
             // {
+              AutoUpdate = "disabled";
               Entrypoint = lib.toJSON [
                 "/bin/sh"
                 fetchScriptPath
@@ -304,15 +290,8 @@ let
     in
     {
       options.services.llmhop.${backend} = base // {
-        image = mkOption {
-          type = types.str;
-          default = engine.quadlet.image;
-          description = "Container image of every server.";
-        };
-        tag = mkOption {
-          type = types.str;
-          example = engine.quadlet.tagExample;
-          description = "Tag of the container image of every model that sets neither `tag` nor `digest`.";
+        image = imageOption // {
+          example = engine.quadlet.imageExample;
         };
         cache = base.cache // {
           mountOptions = mkOption {
@@ -369,30 +348,35 @@ let
             (
               { config, ... }:
               {
-                options = workloadOptions "model" // {
-                  devices = mkOption {
-                    type = with types; listOf str;
-                    default = cfg.devices;
-                    defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
-                    example = [ "nvidia.com/gpu=0" ];
-                    description = "Devices exposed to this model's container, replacing the backend's `devices`.";
+                options =
+                  workloadOptions {
+                    inherit backend cfg;
+                    noun = "model";
+                  }
+                  // {
+                    devices = mkOption {
+                      type = with types; listOf str;
+                      default = cfg.devices;
+                      defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
+                      example = [ "nvidia.com/gpu=0" ];
+                      description = "Devices exposed to this model's container, replacing the backend's `devices`.";
+                    };
+                    shmSize = mkOption {
+                      type = types.str;
+                      default = "32g";
+                      example = "64g";
+                      description = ''
+                        Size of the container's private `/dev/shm` tmpfs, which
+                        PyTorch uses for tensor-parallel inference.
+                      '';
+                    };
+                    container = mkOption {
+                      type = types.attrs;
+                      internal = true;
+                      default = engine.quadlet.container config;
+                      description = "The `arguments`, `containerConfig` and `mounts` of this model's container.";
+                    };
                   };
-                  shmSize = mkOption {
-                    type = types.str;
-                    default = "32g";
-                    example = "64g";
-                    description = ''
-                      Size of the container's private `/dev/shm` tmpfs, which
-                      PyTorch uses for tensor-parallel inference.
-                    '';
-                  };
-                  container = mkOption {
-                    type = types.attrs;
-                    internal = true;
-                    default = engine.quadlet.container config;
-                    description = "The `arguments`, `containerConfig` and `mounts` of this model's container.";
-                  };
-                };
               }
             )
           ];
@@ -414,7 +398,6 @@ let
               map (quadletConfig {
                 inherit
                   name
-                  backend
                   engine
                   cfg
                   quadlet
@@ -462,6 +445,7 @@ in
     containerRuntimeDirectory
     credentialDirectory
     credentialMount
+    imageOption
     imageUnit
     listen
     mkBackend

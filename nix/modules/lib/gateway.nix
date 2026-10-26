@@ -29,28 +29,6 @@ rec {
     RestartSec = 5;
   };
 
-  # Options of a gateway running from a container `image`.
-  imageOptions =
-    { image, tagExample }:
-    {
-      image = mkOption {
-        type = types.str;
-        default = image;
-        description = "Container image of the gateway.";
-      };
-      tag = mkOption {
-        type = types.str;
-        example = tagExample;
-        description = "Tag of `image`, unless `digest` pins it.";
-      };
-      digest = mkOption {
-        type = with types; nullOr str;
-        default = null;
-        example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
-        description = "Immutable digest of `image`, which takes precedence over `tag`.";
-      };
-    };
-
   # The module of the gateway `name` listening on TCP, which routes the listed
   # endpoints in a stable order and reaches them on TCP only. Its options are
   # the shared ones, `options` and the `settings` option, which `settings`
@@ -207,7 +185,7 @@ rec {
     let
       image = quadlet.imageUnit {
         inherit (config.virtualisation.quadlet) images;
-        inherit (cfg) image tag digest;
+        inherit (cfg) image;
         prefix = unit;
       };
     in
@@ -217,10 +195,10 @@ rec {
         inherit (image) images;
         containers.${unit} = {
           unitConfig = sharedUnitConfig;
-          serviceConfig = credentialServiceConfig cfg.credentials // restartConfig // serviceConfig;
+          serviceConfig = credentialServiceConfig cfg.credentials // serviceConfig;
           containerConfig =
             quadlet.baseContainerConfig
-            // image.containerConfig (cfg.digest == null)
+            // image.containerConfig
             // {
               Network = "host";
               Environment = cfg.environment // environment;

@@ -174,14 +174,14 @@ The generated config is validated at build time with `llmhop -check`, so a typo 
 #### SMG
 
 The [Shepherd Model Gateway](https://github.com/smg-project/smg) registers every listed model of any engine from a generated discovery file, retrying each until it serves.
-Natively, its `package` is a Python environment built with [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels), and the container runs `lightseekorg/smg` at `tag`.
+Natively, its `package` is a Python environment built with [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels), and the container runs the complete reference in `image`.
 `settings` takes SMG's CLI flags, where a credential reference expands to the credential's contents when SMG starts:
 
 ```nix
 services.llmhop.gateway = {
   type = "smg-quadlet";
   smg-quadlet = {
-    tag = "1.13.0";
+    image = "docker.io/lightseekorg/smg:1.13.0";
     credentials."smg.api-key" = null;
     settings.api-key = "\${cred:smg.api-key}";
   };
@@ -206,7 +206,7 @@ services.llmhop.gateway = {
 };
 ```
 
-nixpkgs lacks Bifrost, so the native `package` comes from Bifrost's own flake, and the container runs `maximhq/bifrost` at `tag`, both with their app directory at `/var/lib/bifrost`.
+nixpkgs lacks Bifrost, so the native `package` comes from Bifrost's own flake, and the container's `image` selects a reference such as `docker.io/maximhq/bifrost:v2.3.2`, both with their app directory at `/var/lib/bifrost`.
 
 ### Inference backends
 
@@ -240,6 +240,8 @@ services.llmhop = {
 Native workers are hardened system units running as the backend's `user`, managed with `systemctl status <backend>-<model>` and `journalctl -u <backend>-<model>`.
 llama.cpp comes from nixpkgs, vLLM and SGLang from [prebuilt wheels](#native-vllm-and-sglang-from-prebuilt-wheels).
 The container variants run through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) as rootful system units, managed with `quadletctl`, as in `quadletctl systemctl status <unit>`, `quadletctl journalctl <unit> -f`, `quadletctl podman <unit> ps`, `quadletctl list` and `quadletctl shell <unit>`.
+Each native model or detector inherits its backend's `package`, while each container model or detector inherits its backend's `image`, with either overridable per workload.
+Container backends and gateways require a complete `image` reference with a tag or digest, such as `docker.io/vllm/vllm-openai:latest` or `docker.io/vllm/vllm-openai@sha256:<digest>`.
 A worker stays `activating` until its server answers `/health`, so `startupOrdering` boots them one at a time in ascending `name` order, as the [internals](https://mirkolenz.github.io/llmhop/internals.html#lifecycle) explain.
 
 The module exposes no escape hatches for unit settings, since NixOS merges definitions of the generated units themselves.
@@ -292,7 +294,10 @@ Point `cache.directory` at a data disk for large models and manage it with the s
 `<backend>-update` restarts every fetcher of its backend one after another on the `fetch.interval` schedule, daily by default.
 A fetcher restarts its server when the downloaded revision changed, and starts it if it failed, such as after a first boot without network.
 `fetch.prune = true` then deletes every repository and revision that no enabled workload references, while llama.cpp keeps every downloaded quantization of a referenced repository.
-Containers do not pull either, but reference a Quadlet image unit `<backend>-<tag>-image` with `Pull=never`, and a server tracking a tag is labeled `AutoUpdate=registry`, so enable Podman's `podman-auto-update` timer to update, restart and prune, as described in [quadlet-nix](https://github.com/mirkolenz/quadlet-nix#updates-and-pruning).
+Containers reference a shared Quadlet image unit `<backend>-<image-hash>-image` with `Pull=never`, and the image unit uses Podman's default pull policy.
+A server tracking a tag is labeled `AutoUpdate=registry`, while digest-pinned servers and fetchers do not auto update.
+Set `virtualisation.quadlet.autoUpdate.enable = true` to update and restart tagged servers through Quadlet Nix's timer, which runs `podman-auto-update.service`.
+Its separate `autoPrune.enable` timer removes unused images, as described in [quadlet-nix](https://github.com/mirkolenz/quadlet-nix#updates-and-pruning).
 
 Features that download at runtime need another source:
 
@@ -314,12 +319,12 @@ Strings and paths are passed verbatim and everything else as JSON, so `0.6` stay
 
 #### Quadlet execution and user namespaces
 
-quadlet-nix installs system units and Podman runs rootfully, where llama.cpp's `tag` selects one of the upstream server image variants:
+quadlet-nix installs system units and Podman runs rootfully, where llama.cpp's `image` selects one of the upstream server image variants:
 
 ```nix
 services.llmhop.llama-cpp-quadlet = {
   enable = true;
-  tag = "server-cuda";
+  image = "ghcr.io/ggml-org/llama.cpp:server-cuda";
   models."qwen3-8b".model = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
 };
 ```

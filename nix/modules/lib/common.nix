@@ -117,8 +117,7 @@ rec {
           command = model: [ (lib.getExe' model.package "llama-server") ];
         };
         quadlet = quadlet // {
-          image = "ghcr.io/ggml-org/llama.cpp";
-          tagExample = "server-cuda";
+          imageExample = "ghcr.io/ggml-org/llama.cpp:server-cuda";
           entrypoint = [ "/app/llama-server" ];
           port = 8080;
           fetcher = "/app/llama";
@@ -153,8 +152,7 @@ rec {
           ];
         };
         quadlet = quadlet // {
-          image = "docker.io/vllm/vllm-openai";
-          tagExample = "latest";
+          imageExample = "docker.io/vllm/vllm-openai:latest";
           entrypoint = [
             "vllm"
             "serve"
@@ -199,8 +197,7 @@ rec {
           ];
         };
         quadlet = quadlet // {
-          image = "docker.io/lmsysorg/sglang";
-          tagExample = "latest";
+          imageExample = "docker.io/lmsysorg/sglang:latest";
           entrypoint = [
             "sglang"
             "serve"
@@ -507,9 +504,8 @@ rec {
   # again if it failed. The rate limit is reset first, so a planned restart
   # does not count as a crash.
   #
-  # Its `script` downloads every repository or, like an image pull with
-  # `Policy=newer`, keeps it from the cache when that fails, such as offline,
-  # as long as it holds the revision.
+  # Its `script` downloads every repository or keeps it from the cache when
+  # that fails, such as offline, as long as it holds the revision.
   mkFetcher =
     {
       engine,

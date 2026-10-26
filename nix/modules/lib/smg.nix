@@ -146,9 +146,8 @@ in
 
   quadlet = mkModule {
     name = "smg-quadlet";
-    options = gateway.imageOptions {
-      image = "docker.io/lightseekorg/smg";
-      tagExample = "1.13.0";
+    options.image = quadlet.imageOption // {
+      example = "docker.io/lightseekorg/smg:1.13.0";
     };
     discoveryPath = containerDiscoveryFile;
     config =

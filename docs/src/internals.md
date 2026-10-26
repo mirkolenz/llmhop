@@ -172,3 +172,5 @@ Native builds check the script against the vLLM environment, so a `uv lock` that
 The container rootfs stays writable, since ML runtimes scatter JIT and compile caches across version-dependent `HOME` paths that an immutable rootfs would need an ever-growing tmpfs allow-list for.
 `/tmp` is a tmpfs for fast scratch, where torch inductor puts `/tmp/torchinductor_root`.
 Every workload defines the image unit of its image, which the module system merges into one per distinct image, referenced through quadlet-nix's `ref`.
+Image unit names hash the complete reference, so repositories using the same tag remain distinct.
+Quadlet Nix starts image units and oneshot fetchers only when a dependent starts, while servers start at boot.

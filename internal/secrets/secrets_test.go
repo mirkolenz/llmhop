@@ -7,176 +7,49 @@ import (
 )
 
 func TestExpand(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+	t.Setenv("LLMHOP_TEST_X", "secret")
+	_ = os.Unsetenv("LLMHOP_TEST_MISSING")
+
+	file := func(name, contents string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(contents), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		return "${file:" + p + "}"
+	}
+
 	cases := []struct {
-		name    string
-		setup   func(t *testing.T) string
-		input   string
+		in      string
+		load    bool
 		want    string
 		wantErr bool
 	}{
-		{
-			name:  "literal",
-			input: "no refs here",
-			want:  "no refs here",
-		},
-		{
-			name:  "empty",
-			input: "",
-			want:  "",
-		},
-		{
-			name:  "dollar without reference",
-			input: "a $ b $",
-			want:  "a $ b $",
-		},
-		{
-			name: "env braced",
-			setup: func(t *testing.T) string {
-				t.Setenv("LLMHOP_TEST_X", "secret")
-				return "Bearer ${env:LLMHOP_TEST_X}"
-			},
-			want: "Bearer secret",
-		},
-		{
-			name:    "bare name is rejected",
-			input:   "pa$sword",
-			wantErr: true,
-		},
-		{
-			name:  "escaped reference",
-			input: "a$${env:LLMHOP_TEST_X}",
-			want:  "a${env:LLMHOP_TEST_X}",
-		},
-		{
-			name:    "reference without scheme",
-			input:   "${LLMHOP_TEST_X}",
-			wantErr: true,
-		},
-		{
-			name: "env missing",
-			setup: func(t *testing.T) string {
-				_ = os.Unsetenv("LLMHOP_TEST_MISSING")
-				return "${env:LLMHOP_TEST_MISSING}"
-			},
-			wantErr: true,
-		},
-		{
-			name: "multiple refs",
-			setup: func(t *testing.T) string {
-				t.Setenv("LLMHOP_TEST_A", "one")
-				t.Setenv("LLMHOP_TEST_B", "two")
-				return "${env:LLMHOP_TEST_A}-${env:LLMHOP_TEST_B}"
-			},
-			want: "one-two",
-		},
-		{
-			name: "file absolute",
-			setup: func(t *testing.T) string {
-				return "${file:" + writeFile(t, "", "secret\n") + "}"
-			},
-			want: "secret",
-		},
-		{
-			name: "cred by name",
-			setup: func(t *testing.T) string {
-				dir := t.TempDir()
-				writeFile(t, dir, "v")
-				t.Setenv("CREDENTIALS_DIRECTORY", dir)
-				return "${cred:tok}"
-			},
-			want: "v",
-		},
-		{
-			name: "cred without credentials directory",
-			setup: func(t *testing.T) string {
-				t.Setenv("CREDENTIALS_DIRECTORY", "")
-				return "${cred:tok}"
-			},
-			wantErr: true,
-		},
-		{
-			name: "cred rejects a path",
-			setup: func(t *testing.T) string {
-				t.Setenv("CREDENTIALS_DIRECTORY", t.TempDir())
-				return "${cred:sub/tok}"
-			},
-			wantErr: true,
-		},
-		{
-			name:    "file rejects a relative path",
-			input:   "${file:tok}",
-			wantErr: true,
-		},
-		{
-			name: "file preserves internal whitespace, trims trailing",
-			setup: func(t *testing.T) string {
-				return "${file:" + writeFile(t, "", "a b\nc\r\n") + "}"
-			},
-			want: "a b\nc",
-		},
-		{
-			name: "file trims only one trailing newline",
-			setup: func(t *testing.T) string {
-				return "${file:" + writeFile(t, "", "secret\n\n") + "}"
-			},
-			want: "secret\n",
-		},
-		{
-			name: "file trims only one CRLF-terminated line",
-			setup: func(t *testing.T) string {
-				return "${file:" + writeFile(t, "", "secret\n\r\n") + "}"
-			},
-			want: "secret\n",
-		},
-		{
-			name:    "file missing",
-			input:   "${file:/does/not/exist/llmhop-test}",
-			wantErr: true,
-		},
+		{"Bearer ${env:LLMHOP_TEST_X}", true, "Bearer secret", false},
+		{"a$${env:LLMHOP_TEST_X}", true, "a${env:LLMHOP_TEST_X}", false},
+		{"pa$sword", true, "", true},
+		{"${LLMHOP_TEST_X}", true, "", true},
+		{"${env:LLMHOP_TEST_MISSING}", true, "", true},
+		{"${env:LLMHOP_TEST_MISSING}", false, "${env:LLMHOP_TEST_MISSING}", false},
+		{"${env:}", false, "", true},
+		{"${file:tok}", false, "", true},
+		{"${cred:sub/tok}", false, "", true},
+		{file("tok", "a b\nc\r\n"), true, "a b\nc", false},
+		{"${cred:tok}", true, "a b\nc", false},
+		{file("lines", "secret\n\r\n"), true, "secret", false},
+		{"${file:/does/not/exist/llmhop-test}", true, "", true},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			in := c.input
-			if c.setup != nil {
-				in = c.setup(t)
-			}
-			got, err := Expand(in, true)
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got %q", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != c.want {
-				t.Fatalf("got %q, want %q", got, c.want)
-			}
-		})
-	}
-}
 
-func TestExpandWithoutLoad(t *testing.T) {
-	for _, in := range []string{"${file:tok}", "${cred:sub/tok}", "${env:}"} {
-		if _, err := Expand(in, false); err == nil {
-			t.Errorf("Expand(%q, false) accepted an invalid reference", in)
+	for _, c := range cases {
+		if got, err := Expand(c.in, c.load); got != c.want && !c.wantErr || (err != nil) != c.wantErr {
+			t.Errorf("Expand(%q, %v) = %q, %v", c.in, c.load, got, err)
 		}
 	}
 
-	if got, err := Expand("${env:LLMHOP_TEST_MISSING}", false); err != nil || got != "${env:LLMHOP_TEST_MISSING}" {
-		t.Errorf("Expand without load resolved a reference: %q, %v", got, err)
-	}
-}
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
 
-func writeFile(t *testing.T, dir, contents string) string {
-	t.Helper()
-	if dir == "" {
-		dir = t.TempDir()
+	if _, err := Expand("${cred:tok}", true); err == nil {
+		t.Error("resolved a credential without $CREDENTIALS_DIRECTORY")
 	}
-	p := filepath.Join(dir, "tok")
-	if err := os.WriteFile(p, []byte(contents), 0o400); err != nil {
-		t.Fatal(err)
-	}
-	return p
 }

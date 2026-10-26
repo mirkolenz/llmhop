@@ -3,7 +3,6 @@
 package systemd
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -18,13 +17,9 @@ func Listeners() ([]net.Listener, error) {
 		return nil, nil
 	}
 
-	n, err := strconv.Atoi(os.Getenv("LISTEN_FDS"))
+	n, err := strconv.ParseUint(os.Getenv("LISTEN_FDS"), 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("LISTEN_FDS: %w", err)
-	}
-
-	if n < 0 {
-		return nil, errors.New("LISTEN_FDS must not be negative")
 	}
 
 	var listeners []net.Listener
@@ -37,10 +32,6 @@ func Listeners() ([]net.Listener, error) {
 		_ = f.Close()
 
 		if err != nil {
-			for _, listener := range listeners {
-				_ = listener.Close()
-			}
-
 			return nil, fmt.Errorf("socket %d: %w", i, err)
 		}
 

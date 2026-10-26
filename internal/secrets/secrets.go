@@ -100,18 +100,13 @@ func readCredential(name string) (string, error) {
 	return readFile(filepath.Join(dir, name))
 }
 
-// readFile reads a secret from an absolute path and trims a single trailing
-// line terminator.
+// readFile reads a secret from an absolute path and trims trailing line
+// terminators.
 func readFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read secret file %q: %w", path, err)
 	}
 
-	value, hasNewline := strings.CutSuffix(string(data), "\n")
-	if hasNewline {
-		value = strings.TrimSuffix(value, "\r")
-	}
-
-	return value, nil
+	return strings.TrimRight(string(data), "\r\n"), nil
 }

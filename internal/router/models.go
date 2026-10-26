@@ -33,16 +33,17 @@ type modelList struct {
 	Data   []model `json:"data"`
 }
 
-// jsonBody encodes v once, since every payload served here is immutable
-// after startup. The types encode infallibly.
+// jsonBody encodes v, so payloads immutable after startup are encoded once.
+// The types encode infallibly.
 func jsonBody(v any) []byte {
 	body, _ := json.Marshal(v)
 	return body
 }
 
-// writeJSON serves a body built by jsonBody.
-func writeJSON(w http.ResponseWriter, body []byte) {
+// writeJSON serves a body built by jsonBody with the given status.
+func writeJSON(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }
 
@@ -52,7 +53,7 @@ func registerHealth(mux *http.ServeMux, models int) {
 	body := jsonBody(health{Status: "ok", Models: models})
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, body)
+		writeJSON(w, http.StatusOK, body)
 	})
 }
 
@@ -75,7 +76,7 @@ func registerModels(mux *http.ServeMux, names []string) {
 	list := jsonBody(modelList{Object: "list", Data: models})
 
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, list)
+		writeJSON(w, http.StatusOK, list)
 	})
 
 	mux.HandleFunc("GET /v1/models/{model}", func(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +86,6 @@ func registerModels(mux *http.ServeMux, names []string) {
 			http.Error(w, fmt.Sprintf("unknown model %q", name), http.StatusNotFound)
 			return
 		}
-		writeJSON(w, m)
+		writeJSON(w, http.StatusOK, m)
 	})
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -24,16 +25,24 @@ type Model struct {
 	// Unlisted keeps a backend routable but hides it from the model catalog,
 	// for services that are not inference models, such as a watermark detector.
 	Unlisted bool `json:"unlisted,omitempty"`
+	// MaxConcurrentRequests bounds the active proxied requests per model,
+	// so one busy backend never starves another. Zero means unlimited.
+	MaxConcurrentRequests uint `json:"maxConcurrentRequests,omitempty"`
+	// Health is the backend path GET /readiness probes. Empty skips the model.
+	Health string `json:"health,omitempty"`
 }
 
 type Config struct {
 	// Host is the interface to bind to. Empty means every interface.
-	Host                  string           `json:"host,omitempty"`
-	Port                  int              `json:"port,omitempty"`
-	MaxBodyBytes          int64            `json:"maxBodyBytes,omitempty"`
-	MaxConcurrentRequests int              `json:"maxConcurrentRequests,omitempty"`
-	AuthTokens            []string         `json:"authTokens,omitempty"`
-	Models                map[string]Model `json:"models"`
+	Host         string `json:"host,omitempty"`
+	Port         uint16 `json:"port,omitempty"`
+	MaxBodyBytes int64  `json:"maxBodyBytes,omitempty"`
+	// MaxBufferedRequests bounds the requests whose body is held in memory to
+	// read their JSON "model" field, until the backend has received it, so memory
+	// stays below this times MaxBodyBytes. Zero means unlimited.
+	MaxBufferedRequests uint             `json:"maxBufferedRequests,omitempty"`
+	AuthTokens          []string         `json:"authTokens,omitempty"`
+	Models              map[string]Model `json:"models"`
 }
 
 // DefaultMaxBodyBytes bounds the size of a request body the router will buffer
@@ -41,8 +50,8 @@ type Config struct {
 // base64-encoded images; bump it explicitly for larger multimodal payloads.
 const DefaultMaxBodyBytes = 100 * 1024 * 1024
 
-// DefaultMaxConcurrentRequests bounds the number of active proxied requests.
-const DefaultMaxConcurrentRequests = 8
+// DefaultMaxBufferedRequests bounds the request bodies buffered at once.
+const DefaultMaxBufferedRequests = 8
 
 // DefaultPort is the port llmhop listens on when the config sets none.
 const DefaultPort = 8080
@@ -65,7 +74,7 @@ func (cfg *Config) Listed() []string {
 
 // Listen renders the host and port as a net.Listen address.
 func (cfg *Config) Listen() string {
-	return net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	return net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port)))
 }
 
 // Load reads, parses and validates the config at path. With expandSecrets it
@@ -80,8 +89,8 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 	defer func() { _ = f.Close() }()
 
 	cfg := &Config{
-		MaxBodyBytes:          DefaultMaxBodyBytes,
-		MaxConcurrentRequests: DefaultMaxConcurrentRequests,
+		MaxBodyBytes:        DefaultMaxBodyBytes,
+		MaxBufferedRequests: DefaultMaxBufferedRequests,
 	}
 	dec := json.NewDecoder(f)
 	// Unknown keys are an error rather than a silent no-op: a misspelled
@@ -100,7 +109,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 		return nil, err
 	}
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(expandSecrets); err != nil {
 		return nil, err
 	}
 
@@ -108,64 +117,27 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 		cfg.Port = DefaultPort
 	}
 
-	if err := cfg.resolveSecrets(expandSecrets); err != nil {
-		return nil, err
-	}
-
 	return cfg, nil
 }
 
-// validate checks every invariant of values that cannot carry secrets.
-func (cfg *Config) validate() error {
-	if cfg.Port < 0 || cfg.Port > 65535 {
-		return fmt.Errorf("port %d is outside 0..65535", cfg.Port)
+// validate checks every invariant and expands auth tokens and per-model
+// header values in place, or with load unset only checks their references.
+// Raw references are valid header values, so the same checks serve `-check`
+// runs and startup.
+func (cfg *Config) validate(load bool) error {
+	if len(cfg.Models) == 0 {
+		return errors.New("no models configured")
 	}
 
 	if cfg.MaxBodyBytes < 0 {
 		return errors.New("maxBodyBytes must not be negative")
 	}
 
-	if cfg.MaxConcurrentRequests < 0 {
-		return errors.New("maxConcurrentRequests must not be negative")
-	}
-
-	if len(cfg.Models) == 0 {
-		return errors.New("no models configured")
-	}
-
-	for name, model := range cfg.Models {
-		if name == "" {
-			return errors.New("model name must not be empty")
-		}
-
-		seen := make(map[string]bool, len(model.Headers))
-
-		for header := range model.Headers {
-			if !validHeaderName(header) {
-				return fmt.Errorf("models.%s.headers: invalid header name %q", name, header)
-			}
-
-			key := http.CanonicalHeaderKey(header)
-			if seen[key] {
-				return fmt.Errorf("models.%s.headers: duplicate header %q", name, key)
-			}
-
-			seen[key] = true
-		}
-	}
-
-	return nil
-}
-
-// resolveSecrets expands auth tokens and per-model header values in place,
-// or with load unset only checks their references, and validates the results.
-// Raw references are valid header values, so the same checks serve `-check`
-// runs and startup.
-func (cfg *Config) resolveSecrets(load bool) error {
 	for i, token := range cfg.AuthTokens {
 		v, err := secrets.Expand(token, load)
-		if err == nil {
-			err = validateAuthToken(v)
+		// An empty token would authenticate `Authorization: Bearer `.
+		if err == nil && (v == "" || !validHeaderValue(v)) {
+			err = errors.New("empty or invalid token")
 		}
 
 		if err != nil {
@@ -176,33 +148,49 @@ func (cfg *Config) resolveSecrets(load bool) error {
 	}
 
 	for name, model := range cfg.Models {
-		for k, value := range model.Headers {
+		if name == "" {
+			return errors.New("model name must not be empty")
+		}
+
+		// Probes join the path onto the backend URL, so only a path works.
+		if model.Health != "" && !validPath(model.Health) {
+			return fmt.Errorf("models.%s.health: %q must be an absolute path", name, model.Health)
+		}
+
+		seen := make(map[string]bool, len(model.Headers))
+
+		for header, value := range model.Headers {
+			if !validHeaderName(header) {
+				return fmt.Errorf("models.%s.headers: invalid header name %q", name, header)
+			}
+
+			key := http.CanonicalHeaderKey(header)
+			if seen[key] {
+				return fmt.Errorf("models.%s.headers: duplicate header %q", name, key)
+			}
+
+			seen[key] = true
+
 			v, err := secrets.Expand(value, load)
 			if err == nil && !validHeaderValue(v) {
 				err = errors.New("invalid header value")
 			}
 
 			if err != nil {
-				return fmt.Errorf("models.%s.headers.%s: %w", name, k, err)
+				return fmt.Errorf("models.%s.headers.%s: %w", name, header, err)
 			}
 
-			model.Headers[k] = v
+			model.Headers[header] = v
 		}
 	}
 
 	return nil
 }
 
-func validateAuthToken(token string) error {
-	if token == "" {
-		return errors.New("empty token")
-	}
+func validPath(p string) bool {
+	u, err := url.Parse(p)
 
-	if !validHeaderValue(token) {
-		return errors.New("invalid token")
-	}
-
-	return nil
+	return err == nil && u.Scheme == "" && u.Host == "" && strings.HasPrefix(u.Path, "/")
 }
 
 func validHeaderName(name string) bool {

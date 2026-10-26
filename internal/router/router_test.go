@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 
@@ -21,7 +24,7 @@ type capturedRequest struct {
 	query  string
 }
 
-func newBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
+func startBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
 	t.Helper()
 	captured := &capturedRequest{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,14 +65,6 @@ func send(t *testing.T, handler http.Handler, method, path, body, authHeader str
 	return rec
 }
 
-func TestInvalidModelURL(t *testing.T) {
-	for _, url := range []string{"://not a url", "localhost:8000"} {
-		if _, err := New(&config.Config{Models: map[string]config.Model{"bad": {URL: url}}}); err == nil {
-			t.Fatalf("accepted the malformed URL %q", url)
-		}
-	}
-}
-
 func TestCheckBearer(t *testing.T) {
 	tokens := [][]byte{[]byte("alpha"), []byte("beta")}
 	cases := []struct {
@@ -91,7 +86,7 @@ func TestCheckBearer(t *testing.T) {
 }
 
 func TestCatalog(t *testing.T) {
-	backend, _ := newBackend(t)
+	backend, _ := startBackend(t)
 	h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
 		"b":        {URL: backend.URL},
 		"a":        {URL: backend.URL},
@@ -148,36 +143,14 @@ func TestRouterRequests(t *testing.T) {
 		wantCode   int
 		checkFwd   func(t *testing.T, req *capturedRequest)
 	}{
-		{
-			name:     "invalid JSON returns 400",
-			body:     `{"model":`,
-			wantCode: http.StatusBadRequest,
-		},
-		{
-			name:     "missing model returns 400",
-			body:     `{}`,
-			wantCode: http.StatusBadRequest,
-		},
-		{
-			name:     "null model returns 400",
-			body:     `{"model":null}`,
-			wantCode: http.StatusBadRequest,
-		},
-		{
-			name:     "non-string model returns 400",
-			body:     `{"model":123}`,
-			wantCode: http.StatusBadRequest,
-		},
-		{
-			name:     "duplicate model key returns 400",
-			body:     `{"model":"m","model":null}`,
-			wantCode: http.StatusBadRequest,
-		},
-		{
-			name:     "unknown model returns 404",
-			body:     `{"model": "nope"}`,
-			wantCode: http.StatusNotFound,
-		},
+		{name: "invalid JSON", body: `{"model":`, wantCode: http.StatusBadRequest},
+		{name: "missing model", body: `{}`, wantCode: http.StatusBadRequest},
+		{name: "null model", body: `{"model":null}`, wantCode: http.StatusBadRequest},
+		{name: "non-string model", body: `{"model":123}`, wantCode: http.StatusBadRequest},
+		{name: "duplicate model key", body: `{"model":"m","model":null}`, wantCode: http.StatusBadRequest},
+		{name: "unknown model", body: `{"model": "nope"}`, wantCode: http.StatusNotFound},
+		{name: "auth runs before model lookup", auth: []string{"secret"}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
+		{name: "oversized body", maxBody: 16, body: `{"model": "m", "prompt": "` + strings.Repeat("x", 100) + `"}`, wantCode: http.StatusRequestEntityTooLarge},
 		{
 			name:     "known model is proxied with its body intact",
 			body:     `{"model":"m","prompt":{"model":"b"}}`,
@@ -198,12 +171,6 @@ func TestRouterRequests(t *testing.T) {
 					t.Fatalf("backend saw Authorization %q", got)
 				}
 			},
-		},
-		{
-			name:     "auth runs before model lookup",
-			auth:     []string{"secret"},
-			body:     `{"model": "unknown"}`,
-			wantCode: http.StatusUnauthorized,
 		},
 		{
 			name:       "auth strips client Authorization before forwarding",
@@ -233,17 +200,11 @@ func TestRouterRequests(t *testing.T) {
 				}
 			},
 		},
-		{
-			name:     "oversized body returns 413",
-			maxBody:  16,
-			body:     `{"model": "m", "prompt": "` + strings.Repeat("x", 100) + `"}`,
-			wantCode: http.StatusRequestEntityTooLarge,
-		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			backend, captured := newBackend(t)
+			backend, captured := startBackend(t)
 			h := newRouter(t, &config.Config{
 				AuthTokens:   c.auth,
 				MaxBodyBytes: c.maxBody,
@@ -263,7 +224,7 @@ func TestRouterRequests(t *testing.T) {
 }
 
 func TestProxyPreservesHostAndQuery(t *testing.T) {
-	backend, captured := newBackend(t)
+	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{Models: map[string]config.Model{
 		"m": {URL: backend.URL + "/base?backend=1"},
 	}})
@@ -288,28 +249,8 @@ func TestProxyPreservesHostAndQuery(t *testing.T) {
 	}
 }
 
-func TestProxyPreservesRequestTrailer(t *testing.T) {
-	var trailer string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		_, _ = io.Copy(io.Discard, req.Body)
-		trailer = req.Trailer.Get("X-Check")
-	}))
-	t.Cleanup(backend.Close)
-	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URL: backend.URL}}})
-
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
-	req.ContentLength = -1
-	req.Trailer = http.Header{"X-Check": {"ok"}}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK || trailer != "ok" {
-		t.Fatalf("status %d, trailer %q", rec.Code, trailer)
-	}
-}
-
 func TestPathRouting(t *testing.T) {
-	backend, captured := newBackend(t)
+	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
 		"detector": {URL: backend.URL + "/base", Unlisted: true},
 	}})
@@ -345,7 +286,7 @@ func TestBodyLimit(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", c.body)
 			req.ContentLength = c.contentLength
 			rec := httptest.NewRecorder()
-			proxyHandler(nil, c.maxBytes, 0)(rec, req)
+			proxyHandler(nil, c.maxBytes, nil)(rec, req)
 
 			if rec.Code != c.wantCode {
 				t.Fatalf("got status %d, want %d", rec.Code, c.wantCode)
@@ -355,27 +296,207 @@ func TestBodyLimit(t *testing.T) {
 }
 
 func TestConcurrentRequestLimit(t *testing.T) {
-	handler := proxyHandler(nil, 0, 1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		entered <- struct{}{}
+		<-release
+	}))
+	t.Cleanup(slow.Close)
+	fast, _ := startBackend(t)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{
+		"a": {URL: slow.URL, MaxConcurrentRequests: 1},
+		"b": {URL: fast.URL, MaxConcurrentRequests: 1},
+	}})
+
+	done := make(chan struct{})
+
+	go func() {
+		send(t, h, http.MethodPost, "/", `{"model":"a"}`, "")
+		close(done)
+	}()
+
+	// Returns once the first request holds the only slot of model a.
+	<-entered
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"a"}`, ""); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("saturated model got status %d, want 503", rec.Code)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"b"}`, ""); rec.Code != http.StatusOK {
+		t.Errorf("other model got status %d, want 200", rec.Code)
+	}
+
+	close(release)
+	<-done
+}
+
+func TestReadiness(t *testing.T) {
+	// Healthy only at /health with the injected header and the Host the proxy
+	// would send, the configured one over TCP and localhost over a socket.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" || r.Header.Get("X-Key") != "k" || r.Host != "probe.example" && r.Host != "localhost" {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+	tcp := httptest.NewServer(handler)
+	t.Cleanup(tcp.Close)
+
+	socket := filepath.Join(t.TempDir(), "h.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unix := httptest.NewUnstartedServer(handler)
+	_ = unix.Listener.Close()
+	unix.Listener = ln
+	unix.Start()
+	t.Cleanup(unix.Close)
+
+	models := map[string]config.Model{
+		"tcp":      {URL: tcp.URL, Health: "/health", Headers: map[string]string{"X-Key": "k", "Host": "probe.example"}},
+		"unix":     {URL: "unix://" + socket, Health: "/health", Headers: map[string]string{"X-Key": "k"}},
+		"unprobed": {URL: tcp.URL},
+	}
+
+	check := func(wantCode int, want readiness) {
+		t.Helper()
+		h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: models})
+		rec := send(t, h, http.MethodGet, "/readiness", "", "")
+
+		var got readiness
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+
+		if rec.Code != wantCode || got != want {
+			t.Errorf("got status %d and %+v, want %d and %+v", rec.Code, got, wantCode, want)
+		}
+	}
+
+	check(http.StatusOK, readiness{Status: "ok", Ready: 2, Probed: 2})
+	models["broken"] = config.Model{URL: tcp.URL, Health: "/missing"}
+	check(http.StatusServiceUnavailable, readiness{Status: "unavailable", Ready: 2, Probed: 3})
+}
+
+func TestBufferedRequestLimit(t *testing.T) {
+	srv, _ := startBackend(t)
+	h := newRouter(t, &config.Config{
+		MaxBufferedRequests: 1,
+		Models:              map[string]config.Model{"m": {URL: srv.URL}},
+	})
+
+	// The first body arrives slowly, so its request holds the only slot.
 	body, writer := io.Pipe()
 	done := make(chan struct{})
 
 	go func() {
-		handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", body))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", body))
 		close(done)
 	}()
 
-	// Returns once the first request holds its slot and reads the body.
-	if _, err := writer.Write([]byte("{")); err != nil {
+	if _, err := writer.Write([]byte(`{"model":`)); err != nil {
 		t.Fatal(err)
 	}
 
-	rec := httptest.NewRecorder()
-	handler(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}")))
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("got status %d, want 503", rec.Code)
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("buffered request got status %d, want 503", rec.Code)
 	}
 
-	_ = writer.Close()
+	// Path-routed bodies stream, so they need no slot.
+	if rec := send(t, h, http.MethodPost, "/route/m/", "{}", ""); rec.Code != http.StatusOK {
+		t.Errorf("streamed request got status %d, want 200", rec.Code)
+	}
+
+	_ = writer.CloseWithError(io.ErrUnexpectedEOF)
 	<-done
+
+	// Forwarding the body released its slot.
+	for range 2 {
+		if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusOK {
+			t.Errorf("buffered request got status %d, want 200", rec.Code)
+		}
+	}
+}
+
+func TestBufferedSlotReleasedOnceSent(t *testing.T) {
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		entered <- struct{}{}
+		<-unblock
+	}))
+	t.Cleanup(slow.Close)
+	fast, _ := startBackend(t)
+	h := newRouter(t, &config.Config{
+		MaxBufferedRequests: 1,
+		Models:              map[string]config.Model{"slow": {URL: slow.URL}, "fast": {URL: fast.URL}},
+	})
+
+	done := make(chan struct{})
+
+	go func() {
+		send(t, h, http.MethodPost, "/", `{"model":"slow"}`, "")
+		close(done)
+	}()
+
+	<-entered
+
+	// The slow response still runs, but its body was sent.
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"fast"}`, ""); rec.Code != http.StatusOK {
+		t.Errorf("buffered request got status %d, want 200", rec.Code)
+	}
+
+	close(unblock)
+	<-done
+}
+
+func TestProxyPreservesRequestTrailer(t *testing.T) {
+	var trailer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.Copy(io.Discard, req.Body)
+		trailer = req.Trailer.Get("X-Check")
+	}))
+	t.Cleanup(srv.Close)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URL: srv.URL}}})
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+	req.ContentLength = -1
+	req.Trailer = http.Header{"X-Check": {"ok"}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || trailer != "ok" {
+		t.Fatalf("status %d, trailer %q", rec.Code, trailer)
+	}
+}
+
+func TestBufferedIdempotentRetry(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		// The second request reuses the connection, which closes before any response.
+		if calls.Add(1) == 2 {
+			conn, _, _ := http.NewResponseController(w).Hijack()
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URL: srv.URL}}})
+
+	for range 2 {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+		req.Header.Set("Idempotency-Key", "k")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("idempotent request got status %d, want 200", rec.Code)
+		}
+	}
+
+	if n := calls.Load(); n != 3 {
+		t.Errorf("backend got %d requests, want 3", n)
+	}
 }

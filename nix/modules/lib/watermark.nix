@@ -28,7 +28,7 @@ let
   # Runs the script with the image's Python.
   containerCommand = script: arguments: {
     arguments = [ containerScript ] ++ arguments;
-    containerConfig.Entrypoint = lib.toJSON [ "python" ];
+    entrypoint = [ "python" ];
     mounts = [ "${script}:${containerScript}:ro" ];
   };
 
@@ -46,13 +46,11 @@ let
           context_width = 4;
         };
         description = ''
-          vLLM's `WatermarkConfig` without `key`, validated at startup by the
-          installed release. A generating worker and its detector must share it.
-
-          The key, an unsigned 64-bit integer, is the credential
-          `${credential}`, imported from the system credential store, for
-          example the root-only file `/etc/credstore/${credential}`, unless
-          `credentials."${credential}"` names a file.
+          vLLM's `WatermarkConfig` without `key`, which a generating worker
+          and its detector must share. The key is the credential
+          `${credential}`, an unsigned 64-bit integer, imported from the
+          system credential store unless `credentials."${credential}"` names a
+          file.
         '';
       };
       config = lib.mkIf (config.watermark != null) {
@@ -143,7 +141,11 @@ let
         ]
       );
       default = { };
-      description = "Standalone watermark detection services, routed through llmhop as unlisted models.";
+      description = ''
+        Standalone watermark detection services. The llmhop gateway routes
+        them as unlisted models, while every other gateway leaves them to
+        direct clients.
+      '';
     };
 
   # Configuration of `backend` shared by both kinds: its detectors routed as
@@ -256,10 +258,7 @@ in
           listen = quadlet.listen engine;
           inherit (config.services.llmhop) socketDirectory;
           module = {
-            options = quadlet.workloadOptions {
-              noun = "detector";
-              socket = true;
-            };
+            options = quadlet.workloadOptions "detector";
             config.script = lib.mkDefault source;
           };
         };

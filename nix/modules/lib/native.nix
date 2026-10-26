@@ -3,16 +3,19 @@ lib: common:
 let
   inherit (lib) mkOption types;
   inherit (common)
+    apiKeyWrapper
     backendOptions
     chainEntries
     engines
     environmentFiles
+    fetchHook
     fetchUnit
     fetcherOf
     fetches
     healthTarget
     identityConfig
     identityOptions
+    isLoopback
     mkFetcher
     modelModule
     modelsOption
@@ -28,8 +31,8 @@ let
     workloadArgs
     ;
 
-  # Universal systemd-exec(5) hardening shared between the llmhop reverse proxy
-  # and the native workers. See "Worker hardening" in the module internals
+  # Universal systemd-exec(5) hardening of every native unit, gateways and
+  # workers alike. See "Worker hardening" in the module internals
   # documentation.
   hardenedServiceConfig = {
     CapabilityBoundingSet = "";
@@ -104,11 +107,8 @@ let
       SocketBindDeny = "any";
     };
 
-  # The listener of a native server, on loopback or its socket.
-  listen = workload: {
-    host = "127.0.0.1";
-    inherit (workload) port socket;
-  };
+  # The listener of a native server, on its host or its socket.
+  listen = workload: { inherit (workload) host port socket; };
 
   # The NixOS module of the native backend of the engine `name`. Each model
   # runs its internal `command`, which another module may replace, and the
@@ -126,6 +126,7 @@ let
       engine = engines.${name};
       inherit (engine.native) uv;
       cfg = config.services.llmhop.${name};
+      hook = fetchHook pkgs;
       entry =
         e:
         {
@@ -171,7 +172,7 @@ let
             inherit
               engine
               cfg
-              pkgs
+              hook
               workload
               ;
             server = unit;
@@ -180,7 +181,8 @@ let
             credentialDirectory = "%d";
           };
           offline = lib.optionalAttrs workload.offline;
-          # A socket's own network namespace, or else loopback only.
+          # A socket's own network namespace, or else loopback only, unless
+          # the server listens beyond it.
           network =
             if workload.socket != null then
               { UMask = socketUMask; } // offline { PrivateNetwork = true; }
@@ -188,7 +190,7 @@ let
               {
                 UMask = "0077";
               }
-              // offline {
+              // lib.optionalAttrs (workload.offline && isLoopback workload.host) {
                 IPAddressDeny = "any";
                 # Not `localhost`, whose `127.0.0.0/8` includes the resolver
                 # stub of systemd-resolved.
@@ -239,7 +241,7 @@ let
             unitConfig = sharedUnitConfig;
             serviceConfig =
               serverServiceConfig cfg workload
-              # Its group owns the worker socket, which llmhop joins.
+              # Its group owns the worker socket, which every client joins.
               // serviceConfig cfg
               // {
                 CacheDirectory = unit;
@@ -256,7 +258,11 @@ let
               // {
                 Type = "exec";
                 ExecStart = lib.replaceStrings [ credentialPlaceholder ] [ "%d" ] (
-                  utils.escapeSystemdExecArgs (entry.command ++ workloadArgs engine credentialPlaceholder workload)
+                  utils.escapeSystemdExecArgs (
+                    apiKeyWrapper pkgs.runtimeShell engine credentialPlaceholder workload
+                    ++ entry.command
+                    ++ workloadArgs engine credentialPlaceholder workload
+                  )
                 );
               };
           })
@@ -299,11 +305,8 @@ let
               mkOption {
                 type = types.package;
                 description = ''
-                  Package providing ${engine.native.packageEntry}.
-
-                  No default on purpose: ${engine.displayName} has no
-                  one-derivation-fits-all, so build it from a uv workspace with
-                  the flake's `mkUvEnv`, as in
+                  Package providing ${engine.native.packageEntry}, built from
+                  a uv workspace with the flake's `mkUvEnv`, as in
                   `inputs.llmhop.legacyPackages.''${pkgs.system}.mkUvEnv { workspaceRoot = ./${name}-env; }`.
                 '';
               }
@@ -349,13 +352,6 @@ let
               `${name}-<name>` beside its fetcher `${name}-<name>-fetch`.
             '';
           };
-
-          entries = mkOption {
-            type = with types; listOf attrs;
-            internal = true;
-            default = [ ];
-            description = "Workloads served beside the models.";
-          };
         }
         // lib.optionalAttrs uv {
           startupOrdering = startupOrderingOption "via `environment`, e.g. `CUDA_VISIBLE_DEVICES`";
@@ -364,11 +360,13 @@ let
       config = lib.mkIf cfg.enable (
         lib.mkMerge [
           { systemd.services = lib.listToAttrs (lib.concatMap units entries); }
-          # llmhop joins `group`, which owns the worker sockets.
+          # Every socket client joins `group`, which owns the worker sockets.
           {
-            systemd.services.llmhop.serviceConfig.SupplementaryGroups = lib.mkIf config.services.llmhop.enable [
-              cfg.group
-            ];
+            users.users = lib.mkIf (lib.any (e: e.workload.socket != null) entries) (
+              lib.genAttrs config.services.llmhop.socketClients (_: {
+                extraGroups = [ cfg.group ];
+              })
+            );
           }
           (sharedConfig {
             inherit
@@ -391,5 +389,10 @@ let
     };
 in
 {
-  inherit listen mkBackend serviceConfig;
+  inherit
+    hardenedServiceConfig
+    listen
+    mkBackend
+    serviceConfig
+    ;
 }

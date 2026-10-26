@@ -33,7 +33,10 @@ rec {
   # `fetch` renders the argv downloading one repository with the given
   # `fetcher` into the hub cache below `HF_HOME`. `modelSettings` are the
   # flags derived from a model and `environment` is set on every server.
-  # `native` and `quadlet` hold what only one kind of backend needs.
+  # `apiKey` hands a model's API key file to its server, either as `settings`
+  # or as a POSIX shell `script` run before the server, which may extend its
+  # arguments through `set --`. `native` and `quadlet` hold what only one kind
+  # of backend needs.
   engines =
     let
       huggingFace = {
@@ -87,6 +90,7 @@ rec {
         };
         revisions = false;
         environment = { };
+        apiKey.settings = path: { api-key-file = path; };
         modelSettings =
           model:
           {
@@ -115,6 +119,7 @@ rec {
         quadlet = quadlet // {
           image = "ghcr.io/ggml-org/llama.cpp";
           tagExample = "server-cuda";
+          entrypoint = [ "/app/llama-server" ];
           port = 8080;
           fetcher = "/app/llama";
         };
@@ -132,6 +137,12 @@ rec {
         # vLLM otherwise derives the address of its distributed workers from
         # the route to a public one, which an offline server lacks.
         environment.VLLM_HOST_IP = "127.0.0.1";
+        # `--api-key` takes the key itself, which the environment keeps off
+        # the command line.
+        apiKey.script = path: ''
+          VLLM_API_KEY=$(cat ${lib.escapeShellArg path})
+          export VLLM_API_KEY
+        '';
         native = native // {
           uv = true;
           packageEntry = "the `vllm` CLI at `bin/vllm`";
@@ -144,9 +155,12 @@ rec {
         quadlet = quadlet // {
           image = "docker.io/vllm/vllm-openai";
           tagExample = "latest";
+          entrypoint = [
+            "vllm"
+            "serve"
+          ];
           port = 8000;
-          # The image's entrypoint is `vllm serve`, which takes the model as
-          # its positional argument.
+          # `vllm serve` takes the model as its positional argument.
           container = model: { arguments = [ model.model ]; };
         };
       };
@@ -157,6 +171,14 @@ rec {
         modelSettings = model: huggingFace.modelSettings model // { model-path = model.model; };
         modelDescription = "Hugging Face repository passed as `--model-path`, or an absolute path.";
         modelExample = "Qwen/Qwen3-8B";
+        # SGLang reads its key from neither a file nor the environment, so a
+        # private YAML config with the key as an escaped double-quoted string
+        # carries it off the command line.
+        apiKey.script = path: ''
+          config=$(mktemp)
+          printf 'api-key: "%s"\n' "$(sed 's/[\\"]/\\&/g' ${lib.escapeShellArg path})" >"$config"
+          set -- "$@" --config "$config"
+        '';
         native = native // {
           uv = true;
           packageEntry = "the SGLang Python environment, launched as `bin/python -m sglang.launch_server`";
@@ -179,16 +201,14 @@ rec {
         quadlet = quadlet // {
           image = "docker.io/lmsysorg/sglang";
           tagExample = "latest";
+          entrypoint = [
+            "sglang"
+            "serve"
+          ];
           port = 30000;
           # The images ship their flash-attention kernels in their own hub
           # cache, which the mounted `HF_HOME` replaces.
           environment.KERNELS_CACHE = "/root/.cache/huggingface/hub";
-          container = _model: {
-            containerConfig.Entrypoint = lib.toJSON [
-              "sglang"
-              "serve"
-            ];
-          };
         };
       };
     };
@@ -266,15 +286,11 @@ rec {
       }
     '';
     description = ''
-      Credentials granted exclusively to this service through systemd.
-      A path outside the Nix store is loaded with `LoadCredential=`. `null`
-      imports the credential of the same name from the system credential
-      store, such as `/etc/credstore` and `/etc/credstore.encrypted`, with
-      `ImportCredential=`, which decrypts a `systemd-creds` encrypted one.
-      The store is shared by every service, so prefix imported names with
-      their service, as in `llmhop.hf-token`.
-
-      Reference the read-only file from `settings` as `''${cred:<name>}`.
+      Credentials granted exclusively to this service. A path outside the
+      Nix store is loaded with `LoadCredential=`, while `null` imports the
+      credential of the same name from the system credential store with
+      `ImportCredential=`. Reference the read-only file from `settings` as
+      `''${cred:<name>}`.
     '';
   };
 
@@ -289,39 +305,76 @@ rec {
 
   credentialReferencePrefix = "\${cred:";
 
+  # Apply `f` to every string of a settings tree.
+  mapStrings =
+    f:
+    let
+      walk =
+        value:
+        if lib.isString value then
+          f value
+        else if lib.isList value then
+          map walk value
+        else if lib.isAttrs value && !lib.isDerivation value then
+          lib.mapAttrs (_: walk) value
+        else
+          value;
+    in
+    walk;
+
+  # Replace every `${cred:<name>}` reference in `value` by `render name`,
+  # rejecting a reference to anything but `credentials`.
+  replaceCredentialRefs =
+    render: credentials: value:
+    let
+      names = lib.attrNames credentials;
+      replaced = lib.replaceStrings (map credentialReference names) (map render names) value;
+    in
+    if lib.hasInfix credentialReferencePrefix replaced then
+      throw "unknown credential reference in `${value}`"
+    else
+      replaced;
+
   # Rewrite every `${cred:<name>}` reference in a settings tree to the path the
   # credential is mounted at, so secrets reach the server as a file name rather
   # than a value on the command line.
   resolveCredentialRefs =
     directory: credentials:
-    let
-      names = lib.attrNames credentials;
-      references = map (name: "${credentialReferencePrefix}${name}}") names;
-      paths = map (name: "${directory}/${name}") names;
-      resolve =
-        value:
-        if lib.isString value then
-          let
-            resolved = lib.replaceStrings references paths value;
-          in
-          if lib.hasInfix credentialReferencePrefix resolved then
-            throw "unknown credential reference in `${value}`"
-          else
-            resolved
-        else if lib.isList value then
-          map resolve value
-        else if lib.isAttrs value && !lib.isDerivation value then
-          lib.mapAttrs (_: resolve) value
-        else
-          value;
-    in
-    resolve;
+    mapStrings (replaceCredentialRefs (name: "${directory}/${name}") credentials);
 
   # The flags a workload's server receives: its `settings` with every
   # `${cred:…}` resolved against the credential `directory`.
   workloadArgs =
     engine: directory: workload:
     renderCliArgs engine (resolveCredentialRefs directory workload.credentials workload.settings);
+
+  # The argv prefix running `workload`'s server through `shell` and the
+  # engine's `apiKey` script, with the key's path below the credential
+  # `directory`, or nothing when the server needs no wrapper.
+  apiKeyWrapper =
+    shell: engine: directory: workload:
+    lib.optionals (workload.apiKey or null != null && engine.apiKey ? script) [
+      shell
+      "-c"
+      (
+        engine.apiKey.script (
+          resolveCredentialRefs directory workload.credentials (credentialReference workload.apiKey)
+        )
+        + ''
+          exec "$@"
+        ''
+      )
+      "sh"
+    ];
+
+  credentialReference = name: "${credentialReferencePrefix}${name}}";
+
+  isLoopback =
+    host:
+    lib.elem host [
+      "127.0.0.1"
+      "::1"
+    ];
 
   # The curl target of the `/health` of a server listening on `socket`, or else
   # on `port` of the loopback, a listener as a workload's `listen` gives it.
@@ -373,6 +426,47 @@ rec {
     engine: repository:
     if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
 
+  # The hook of every fetcher, built once per backend. See `mkFetcher`.
+  fetchHook =
+    pkgs:
+    lib.getExe (
+      pkgs.writeShellApplication {
+        name = "llmhop-fetch-hook";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gnugrep
+          pkgs.systemd
+        ];
+        text = ''
+          mode=$1
+          server=$2
+          shift 2
+          repos=("$@")
+          # The files of every snapshot and the commit of every ref, missing until
+          # the first download.
+          fingerprint() {
+            for repo in "''${repos[@]}"; do
+              find "$repo/snapshots" -printf '%P %l\n' 2>/dev/null || true
+              grep -r "" "$repo/refs" 2>/dev/null || true
+            done | sort
+          }
+          state="$RUNTIME_DIRECTORY/fingerprint"
+          if [[ $mode == save ]]; then
+            fingerprint >"$state"
+          elif [[ $(fingerprint) != "$(<"$state")" ]]; then
+            if systemctl is-failed --quiet "$server"; then
+              action=start
+            else
+              action=try-restart
+            fi
+            systemctl reset-failed "$server"
+            systemctl "$action" --no-block "$server"
+          fi
+        '';
+      }
+    );
+
   # The fetcher of `workload`, downloading its repositories with the engine's
   # `fetcher` into the hub cache of `cfg`, with the fetch credentials in
   # `credentialDirectory`, before the unit `server` starts. See "Fetching" in
@@ -394,7 +488,7 @@ rec {
     {
       engine,
       cfg,
-      pkgs,
+      hook,
       workload,
       server,
       fetcher,
@@ -402,43 +496,6 @@ rec {
     }:
     let
       directory = repository: "${hubDirectory cfg}/${repoCacheName repository.repo}";
-      hook = lib.getExe (
-        pkgs.writeShellApplication {
-          name = "llmhop-fetch-hook";
-          runtimeInputs = [
-            pkgs.coreutils
-            pkgs.findutils
-            pkgs.gnugrep
-            pkgs.systemd
-          ];
-          text = ''
-            mode=$1
-            server=$2
-            shift 2
-            repos=("$@")
-            # The files of every snapshot and the commit of every ref, missing until
-            # the first download.
-            fingerprint() {
-              for repo in "''${repos[@]}"; do
-                find "$repo/snapshots" -printf '%P %l\n' 2>/dev/null || true
-                grep -r "" "$repo/refs" 2>/dev/null || true
-              done | sort
-            }
-            state="$RUNTIME_DIRECTORY/fingerprint"
-            if [[ $mode == save ]]; then
-              fingerprint >"$state"
-            elif [[ $(fingerprint) != "$(<"$state")" ]]; then
-              if systemctl is-failed --quiet "$server"; then
-                action=start
-              else
-                action=try-restart
-              fi
-              systemctl reset-failed "$server"
-              systemctl "$action" --no-block "$server"
-            fi
-          '';
-        }
-      );
       args = lib.escapeShellArgs (
         [ "${server}.service" ] ++ lib.unique (map directory workload.repositories)
       );
@@ -475,6 +532,16 @@ rec {
         ) workload.repositories;
     };
 
+  # The tmpfiles rule of the root of every socket, which anyone may pass but
+  # not list. See "Unix sockets" in the module internals documentation.
+  socketRootRule = directory: {
+    ${directory}.d = {
+      mode = "0711";
+      user = "root";
+      group = "root";
+    };
+  };
+
   # A tmpfiles rule creating the cache `directory` for `owner`.
   cacheDirectoryRule = owner: directory: {
     ${directory}.d = {
@@ -502,7 +569,7 @@ rec {
       LimitNOFILE = cfg.openFilesLimit;
     }
     // credentialServiceConfig workload.credentials
-    # The directory holding the socket, search only, since llmhop knows the name.
+    # The directory holding the socket, search only, since clients know the name.
     // lib.optionalAttrs (workload.socket != null) {
       RuntimeDirectory = [ (lib.removePrefix "/run/" (dirOf workload.socket)) ];
       RuntimeDirectoryMode = "0710";
@@ -548,10 +615,10 @@ rec {
     lib.optional (cfg.environmentFile != null) cfg.environmentFile
     ++ lib.optional (workload.environmentFile != null) workload.environmentFile;
 
-  # Configuration every backend emits: the llmhop routes of its workloads, the
-  # hub cache directory, the update unit and the claims of all of them.
-  # `entries` are the backend's workloads, an unlisted one sharing llmhop's
-  # auth but staying out of the catalog.
+  # Configuration every backend emits: the endpoints of its workloads, their
+  # firewall ports, the hub cache directory, the update unit and the claims of
+  # all of them. `entries` are the backend's workloads, an unlisted one being
+  # no inference model, which only a gateway that routes it serves.
   #
   # The update unit `<serviceName>-update`, running under
   # `updateServiceConfig`, is the counterpart of `podman auto-update` for
@@ -631,18 +698,31 @@ rec {
       );
       # Keyed by `name`, not the attribute: that is what the worker advertises
       # and what clients send.
-      services.llmhop.settings.models = lib.mkMerge (
-        map (e: {
-          ${e.workload.name} = {
-            # A socket, or else the host loopback, which llmhop shares.
-            url =
-              if e.workload.socket != null then
-                "unix://${e.workload.socket}"
-              else
-                "http://${hostPort "127.0.0.1" e.workload.port}";
+      services.llmhop.endpoints = lib.mkMerge (
+        map (
+          e:
+          let
+            w = e.workload;
+          in
+          {
+            ${w.name} = {
+              inherit (w)
+                name
+                owner
+                socket
+                ;
+              inherit (e) unlisted;
+              engine = serviceName;
+              url = if w.socket != null then "unix://${w.socket}" else "http://${hostPort w.host w.port}";
+              # Reachable other than through loopback or the socket.
+              exposed = w.socket == null && (w.openFirewall || !isLoopback w.host);
+              apiKey = w.apiKey or null;
+            };
           }
-          // lib.optionalAttrs e.unlisted { unlisted = true; };
-        }) entries
+        ) entries
+      );
+      networking.firewall.allowedTCPPorts = map (w: w.port) (
+        lib.filter (w: w.socket == null && w.openFirewall) workloads
       );
       systemd.tmpfiles.settings."10-${serviceName}" = cacheDirectoryRule cacheOwner cfg.cache.directory;
       systemd.services."${serviceName}-update" = lib.mkIf update {
@@ -697,7 +777,7 @@ rec {
   backendOptions =
     { serviceName, engine }:
     {
-      enable = lib.mkEnableOption "${engine.displayName} model serving, fronted by llmhop";
+      enable = lib.mkEnableOption "${engine.displayName} model serving";
       fetch = {
         interval = mkOption {
           type = with types; nullOr str;
@@ -748,11 +828,9 @@ rec {
         type = types.path;
         default = "/var/cache/${serviceName}";
         description = ''
-          Host directory shared by every fetcher and server of this backend as
-          `HF_HOME`, holding the Hugging Face hub cache in `hub`. The fetchers
-          write it, the servers only read it, and containers mount it at the
-          same path. systemd-tmpfiles creates it with mode `0700`. Point it at
-          a data disk for large models.
+          `HF_HOME` of every fetcher and server of this backend, created with
+          mode `0700`, which the fetchers write and the servers only read.
+          Point it at a data disk for large models.
         '';
       };
       environment = mkOption {
@@ -789,6 +867,12 @@ rec {
           File descriptor limit (`LimitNOFILE`) of every server of this
           backend. Increase it if a server logs `accept: Too many open files`.
         '';
+      };
+      entries = mkOption {
+        type = with types; listOf attrs;
+        internal = true;
+        default = [ ];
+        description = "Workloads served beside the models.";
       };
     };
 
@@ -871,10 +955,10 @@ rec {
       type = types.bool;
       default = true;
       description = ''
-        Whether to chain enabled model services by ascending `name` during startup.
-        GPU-memory profiling races otherwise: two workers booting on the same device
-        each see it as fully free and race to claim their share, leading to OOM.
-        Disable only when each model pins itself to a dedicated device ${pinNote}.
+        Whether to start model services one at a time by ascending `name`,
+        so two workers profiling memory on the same GPU do not race into an
+        OOM. Disable only when each model pins itself to a dedicated device
+        ${pinNote}.
       '';
     };
 
@@ -902,7 +986,7 @@ rec {
     }:
     let
       socketCapable = engine.socketSettings != null;
-      portDescription = "Loopback host port the server binds to.";
+      portDescription = "Host port the server binds to on `host`.";
       listener = listen config;
     in
     {
@@ -915,11 +999,8 @@ rec {
           type = types.strMatching "[[:alnum:]][[:alnum:].-]*";
           default = name;
           description = ''
-            Canonical identifier of this ${noun}, used for the unit name
-            (`${unitPrefix}-<name>`) and as the routing key registered with
-            llmhop, which clients send in the `model` field. Shares one
-            namespace with every other routing key, so a collision fails
-            evaluation.
+            Name of this ${noun} in its unit `${unitPrefix}-<name>` and in the
+            `model` field clients send, unique across every workload.
           '';
         };
         unit = mkOption {
@@ -944,8 +1025,8 @@ rec {
               description = ''
                 ${portDescription}
                 `null` binds the unix socket `socket` instead, which claims no
-                port, only llmhop can connect to, and keeps the server off any
-                network.
+                port, only the gateway and `services.llmhop.socketClients` can
+                connect to, and keeps the server off any network.
               '';
             }
           else
@@ -964,6 +1045,25 @@ rec {
               null;
           defaultText = lib.literalMD "`<services.llmhop.socketDirectory>/${unitPrefix}-<name>/${socketName}` while `port` is null, else null";
           description = "Unix socket the server binds, derived from `port`.";
+        };
+        host = mkOption {
+          type = types.str;
+          default = "127.0.0.1";
+          example = "0.0.0.0";
+          description = ''
+            IP address the server binds `port` to. Any but `127.0.0.1` or
+            `::1` requires that no gateway routes it, and lifts the IP address
+            filter of an `offline` native server.
+          '';
+        };
+        openFirewall = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Whether to open `port` in the host firewall, which only works
+            without a gateway routing this ${noun}. A Quadlet container's
+            published port bypasses the firewall either way.
+          '';
         };
         environment = mkOption {
           type = with types; attrsOf str;
@@ -997,7 +1097,7 @@ rec {
             CLI flags of this ${noun}'s server, over the backend's
             `modelSettings`. The listener and the flags derived from the other
             options are defaults here, so a definition replaces them, but
-            llmhop keeps routing to `port` or `socket`.
+            gateways keep routing to `port` or `socket`.
             ${settingsRendering engine}
           '';
         };
@@ -1063,6 +1163,16 @@ rec {
           ++ map (repo: { inherit repo; }) config.extraModels
           ++ extraRepositories
         );
+        apiKey = mkOption {
+          type = with types; nullOr str;
+          default = null;
+          example = "api-key";
+          description = ''
+            Entry of `credentials` holding the bearer token clients must send,
+            kept off the command line. Only allowed without a gateway routing
+            this model.
+          '';
+        };
       }
       // lib.optionalAttrs engine.revisions {
         revision = mkOption {
@@ -1076,5 +1186,8 @@ rec {
           '';
         };
       };
+      config.settings = lib.mkIf (config.apiKey != null && engine.apiKey ? settings) (
+        lib.mapAttrs (_: lib.mkOptionDefault) (engine.apiKey.settings (credentialReference config.apiKey))
+      );
     };
 }

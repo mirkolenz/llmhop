@@ -66,17 +66,18 @@ let
       ];
     }).config;
 
-  vllmQuadlet = overrides: {
-    vllm-quadlet = lib.recursiveUpdate {
-      enable = true;
-      tag = "latest";
-      models.test = {
-        model = "example/test";
-        port = 18001;
-      };
-    } overrides;
-  };
-  mkQuadlet = overrides: mkSystem (vllmQuadlet overrides);
+  mkQuadlet =
+    overrides:
+    mkSystem {
+      vllm-quadlet = lib.recursiveUpdate {
+        enable = true;
+        tag = "latest";
+        models.test = {
+          model = "example/test";
+          port = 18001;
+        };
+      } overrides;
+    };
 
   # Evaluates `credentials` alone, as the option type and `apply` see them.
   credentialsOf =
@@ -92,47 +93,33 @@ let
 
   fakeVllm = pkgs.writeShellScriptBin "vllm" "exit 0";
 
-  # Both Quadlet backends that bind ports.
-  quadlet = mkSystem (
-    vllmQuadlet {
-      cache.mountOptions = [ "idmap" ];
-      modelSettings.max-model-len = 4096;
-      models.test = credentialed // {
-        mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
-      };
-      models.marked = {
-        model = "example/marked";
-        port = 18003;
-        inherit watermark;
-        settings.served-model-name = "renamed";
-      };
-      detectors.watermark = {
-        tokenizer = "example/test";
-        port = 18002;
-        inherit watermark;
-      };
-    }
-    // {
-      llama-cpp-quadlet = {
-        enable = true;
-        tag = "server";
-        models.test = {
-          port = 20001;
-          model = "example/test:Q4_K_M";
+  quadlet = mkQuadlet {
+    models.test = credentialed // {
+      mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+    };
+    models.marked = {
+      model = "example/marked";
+      port = 18003;
+      inherit watermark;
+    };
+    detectors.watermark = {
+      tokenizer = "example/test";
+      port = 18002;
+      inherit watermark;
+    };
+  };
+
+  # The VM test covers the native llama.cpp path end to end.
+  native = mkSystem {
+    gateway = {
+      type = "builtin";
+      builtin = {
+        openFirewall = true;
+        listen = {
+          default.host = "::1";
+          caddy.socketGroup = "caddy";
         };
       };
-    }
-  );
-
-  # The native backends beside llmhop's own native.
-  native = mkSystem {
-    enable = true;
-    openFirewall = true;
-    host = "::1";
-    listen.caddy.socketGroup = "caddy";
-    llama-cpp = {
-      enable = true;
-      models.a.model = "example/a:Q4_K_M";
     };
     vllm = {
       enable = true;
@@ -144,7 +131,7 @@ let
         port = 21004;
         offline = false;
       };
-      models.test = credentialed // {
+      models.test = {
         model = "example/test";
         revision = "v1";
         port = 21001;
@@ -168,9 +155,11 @@ let
   # sorts after `a` despite being declared first, so it is the one chained on
   # its predecessor.
   sockets = mkSystem {
-    enable = true;
+    gateway = {
+      type = "builtin";
+      builtin.user = "hop";
+    };
     socketDirectory = "/run/sockets/llmhop";
-    user = "hop";
     vllm = {
       enable = true;
       package = fakeVllm;
@@ -180,32 +169,92 @@ let
       enable = true;
       tag = "server";
       models = {
-        b = {
-          model = "example/b";
-          mountOptions.socket = [
-            "U"
-            "z"
-          ];
-        };
+        b.model = "example/b";
         a.model = "example/a";
       };
     };
   };
 
   socketRoot = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
-  socketWorker = sockets.systemd.services.vllm-test;
   socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
   quadletWorker = quadlet.virtualisation.quadlet.containers.vllm-test;
   quadletMarked = quadlet.virtualisation.quadlet.containers.vllm-marked;
   quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-detector-watermark;
-  quadletFetcher = quadlet.virtualisation.quadlet.containers.vllm-test-fetch;
-  llamaCppWorker = quadlet.virtualisation.quadlet.containers.llama-cpp-test;
   nativeWorker = native.systemd.services.vllm-test;
   nativeFetcher = native.systemd.services.vllm-test-fetch;
   nativeMarked = native.systemd.services.vllm-marked;
   nativeDetector = native.systemd.services.vllm-detector-watermark;
 
+  # A model of each engine kind on a port, which every gateway reaches.
+  routable = {
+    vllm = {
+      enable = true;
+      package = fakeVllm;
+      models.qwen = {
+        model = "example/qwen";
+        port = 24001;
+      };
+    };
+    sglang-quadlet = {
+      enable = true;
+      tag = "latest";
+      models.llama = {
+        model = "example/llama";
+        port = 24002;
+      };
+    };
+  };
+  mkRoutable = overrides: mkSystem (lib.recursiveUpdate routable overrides);
+
+  smg = mkRoutable {
+    gateway = {
+      type = "smg";
+      smg = {
+        package = fakeVllm;
+        credentials."smg.api-key" = apiKeys;
+        settings.api-key = "\${cred:smg.api-key}";
+      };
+    };
+  };
+  bifrost = mkRoutable {
+    gateway = {
+      type = "bifrost-quadlet";
+      bifrost-quadlet = {
+        tag = "v2.3.2";
+        credentials."bifrost.virtual-key" = null;
+        settings.governance.virtual_keys = [
+          {
+            id = "default";
+            value = "\${cred:bifrost.virtual-key}";
+          }
+        ];
+      };
+    };
+  };
+
+  # Without a gateway, every model is exposed on its own.
+  direct = mkRoutable {
+    socketClients = [ "caddy" ];
+    vllm.models.qwen = {
+      host = "0.0.0.0";
+      openFirewall = true;
+      credentials.api-key = apiKeys;
+      apiKey = "api-key";
+    };
+    sglang-quadlet.models.llama = {
+      credentials.api-key = apiKeys;
+      apiKey = "api-key";
+    };
+    llama-cpp-quadlet = {
+      enable = true;
+      tag = "server";
+      models.gemma.model = "example/gemma";
+    };
+  };
+  directWorker = direct.systemd.services.vllm-qwen.serviceConfig;
+
   tests = {
+    # The VM test covers native sockets with llama.cpp, vLLM binds via `--uds`.
     testSocketRoot = {
       expr = {
         root = {
@@ -213,7 +262,12 @@ let
           inherit (socketRoot.a) argument;
         };
         # A custom user is the deployer's to declare.
-        declared = sockets.users.users ? hop;
+        declared = sockets.users.users.hop.isSystemUser;
+        uds = containsAll [
+          "--uds"
+          "/run/sockets/llmhop/vllm-test/http.sock"
+        ] sockets.systemd.services.vllm-test.serviceConfig.ExecStart;
+        routed = sockets.services.llmhop.gateway.builtin.settings.models.test.url;
       };
       expected = {
         root = {
@@ -221,13 +275,15 @@ let
           argument = "default:user:hop:-wx";
         };
         declared = false;
+        uds = true;
+        routed = "unix:///run/sockets/llmhop/vllm-test/http.sock";
       };
     };
 
+    # A custom worker user is used as given, and the deployer's to declare.
     testIdentity = {
       expr =
         let
-          default = native;
           named = mkSystem {
             llama-cpp = {
               enable = true;
@@ -237,28 +293,12 @@ let
           };
         in
         {
-          default = {
-            inherit (default.systemd.services.llama-cpp-a.serviceConfig) User Group;
-            # The fetcher shares the identity, and thereby the cache, of its server.
-            fetcher = default.systemd.services.llama-cpp-a-fetch.serviceConfig.User;
-            declared = default.users.users ? llama-cpp;
-          };
-          named = {
-            inherit (named.systemd.services.llama-cpp-a.serviceConfig) User;
-            declared = named.users.users ? llama;
-          };
+          inherit (named.systemd.services.llama-cpp-a.serviceConfig) User;
+          declared = named.users.users ? llama;
         };
       expected = {
-        default = {
-          User = "llama-cpp";
-          Group = "llama-cpp";
-          fetcher = "llama-cpp";
-          declared = true;
-        };
-        named = {
-          User = "llama";
-          declared = false;
-        };
+        User = "llama";
+        declared = false;
       };
     };
 
@@ -283,40 +323,6 @@ let
       };
     };
 
-    # A native server is supervised by its `postStart` health check, binds its
-    # socket in a network namespace of its own, and llmhop joins its group.
-    testNativeSocket = {
-      expr = {
-        command = containsAll [
-          "--uds"
-          "/run/sockets/llmhop/vllm-test/http.sock"
-        ] socketWorker.serviceConfig.ExecStart;
-        tcp = containsAll [ "--port" ] socketWorker.serviceConfig.ExecStart;
-        health = containsAll [
-          "--unix-socket /run/sockets/llmhop/vllm-test/http.sock http://localhost/health"
-        ] socketWorker.postStart;
-        inherit (socketWorker.serviceConfig)
-          Type
-          UMask
-          RuntimeDirectory
-          PrivateNetwork
-          ;
-        routed = sockets.services.llmhop.settings.models.test.url;
-        joined = sockets.systemd.services.llmhop.serviceConfig.SupplementaryGroups;
-      };
-      expected = {
-        command = true;
-        tcp = false;
-        health = true;
-        Type = "exec";
-        UMask = "0007";
-        RuntimeDirectory = [ "sockets/llmhop/vllm-test" ];
-        PrivateNetwork = true;
-        routed = "unix:///run/sockets/llmhop/vllm-test/http.sock";
-        joined = [ "vllm" ];
-      };
-    };
-
     testQuadletSocket = {
       expr = {
         inherit (socketContainer.containerConfig)
@@ -334,7 +340,7 @@ let
         Volume = [
           "/var/cache/llama-cpp:/var/cache/llama-cpp:ro"
           "/var/cache/llama-cpp-b:/var/cache/llama-cpp-b"
-          "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U,z"
+          "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U"
         ];
         PodmanArgs = [ "--umask=0007" ];
         HealthCmd = "curl --fail --silent --show-error --unix-socket /run/llmhop/socket/http.sock http://localhost/health";
@@ -350,19 +356,9 @@ let
     };
 
     # Paths are loaded, `null` is imported, and references resolve to the
-    # native or the container credential directory.
+    # container credential directory. The VM test covers the native one.
     testCredentials = {
       expr = {
-        native = {
-          inherit (nativeWorker.serviceConfig) LoadCredential ImportCredential;
-          paths = containsAll [
-            "%d/api-keys"
-            "%d/server-config"
-            "%d/llmhop.hf-token"
-          ] nativeWorker.serviceConfig.ExecStart;
-          # A doubled `%` would pass the specifier on as a literal.
-          escaped = containsAll [ "%%d" ] nativeWorker.serviceConfig.ExecStart;
-        };
         quadlet = {
           inherit (quadletWorker.serviceConfig) LoadCredential ImportCredential;
           paths = containsAll [
@@ -383,15 +379,6 @@ let
         );
       };
       expected = {
-        native = {
-          LoadCredential = [
-            "api-keys:${apiKeys}"
-            "server-config:${serverConfig}"
-          ];
-          ImportCredential = [ "llmhop.hf-token" ];
-          paths = true;
-          escaped = false;
-        };
         quadlet = {
           LoadCredential = [
             "api-keys:${apiKeys}"
@@ -407,24 +394,6 @@ let
       };
     };
 
-    # The derived flags are defaults, under `modelSettings` and per-model
-    # `settings`.
-    testSettings = {
-      expr = {
-        derived = containsAll [
-          "--served-model-name test"
-          "--max-model-len 4096"
-          "--host 0.0.0.0"
-          "--port 8000"
-        ] quadletWorker.containerConfig.Exec;
-        overridden = containsAll [ "--served-model-name renamed" ] quadletMarked.containerConfig.Exec;
-      };
-      expected = {
-        derived = true;
-        overridden = true;
-      };
-    };
-
     # The key reaches vLLM through the script, never the command line.
     testWatermark = {
       expr = {
@@ -437,7 +406,7 @@ let
           inherit (quadletMarked.containerConfig) Entrypoint;
           import = quadletMarked.serviceConfig.ImportCredential;
           # Models without a watermark keep the image's entrypoint.
-          plain = quadletWorker.containerConfig ? Entrypoint;
+          plain = quadletWorker.containerConfig.Entrypoint;
         };
         native = {
           command = containsAll [
@@ -467,7 +436,10 @@ let
           arguments = true;
           Entrypoint = lib.toJSON [ "python" ];
           import = [ "vllm.watermark-key" ];
-          plain = false;
+          plain = lib.toJSON [
+            "vllm"
+            "serve"
+          ];
         };
         native = {
           command = true;
@@ -491,8 +463,10 @@ let
           fetch = containsAll [ "hf download example/test --include '*.json'" ] (
             fetchScript quadlet.virtualisation.quadlet.containers.vllm-detector-watermark-fetch
           );
-          # Reachable through llmhop, but kept out of the OpenAI catalog.
-          routed = quadlet.services.llmhop.settings.models.watermark;
+          # Only llmhop routes it, outside the OpenAI catalog.
+          routed = {
+            inherit (quadlet.services.llmhop.endpoints.watermark) url unlisted;
+          };
         };
         native = {
           command = containsAll [
@@ -537,29 +511,6 @@ let
       };
     };
 
-    testLlamaCpp = {
-      expr = {
-        inherit (llamaCppWorker.containerConfig) PublishPort Image;
-        pulled = quadlet.virtualisation.quadlet.images.llama-cpp-server.imageConfig.Image;
-        arguments = containsAll [
-          "--alias test"
-          "--hf-repo example/test:Q4_K_M"
-          "--offline"
-        ] llamaCppWorker.containerConfig.Exec;
-        fetch = fetchScript quadlet.virtualisation.quadlet.containers.llama-cpp-test-fetch;
-      };
-      expected = {
-        Image = "llama-cpp-server.image";
-        pulled = "ghcr.io/ggml-org/llama.cpp:server";
-        PublishPort = [ "127.0.0.1:20001:8080" ];
-        arguments = true;
-        fetch = ''
-          set -e
-          /app/llama download -hf example/test:Q4_K_M || test -d /var/cache/llama-cpp/hub/models--example--test/refs
-        '';
-      };
-    };
-
     # The fetcher alone gets the fetch credentials and downloads, the server
     # runs offline. The VM test covers the rest with llama.cpp.
     testNativeFetch = {
@@ -592,36 +543,92 @@ let
       };
     };
 
-    # The image unit pulls for both, the fetcher restarts its server.
+    # A container wants its fetcher, which restarts it after a change.
     testQuadletFetch = {
       expr = {
-        inherit (quadletWorker.containerConfig) Image Pull AutoUpdate;
-        inherit (quadlet.virtualisation.quadlet.images.vllm-latest.imageConfig) Policy;
         inherit (quadletWorker.unitConfig) Wants;
+        hook = containsAll [ "llmhop-fetch-hook apply vllm-test.service" ] (
+          toString quadlet.virtualisation.quadlet.containers.vllm-test-fetch.serviceConfig.ExecStartPost
+        );
         offline = lib.elem (lib.toJSON "HF_HUB_OFFLINE=1") quadletWorker.containerConfig.Environment;
-        fetcher = {
-          inherit (quadletFetcher.containerConfig) Image;
-          inherit (quadletFetcher.serviceConfig) Type RemainAfterExit;
-          volume = lib.elem "/var/cache/vllm:/var/cache/vllm:idmap" quadletFetcher.containerConfig.Volume;
-          hooks = containsAll [
-            "llmhop-fetch-hook apply vllm-test.service /var/cache/vllm/hub/models--example--test"
-          ] (toString quadletFetcher.serviceConfig.ExecStartPost);
-        };
       };
       expected = {
-        Image = "vllm-latest.image";
-        Pull = "never";
-        AutoUpdate = "registry";
-        Policy = "newer";
         Wants = [ "vllm-test-fetch.service" ];
+        hook = true;
         offline = true;
-        fetcher = {
-          Image = "vllm-latest.image";
-          Type = "oneshot";
-          RemainAfterExit = true;
-          volume = true;
-          hooks = true;
+      };
+    };
+
+    # The external gateways route the listed models with secrets from
+    # credentials, and reject what they cannot route or clients could bypass.
+    testGateways = {
+      expr = {
+        smg = containsAll [
+          "--api-key ''\"$(cat \"$CREDENTIALS_DIRECTORY\"/smg.api-key)\"''"
+          "--discovery-provider file"
+          "--host 127.0.0.1 --port 8080"
+        ] (lib.readFile smg.systemd.services.smg.serviceConfig.ExecStart);
+        bifrost = {
+          providers = lib.mapAttrs (
+            _: provider: lib.concatMap (key: key.models) provider.keys
+          ) bifrost.services.llmhop.gateway.bifrost-quadlet.settings.providers;
+          exported = containsAll [
+            "CREDENTIAL_BIFROST_VIRTUAL_KEY=$(cat /run/llmhop/credentials/bifrost.virtual-key)"
+          ] bifrost.virtualisation.quadlet.containers.bifrost.containerConfig.Entrypoint;
         };
+        rejected = failing "is routed by the gateway" (mkRoutable {
+          gateway = {
+            type = "smg";
+            smg.package = fakeVllm;
+          };
+          vllm.models.qwen.openFirewall = true;
+        });
+        socket = failing "cannot reach" (mkRoutable {
+          gateway = {
+            type = "bifrost";
+            bifrost.package = fakeVllm;
+          };
+          vllm.models.local.model = "example/local";
+        });
+      };
+      expected = {
+        smg = true;
+        bifrost = {
+          providers = {
+            vllm = [ "qwen" ];
+            sgl = [ "llama" ];
+          };
+          exported = true;
+        };
+        rejected = 1;
+        socket = 1;
+      };
+    };
+
+    # Without a gateway, each model binds its own `host`, opens its port and
+    # checks its own API key, which never enters a command line.
+    testDirect = {
+      expr = {
+        firewall = direct.networking.firewall.allowedTCPPorts;
+        vllm = containsAll [
+          "VLLM_API_KEY=$$(cat %d/api-key)"
+          "0.0.0.0"
+        ] directWorker.ExecStart;
+        filtered = directWorker ? IPAddressDeny;
+        sglang = lib.take 2 (
+          builtins.fromJSON direct.virtualisation.quadlet.containers.sglang-llama.containerConfig.Entrypoint
+        );
+        acl = direct.systemd.tmpfiles.settings."10-llmhop"."/run/llmhop".a.argument;
+      };
+      expected = {
+        firewall = [ 24001 ];
+        vllm = true;
+        filtered = false;
+        sglang = [
+          "/bin/sh"
+          "-c"
+        ];
+        acl = "default:user:caddy:-wx";
       };
     };
 

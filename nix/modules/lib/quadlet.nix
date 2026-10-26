@@ -3,15 +3,18 @@ lib: common:
 let
   inherit (lib) mkOption types;
   inherit (common)
+    apiKeyWrapper
     backendOptions
     cacheDirectoryRule
     chainEntries
     engines
     environmentFiles
+    fetchHook
     fetchUnit
     fetcherOf
     fetches
     healthTarget
+    hostPort
     mkFetcher
     modelModule
     modelsOption
@@ -36,6 +39,57 @@ let
 
   mountSuffix = options: lib.optionalString (options != [ ]) ":${lib.concatStringsSep "," options}";
 
+  # Minimal hardening, Podman isolates the rest. The rootfs stays writable,
+  # `/tmp` is a tmpfs for fast scratch.
+  baseContainerConfig = {
+    NoNewPrivileges = true;
+    DropCapability = "all";
+    Tmpfs = [ "/tmp" ];
+  };
+
+  # The image unit of `image` at `digest` or else `tag`, named after `prefix`
+  # and either, so that containers sharing an image share the unit, and the
+  # `[Container]` keys of a container running it, tracking the tag with
+  # `autoUpdate`. `newer` keeps the local image when the registry is
+  # unreachable, where Podman's default `always` would fail its containers.
+  imageUnit =
+    {
+      images,
+      prefix,
+      image,
+      tag,
+      digest,
+    }:
+    let
+      name = "${prefix}-${
+        if digest != null then lib.substring 0 12 (lib.last (lib.splitString ":" digest)) else tag
+      }";
+    in
+    {
+      images.${name}.imageConfig = {
+        Image = if digest != null then "${image}@${digest}" else "${image}:${tag}";
+        Policy = "newer";
+      };
+      containerConfig =
+        autoUpdate:
+        {
+          Image = images.${name}.ref;
+          Pull = "never";
+        }
+        // lib.optionalAttrs autoUpdate { AutoUpdate = "registry"; };
+    };
+
+  # Assertion that the module of `owner` has Quadlet enabled.
+  requireEnabled = config: owner: {
+    assertion = config.virtualisation.quadlet.enable;
+    message = "${owner} requires virtualisation.quadlet.enable.";
+  };
+
+  # The read-only mount of a container's `credentials` with further `options`.
+  credentialMount =
+    options: credentials:
+    lib.optional (credentials != { }) "%d:${credentialDirectory}${mountSuffix ([ "ro" ] ++ options)}";
+
   # The listener of a server container, on the engine's port or the mounted
   # socket.
   listen = engine: workload: {
@@ -44,57 +98,36 @@ let
     socket = if workload.socket != null then "${containerSocketDirectory}/${socketName}" else null;
   };
 
-  # Options of a workload's container. `socket` adds the options of a
-  # container that may bind a unix socket.
-  workloadOptions =
-    { noun, socket }:
-    {
-      tag = mkOption {
-        type = with types; nullOr str;
-        default = null;
-        description = "Tag of the container image of this ${noun}, instead of the backend's `tag`. Mutually exclusive with `digest`.";
-      };
-      digest = mkOption {
-        type = with types; nullOr str;
-        default = null;
-        example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
-        description = "Immutable digest of the container image of this ${noun}. Mutually exclusive with `tag`.";
-      };
-      mountOptions = {
-        credentials = mkOption {
-          type = with types; listOf str;
-          default = [ ];
-          example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
-          description = ''
-            Podman volume options appended to the credential mount of this
-            ${noun}'s server. Use an `idmap` mapping when `[Container] User=`
-            selects a non-root identity. The mount is always read-only.
-          '';
-        };
-      }
-      // lib.optionalAttrs socket {
-        socket = mkOption {
-          type = with types; listOf str;
-          default = [ "U" ];
-          example = [
-            "U"
-            "z"
-          ];
-          description = ''
-            Podman volume options of the socket directory mount of this
-            ${noun}'s server. `U` hands the directory to whatever host UID the
-            container user maps to, so the socket works under any `User=` and
-            `UserNS=`. Add `z` on SELinux hosts.
-          '';
-        };
-      };
+  # Options of a workload's container.
+  workloadOptions = noun: {
+    tag = mkOption {
+      type = with types; nullOr str;
+      default = null;
+      description = "Tag of the container image of this ${noun}, instead of the backend's `tag`. Mutually exclusive with `digest`.";
     };
+    digest = mkOption {
+      type = with types; nullOr str;
+      default = null;
+      example = "sha256:a73fb0b9046fee099f7c1829d2548e6cc1740f4c2776a6855fa659ae5d0deb49";
+      description = "Immutable digest of the container image of this ${noun}. Mutually exclusive with `tag`.";
+    };
+    mountOptions.credentials = mkOption {
+      type = with types; listOf str;
+      default = [ ];
+      example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+      description = ''
+        Podman volume options appended to the credential mount of this
+        ${noun}'s server. Use an `idmap` mapping when `[Container] User=`
+        selects a non-root identity. The mount is always read-only.
+      '';
+    };
+  };
 
   # The NixOS module of the Quadlet backend of the engine `name`, under
   # `services.llmhop.<name>-quadlet`. Each model runs its internal
   # `container`, which another module may replace, and the internal `entries`
-  # add further workloads, each `{ workload, unlisted }` plus the `arguments`,
-  # `containerConfig` and `mounts` of its container.
+  # add further workloads, each `{ workload, unlisted }` plus the
+  # `entrypoint`, `arguments`, `containerConfig` and `mounts` of its container.
   mkBackend =
     name:
     {
@@ -106,6 +139,7 @@ let
       engine = engines.${name};
       backend = "${name}-quadlet";
       cfg = config.services.llmhop.${backend};
+      hook = fetchHook pkgs;
       inherit (config.virtualisation.quadlet) containers images;
       inherit (engine.quadlet) port;
       entry =
@@ -113,6 +147,7 @@ let
         {
           unlisted = false;
           after = [ ];
+          inherit (engine.quadlet) entrypoint;
           arguments = [ ];
           mounts = [ ];
           environment = { };
@@ -149,13 +184,6 @@ let
       # A host directory mounted at the same path.
       cacheMount =
         directory: options: "${directory}:${directory}${mountSuffix (options ++ cfg.cache.mountOptions)}";
-      # Minimal hardening, Podman isolates the rest. The rootfs stays writable,
-      # `/tmp` is a tmpfs for fast scratch.
-      baseContainerConfig = {
-        NoNewPrivileges = true;
-        DropCapability = "all";
-        Tmpfs = [ "/tmp" ];
-      };
 
       # The Quadlet configuration of the workload of `entry`: its offline
       # server, which runs the `arguments` of `entry` followed by its settings,
@@ -171,37 +199,25 @@ let
             inherit
               engine
               cfg
-              pkgs
+              hook
               workload
               credentialDirectory
               ;
             inherit (engine.quadlet) fetcher;
             server = containers.${unit}.serviceName;
           };
-          tag =
-            if workload.tag != null && workload.digest != null then
-              throw "services.llmhop.${backend}: `${workload.name}` sets both `tag` and `digest`."
-            else
-              lib.defaultTo cfg.tag workload.tag;
-          # Named after its tag or digest, so that workloads sharing an image
-          # share the unit.
-          imageName = "${name}-${
-            if workload.digest != null then
-              lib.substring 0 12 (lib.last (lib.splitString ":" workload.digest))
-            else
-              tag
-          }";
-          imageConfig =
-            autoUpdate:
-            {
-              Image = images.${imageName}.ref;
-              Pull = "never";
-            }
-            // lib.optionalAttrs autoUpdate { AutoUpdate = "registry"; };
-          credentialMount =
-            credentials:
-            lib.optional (credentials != { })
-              "%d:${credentialDirectory}${mountSuffix ([ "ro" ] ++ workload.mountOptions.credentials)}";
+          image = imageUnit {
+            inherit images;
+            inherit (cfg) image;
+            inherit (workload) digest;
+            prefix = name;
+            tag =
+              if workload.tag != null && workload.digest != null then
+                throw "services.llmhop.${backend}: `${workload.name}` sets both `tag` and `digest`."
+              else
+                lib.defaultTo cfg.tag workload.tag;
+          };
+          credentials = credentialMount workload.mountOptions.credentials;
           # A socket in a mounted directory and, offline, no network, or else
           # the published port.
           network =
@@ -212,17 +228,13 @@ let
               }
               // lib.optionalAttrs workload.offline { Network = "none"; }
             else
-              { PublishPort = [ "127.0.0.1:${toString workload.port}:${toString port}" ]; };
+              { PublishPort = [ "${hostPort workload.host workload.port}:${toString port}" ]; };
+          # The entrypoint of `entry`, through the API key script if any.
+          entrypoint = apiKeyWrapper "/bin/sh" engine credentialDirectory workload ++ entry.entrypoint;
         in
         {
-          # `newer` keeps the local image when the registry is unreachable,
-          # where Podman's default `always` would fail its containers. Defined
-          # alike by every workload that shares the image.
-          images.${imageName}.imageConfig = {
-            Image =
-              if workload.digest != null then "${cfg.image}@${workload.digest}" else "${cfg.image}:${tag}";
-            Policy = "newer";
-          };
+          # Defined alike by every workload that shares the image.
+          inherit (image) images;
           containers = {
             ${unit} = {
               # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
@@ -233,8 +245,9 @@ let
               };
               containerConfig =
                 baseContainerConfig
-                // imageConfig (workload.digest == null)
+                // image.containerConfig (workload.digest == null)
                 // {
+                  Entrypoint = lib.toJSON entrypoint;
                   Notify = "healthy";
                   HealthCmd = "curl --fail --silent --show-error ${healthTarget (listen engine workload)}";
                   HealthStartPeriod = "30m";
@@ -245,10 +258,11 @@ let
                     (cacheMount (unitCacheDirectory unit) [ ])
                   ]
                   ++ entry.mounts
-                  ++ lib.optional (
-                    workload.socket != null
-                  ) "${dirOf workload.socket}:${containerSocketDirectory}${mountSuffix workload.mountOptions.socket}"
-                  ++ credentialMount workload.credentials;
+                  # `U` hands the directory to whatever host UID the container
+                  # user maps to, so the socket works under any `User=` and
+                  # `UserNS=`.
+                  ++ lib.optional (workload.socket != null) "${dirOf workload.socket}:${containerSocketDirectory}:U"
+                  ++ credentials workload.credentials;
                   EnvironmentFile = environmentFiles cfg workload;
                   Environment = serverEnvironment {
                     inherit engine cfg workload;
@@ -266,7 +280,7 @@ let
               unitConfig = sharedUnitConfig;
               containerConfig =
                 baseContainerConfig
-                // imageConfig false
+                // image.containerConfig false
                 // {
                   Entrypoint = lib.toJSON [
                     "/bin/sh"
@@ -276,7 +290,7 @@ let
                     (cacheMount cfg.cache.directory [ ])
                     "${builtins.toFile "fetch.sh" fetch.script}:${fetchScriptPath}:ro"
                   ]
-                  ++ credentialMount cfg.fetch.credentials;
+                  ++ credentials cfg.fetch.credentials;
                   EnvironmentFile = fetch.environmentFile;
                   Environment = fetch.environment;
                 };
@@ -351,35 +365,30 @@ let
             (
               { config, ... }:
               {
-                options =
-                  workloadOptions {
-                    noun = "model";
-                    socket = engine.socketSettings != null;
-                  }
-                  // {
-                    devices = mkOption {
-                      type = with types; listOf str;
-                      default = cfg.devices;
-                      defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
-                      example = [ "nvidia.com/gpu=0" ];
-                      description = "Devices exposed to this model's container, replacing the backend's `devices`.";
-                    };
-                    shmSize = mkOption {
-                      type = types.str;
-                      default = "32g";
-                      example = "64g";
-                      description = ''
-                        Size of the container's private `/dev/shm` tmpfs, which
-                        PyTorch uses for tensor-parallel inference.
-                      '';
-                    };
-                    container = mkOption {
-                      type = types.attrs;
-                      internal = true;
-                      default = engine.quadlet.container config;
-                      description = "The `arguments`, `containerConfig` and `mounts` of this model's container.";
-                    };
+                options = workloadOptions "model" // {
+                  devices = mkOption {
+                    type = with types; listOf str;
+                    default = cfg.devices;
+                    defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
+                    example = [ "nvidia.com/gpu=0" ];
+                    description = "Devices exposed to this model's container, replacing the backend's `devices`.";
                   };
+                  shmSize = mkOption {
+                    type = types.str;
+                    default = "32g";
+                    example = "64g";
+                    description = ''
+                      Size of the container's private `/dev/shm` tmpfs, which
+                      PyTorch uses for tensor-parallel inference.
+                    '';
+                  };
+                  container = mkOption {
+                    type = types.attrs;
+                    internal = true;
+                    default = engine.quadlet.container config;
+                    description = "The `arguments`, `containerConfig` and `mounts` of this model's container.";
+                  };
+                };
               }
             )
           ];
@@ -388,12 +397,6 @@ let
             fetcher `${name}-<name>-fetch`. Override their units through
             `virtualisation.quadlet.containers.<unit>`.
           '';
-        };
-        entries = mkOption {
-          type = with types; listOf attrs;
-          internal = true;
-          default = [ ];
-          description = "Workloads served beside the models.";
         };
       };
 
@@ -420,20 +423,19 @@ let
             cacheOwner = cfg.cache;
           })
           {
-            assertions = [
-              {
-                assertion = config.virtualisation.quadlet.enable;
-                message = "services.llmhop.${backend} requires virtualisation.quadlet.enable.";
-              }
-            ];
+            assertions = [ (requireEnabled config "services.llmhop.${backend}") ];
 
             # A container maps to no host group known in advance, so its socket
             # is reachable through a default ACL on the root instead. See "Unix
             # sockets" in the module internals documentation.
-            systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (e: e.workload.socket != null) entries) {
-              ${config.services.llmhop.socketDirectory}.a.argument =
-                "default:user:${config.services.llmhop.user}:-wx";
-            };
+            systemd.tmpfiles.settings."10-llmhop" =
+              lib.mkIf
+                (lib.any (e: e.workload.socket != null) entries && config.services.llmhop.socketClients != [ ])
+                {
+                  ${config.services.llmhop.socketDirectory}.a.argument = lib.concatMapStringsSep "," (
+                    user: "default:user:${user}:-wx"
+                  ) config.services.llmhop.socketClients;
+                };
           }
         ]
       );
@@ -441,9 +443,14 @@ let
 in
 {
   inherit
+    baseContainerConfig
     containerRuntimeDirectory
+    credentialDirectory
+    credentialMount
+    imageUnit
     listen
     mkBackend
+    requireEnabled
     workloadOptions
     ;
 }

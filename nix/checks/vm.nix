@@ -128,19 +128,22 @@ testers.nixosTest {
             };
           };
 
-          enable = true;
-          # Two sockets, so llmhop serves every descriptor systemd hands over.
-          host = "127.0.0.1";
-          listen.local = { };
-          credentials = {
-            "llmhop.client-token" = null;
-            "llmhop.upstream-key" = null;
-          };
-          settings = {
-            authTokens = [ "\${cred:llmhop.client-token}" ];
-            models."test-model" = {
-              url = "http://127.0.0.1:9000";
-              headers.Authorization = "Bearer \${cred:llmhop.upstream-key}";
+          gateway = {
+            type = "builtin";
+            builtin = {
+              # Two sockets, so llmhop serves every descriptor systemd hands over.
+              listen.local = { };
+              credentials = {
+                "llmhop.client-token" = null;
+                "llmhop.upstream-key" = null;
+              };
+              settings = {
+                authTokens = [ "\${cred:llmhop.client-token}" ];
+                models."test-model" = {
+                  url = "http://127.0.0.1:9000";
+                  headers.Authorization = "Bearer \${cred:llmhop.upstream-key}";
+                };
+              };
             };
           };
         };
@@ -209,6 +212,11 @@ testers.nixosTest {
     with subtest("llmhop reaches the worker through its socket"):
         body = machine.succeed(curl({"model": "fake-model"}, token="client-secret"))
         assert body == "socket ok", f"unexpected body: {body!r}"
+
+    with subtest("readiness probes every worker, but not the remote model"):
+        # `dying` never starts, so llmhop is not ready.
+        body = machine.succeed("curl -sS http://127.0.0.1:8080/readiness")
+        assert json.loads(body) == {"status": "unavailable", "ready": 1, "probed": 2}, f"unexpected body: {body!r}"
 
     with subtest("an upstream change restarts the server"):
         invocation = machine.get_unit_property("llama-cpp-fake-model", "InvocationID")

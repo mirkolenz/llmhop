@@ -132,6 +132,7 @@ let
       models = {
         local = {
           model = "/srv/models/local";
+          host = "::1";
           port = 21004;
           offline = false;
         };
@@ -570,6 +571,7 @@ let
         local = {
           fetcher = native.systemd.services ? vllm-local-fetch;
           restricted = native.systemd.services.vllm-local.serviceConfig ? IPAddressDeny;
+          probe = containsAll [ "http://[::1]:21004/health" ] native.systemd.services.vllm-local.postStart;
           inherit (native.systemd.services.vllm-local.environment) HF_HUB_OFFLINE;
         };
       };
@@ -582,6 +584,7 @@ let
         local = {
           fetcher = false;
           restricted = false;
+          probe = true;
           HF_HUB_OFFLINE = "1";
         };
       };
@@ -668,12 +671,14 @@ let
         sglang = lib.take 2 (
           builtins.fromJSON direct.virtualisation.quadlet.containers.sglang-llama.containerConfig.Entrypoint
         );
+        probe = containsAll [ "http://127.0.0.1:24001/health" ] direct.systemd.services.vllm-qwen.postStart;
         acl = direct.systemd.tmpfiles.settings."10-llmhop"."/run/llmhop".a.argument;
       };
       expected = {
         firewall = [ 24001 ];
         vllm = true;
         filtered = false;
+        probe = true;
         sglang = [
           "/bin/sh"
           "-c"

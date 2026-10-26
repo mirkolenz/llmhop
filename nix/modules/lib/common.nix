@@ -374,14 +374,27 @@ rec {
     ];
 
   # The curl target of the `/health` of a server listening on `socket`, or else
-  # on `port` of the loopback, a listener as a workload's `listen` gives it.
+  # on its bind address, using loopback for wildcard listeners.
   healthTarget =
-    { socket, port, ... }:
+    {
+      socket,
+      host,
+      port,
+    }:
+    let
+      probeHost =
+        if host == "0.0.0.0" then
+          "127.0.0.1"
+        else if host == "::" then
+          "::1"
+        else
+          host;
+    in
     (
       if socket != null then
         "--unix-socket ${lib.escapeShellArg socket} http://localhost"
       else
-        "http://${hostPort "127.0.0.1" port}"
+        "http://${hostPort probeHost port}"
     )
     + "/health";
 

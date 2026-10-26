@@ -4,19 +4,10 @@ Why the NixOS module in `nix/modules/` works the way the README describes, recor
 
 ## CLI dialects
 
-Two `settings` shapes have no portable rendering, so each engine declares how its parser reads them, shared by its native and Quadlet backend.
-
-`negateBools` marks parsers that register a `--no-<key>` twin for every boolean, as argparse's `BooleanOptionalAction` and llama.cpp's paired flags do.
-SGLang instead pairs `--enable-X` with `--disable-X` and rejects `--no-X`.
-
-`listStyle` picks between one flag for all elements (`--key a b`), as argparse `nargs` and clap multi-value options take, and one flag per element (`--key a --key b`), all that llama.cpp's hand-rolled parser understands.
-llama.cpp also takes only `--key value`, never `--key=value`.
-Both argparse backends register a few options in the other style, so this is the dominant form rather than a guarantee for every flag.
-
+Each engine declares how its parser reads booleans (`negateBools`) and lists (`listStyle`), with the rules the README's settings rendering lists.
 Neither axis can be delegated to nixpkgs.
 `lib.cli.toCommandLine` renders neither, since its `optionFormat` never sees the value and its list handling always repeats.
 The `mkBool` and `mkList` hooks of `lib.cli.toGNUCommandLine` could, but it is deprecated as of nixpkgs 25.11 and warns on every evaluation.
-
 Non-string values go through JSON, which keeps `0.6` from becoming `0.600000` as `toString` would make it.
 
 ## Worker hardening
@@ -57,16 +48,16 @@ SYCL and the Intel compute runtime cache their SPIR-V to ISA compilation only wh
 
 Each workload without a `port` gets a directory of its own below `socketDirectory` rather than a `<unit>.sock` in one flat directory, which every worker would have to write, letting one delete or squat another's socket.
 `connect()` needs search permission on each directory and write permission on the socket.
-The root is `root:root` with mode `0711`, so anyone may pass but not list it, and each directory has mode `0710`, since llmhop knows the name.
+The root is `root:root` with mode `0711`, so anyone may pass but not list it, and each directory has mode `0710`, since every client knows the name.
 vLLM and llama.cpp bind with the umask and never `chmod`, so workers run with `UMask = "0007"` and containers with `--umask=0007`, as Quadlet's own `Umask=` is newer than podman 6.1.
 llmhop's own socket listeners share the root, with ownership and mode from their listener options.
 
-A native worker's directory and socket belong to the backend's `group`, which llmhop joins, the usual systemd pattern for a socket client.
+A native worker's directory and socket belong to the backend's `group`, which every user of `socketClients` joins, the usual pattern for a socket client.
 An ACL cannot work there, because systemd drops every ACL of an exec directory when it chowns it to a non-root unit.
-Workers of one backend can therefore reach each other's sockets, but not those of another backend.
+Workers of one backend can therefore reach each other's sockets, but not those of another backend, and a client gets every socket of a backend or none, which is why `socketClients` is not per model.
 
-A container user maps to an unpredictable host ID under `UserNS=`, so Quadlet sockets rely on a default ACL `user:<services.llmhop.user>:-wx` on the root, inherited below it.
-That is why llmhop runs as a named user, since no ACL could name a `DynamicUser` in advance.
+A container user maps to an unpredictable host ID under `UserNS=`, so Quadlet sockets rely on a default ACL `user:<client>:-wx` for each of `socketClients` on the root, inherited below it.
+That is why llmhop runs as a named user, which its gateway adds to `socketClients`, since no ACL could name a `DynamicUser` in advance.
 The ACL survives, because systemd never chowns these directories, as the units run as root.
 The kernel masks a new socket's mode with the umask even below a default ACL, and the ACL mask follows the group bits, so `--umask=0007` keeps the ACL's write.
 The owning group's own entry comes from the root's `0711` and grants no write.
@@ -92,8 +83,7 @@ Triton locates `libcuda.so.1` through `/sbin/ldconfig -p`, which NixOS lacks, so
 These backends cannot run under `DynamicUser`, whose `/var/lib/private` layout hands `StateDirectory` and `CacheDirectory` over as ID-mapped mounts.
 Those are unconditionally noexec and beyond `ExecPaths=`, while these runtimes `dlopen` the kernels they compile into the cache.
 
-`mkUvEnv` checks unresolved libraries only on the assembled environment, since a wheel in isolation cannot see the siblings it shares a venv with, and half of what it misses at that point is another wheel.
-It counts a soname that any file in the environment carries as resolved, since wheels rarely link siblings through the runpath, as torch preloads the CUDA wheels and torchcodec expects torch to be loaded.
+`mkUvEnv` checks unresolved libraries only on the assembled environment and counts a soname that any file in it carries as resolved, since wheels rarely link siblings through the runpath, as torch preloads the CUDA wheels and torchcodec expects torch to be loaded.
 
 ## Lifecycle
 
@@ -121,9 +111,7 @@ A change runs `try-restart`, which leaves a stopped server alone, and a failed s
 Both run with full privileges, since a native fetcher's user may not manage units, and with `--no-block`, since the server is ordered after the fetcher.
 
 `<backend>-update` restarts every fetcher with full privileges, one at a time in startup order, so each server restart is queued after that of its predecessor and the startup chain holds.
-It then prunes, deleting repositories no enabled workload references, refs and snapshots of revisions none of them caches, except for llama.cpp, whose refs all name a default branch, then every blob no remaining snapshot resolves to, including the shared blob store of recent `huggingface_hub` releases.
-It only deletes extensionless blobs, so a concurrent download keeps its `.incomplete` files.
-Every workload defines the image unit of its image, which the module system merges into one per distinct image, referenced through quadlet-nix's `ref`.
+Pruning keeps every ref of llama.cpp, since all of them name a default branch, and removes the blobs no remaining snapshot resolves to, including the shared blob store of recent `huggingface_hub` releases, but only extensionless ones, so a concurrent download keeps its `.incomplete` files.
 
 ## Claims
 
@@ -135,6 +123,7 @@ This also keeps a native backend and its Quadlet twin apart, which share unit na
 ## Directory layout
 
 The layout follows systemd, Hugging Face and the engines' own defaults, and every engine reads the standard hub cache below `HF_HOME`, llama.cpp included.
+`cache.directory` holds it in `hub/`, each server keeps its compile and runtime caches in `/var/cache/<unit>` and, natively, its state in `/var/lib/<unit>`, and containers mount each directory at its host path.
 The shared directory is no `CacheDirectory=`, since systemd ties those to one unit, so `systemctl clean` on any fetcher would wipe every model of the backend, and systemd would chown it recursively whenever an owner differs.
 Fetchers and the update unit write it through `ReadWritePaths=`, while servers only read it, natively through `ProtectSystem=strict`.
 Xet keeps its chunk cache in `xet/` beside `hub/`.
@@ -147,10 +136,39 @@ Both apply even with `offline = false`, since only the fetcher writes the hub ca
 `DO_NOT_TRACK` disables vLLM's usage statistics, and `VLLM_HOST_IP` keeps vLLM from deriving its address from a route to a public host, which an offline server lacks.
 A socket server's own network namespace keeps `lo` for NCCL, while the socket stays reachable through the filesystem.
 A native server on a port is limited through the cgroup IP filter to `127.0.0.1` and `::1` rather than all of `localhost`, since `127.0.0.53` is the resolver stub of systemd-resolved.
-It can still reach other loopback services, llmhop's own listener included.
+It can still reach other loopback services, a gateway's listener included.
+The filter applies to both directions, so a server on another `host` goes without it, since it could not tell the clients from the destinations it must not reach.
 Native servers also cannot see `/run/nscd` and `/run/systemd/resolve`, through which glibc would resolve names outside the unit's network namespace.
+
+## Gateways
+
+A gateway in front of another gateway only duplicates routing, auth and limits, and a model reachable beside it voids its auth, so the module runs at most one and keeps every model it routes on loopback without a key of its own.
+Backends never configure a gateway, but publish their workloads to the internal `services.llmhop.endpoints`, which the selected gateway renders into its own configuration, so a new gateway is one more module and no backend changes.
+Each gateway module adds its name to `gateway.type`, an enum whose declarations merge, and lists the endpoints it routes in the internal `gateway.routes`, which the shared assertions check.
+
+Only llmhop routes the detectors, which neither SMG's discovery nor Bifrost's providers can describe.
+The external gateways run on the host network in a container, so they reach the models on loopback like their native variants, and as dynamic users natively, since no socket ACL has to name them.
+SMG gives up on the workers of `--worker-urls` after its startup timeout, while loading a model may take an hour, so it gets a discovery file instead, and it forwards the client's `Authorization` to the worker, the other reason routed models carry no key.
+Bifrost reconciles its `config.json` into a SQLite store in its app directory, by default in `split` mode, so the file seeds and updates each section while changes made through its UI survive until that section of the file changes.
+It has no llama.cpp provider, but its vLLM one serves any OpenAI-compatible server with a URL per key, as its SGLang one does.
+Each module translates `${cred:<name>}` into the one way its gateway reads secrets, expanded by llmhop itself, by a shell when SMG starts, or as an `env.` reference to a variable exported for Bifrost.
+
+## API keys
+
+Without a gateway, each model checks the key that its `apiKey` names from a credential, which never enters a command line, the Nix store or the environment of another unit.
+llama.cpp reads it from `--api-key-file`.
+vLLM takes `--api-key` as a value only, so a wrapper exports `VLLM_API_KEY` from the credential.
+SGLang reads it from neither a file nor the environment, so the wrapper writes a private YAML file in the unit's private `/tmp` and passes it as `--config`.
+Containers run the same wrapper as their entrypoint ahead of the image's own.
+
+## Watermarking
+
+`mkVllmWatermark`'s `serve` command merges the key into the `--watermark-config` of `vllm serve` in-process, and its `detect` command replaces vLLM's example detector, which lacks unix sockets, a health endpoint, a file-based key and every algorithm but `gumbel`.
+The detector picks its class by vLLM's naming conventions, so a new upstream algorithm that follows them works unchanged, and one that does not fails loudly.
+Native builds check the script against the vLLM environment, so a `uv lock` that breaks it fails the build, while containers run it unchecked with the image's interpreter and fail at startup instead.
 
 ## Containers
 
 The container rootfs stays writable, since ML runtimes scatter JIT and compile caches across version-dependent `HOME` paths that an immutable rootfs would need an ever-growing tmpfs allow-list for.
 `/tmp` is a tmpfs for fast scratch, where torch inductor puts `/tmp/torchinductor_root`.
+Every workload defines the image unit of its image, which the module system merges into one per distinct image, referenced through quadlet-nix's `ref`.

@@ -21,6 +21,20 @@ type Upstream struct {
 	Transport http.RoundTripper
 }
 
+// idleConnsPerHost keeps the connections to a backend serving concurrent
+// requests open, where the default of 2 would redial all others after each.
+const idleConnsPerHost = 64
+
+// sharedTransport reaches every http(s) backend.
+var sharedTransport = newTransport()
+
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = idleConnsPerHost
+
+	return t
+}
+
 // Parse accepts an absolute http(s) URL or `unix:///<socket path>`. A socket
 // address carries no HTTP path, so requests go to the root of the server
 // listening on it.
@@ -39,14 +53,14 @@ func Parse(raw string) (*Upstream, error) {
 		}
 
 		if u.Host != "" {
-			return &Upstream{URL: u, Transport: http.DefaultTransport}, nil
+			return &Upstream{URL: u, Transport: sharedTransport}, nil
 		}
 	case "unix":
 		if u.Host != "" || !path.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("url %q must be unix:///<absolute socket path>", raw)
 		}
 
-		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport := newTransport()
 		transport.Proxy = nil
 
 		var dialer net.Dialer

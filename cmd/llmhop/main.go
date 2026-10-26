@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/mirkolenz/llmhop/internal/config"
@@ -59,6 +63,9 @@ func main() {
 		log.Printf("listening on %s with %d model(s)", ln.Addr(), len(cfg.Models))
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
 	if err := systemd.Ready(); err != nil {
 		log.Fatalf("sd_notify: %v", err)
 	}
@@ -69,5 +76,18 @@ func main() {
 		go func() { errs <- srv.Serve(ln) }()
 	}
 
-	log.Fatal(<-errs)
+	select {
+	case err := <-errs:
+		log.Fatal(err)
+	case <-ctx.Done():
+	}
+
+	// Restores default signal handling, so a second signal aborts the drain.
+	stop()
+	log.Print("shutting down, draining in-flight requests")
+
+	// Unbounded on purpose, systemd's TimeoutStopSec caps the drain.
+	if err := srv.Shutdown(context.Background()); err != nil {
+		log.Fatalf("shutdown: %v", err)
+	}
 }

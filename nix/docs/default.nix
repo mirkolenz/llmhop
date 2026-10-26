@@ -27,26 +27,20 @@
       # options next to them form the core page. Splitting on `isOption` keeps
       # new backends documented without touching this file.
       backends = lib.filterAttrs (_: v: !lib.isOption v) moduleOptions.services.llmhop;
-      sections = [
+      pages = [
         {
-          title = "NixOS Options";
-          prefix = "nixos";
-          pages = [
-            {
-              name = "core";
-              title = "Core";
-              value = mkOptions (lib.filterAttrs (_: lib.isOption) moduleOptions.services.llmhop);
-            }
-          ]
-          ++ lib.mapAttrsToList (name: options: {
-            inherit name;
-            title = name;
-            value = mkOptions options;
-          }) backends;
+          name = "core";
+          title = "Core";
+          value = mkOptions (lib.filterAttrs (_: lib.isOption) moduleOptions.services.llmhop);
         }
-      ];
+      ]
+      ++ lib.mapAttrsToList (name: options: {
+        inherit name;
+        title = name;
+        value = mkOptions options;
+      }) backends;
     in
     {
-      packages.docs = pkgs.callPackage ./book.nix { inherit sections; };
+      packages.docs = pkgs.callPackage ./book.nix { inherit pages; };
     };
 }

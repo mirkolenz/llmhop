@@ -4,7 +4,7 @@
   mdbook,
   writeShellApplication,
   python3,
-  sections,
+  pages,
 }:
 stdenvNoCC.mkDerivation (finalAttrs: {
   name = "book";
@@ -21,16 +21,12 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     ln -s ${../../README.md} src/README.md
 
-    ${lib.concatMapStringsSep "\n" (section: ''
-      echo "" >> src/SUMMARY.md
-      echo "# ${section.title}" >> src/SUMMARY.md
-      echo "" >> src/SUMMARY.md
-      mkdir -p src/${section.prefix}
-      ${lib.concatMapStringsSep "\n" (page: ''
-        echo "- [${page.title}](${section.prefix}/${page.name}.md)" >> src/SUMMARY.md
-        ln -s ${page.value} src/${section.prefix}/${page.name}.md
-      '') section.pages}
-    '') sections}
+    printf '\n# NixOS Options\n\n' >> src/SUMMARY.md
+    mkdir -p src/nixos
+    ${lib.concatMapStringsSep "\n" (page: ''
+      echo "- [${page.title}](nixos/${page.name}.md)" >> src/SUMMARY.md
+      ln -s ${page.value} src/nixos/${page.name}.md
+    '') pages}
 
     mdbook build
 

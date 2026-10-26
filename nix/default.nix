@@ -28,6 +28,7 @@
     }:
     let
       mkEvalCheck = pkgs.callPackage ./checks/lib.nix { };
+      inherit (pkgs.stdenv.hostPlatform) isLinux;
     in
     {
       treefmt = {
@@ -44,7 +45,7 @@
         inherit (config.legacyPackages) check-elf prune-hub;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
-      // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
+      // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
         eval = pkgs.callPackage ./checks/eval.nix {
@@ -63,7 +64,7 @@
           ];
         };
       }
-      // lib.optionalAttrs (lib.elem system lib.platforms.linux) {
+      // lib.optionalAttrs isLinux {
         docker = pkgs.callPackage ./docker.nix {
           inherit (config.packages) llmhop;
         };

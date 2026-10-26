@@ -126,11 +126,6 @@ func TestLoad(t *testing.T) {
 			wantErr: "invalid header value",
 		},
 		{
-			name:    "requires absolute model URLs",
-			body:    `{"models": {"m": {"url": "localhost:8000"}}}`,
-			wantErr: "absolute http(s) or unix URL",
-		},
-		{
 			name: "defaults applied",
 			body: minimal,
 			check: func(t *testing.T, cfg *Config) {

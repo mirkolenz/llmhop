@@ -63,8 +63,10 @@ func send(t *testing.T, handler http.Handler, method, path, body, authHeader str
 }
 
 func TestInvalidModelURL(t *testing.T) {
-	if _, err := New(&config.Config{Models: map[string]config.Model{"bad": {URL: "://not a url"}}}); err == nil {
-		t.Fatal("expected error for malformed URL")
+	for _, url := range []string{"://not a url", "localhost:8000"} {
+		if _, err := New(&config.Config{Models: map[string]config.Model{"bad": {URL: url}}}); err == nil {
+			t.Fatalf("accepted the malformed URL %q", url)
+		}
 	}
 }
 

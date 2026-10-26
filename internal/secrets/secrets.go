@@ -16,21 +16,13 @@ const credentialsDirectory = "CREDENTIALS_DIRECTORY"
 
 // Expand resolves every secret reference inside s. Unresolved references
 // are errors so misconfiguration fails loudly at startup instead of leaking
-// an empty credential to a backend.
-func Expand(s string) (string, error) {
-	return expand(s, true)
-}
-
-// Validate checks every reference of s without reading any secret, so it
-// catches everything Expand would except secrets that do not exist.
-func Validate(s string) error {
-	_, err := expand(s, false)
-	return err
-}
-
-// expand relies on os.Expand, which silently drops a malformed `${}` or
-// unclosed `${`. What remains is literal text that fails authentication.
-func expand(s string, load bool) (string, error) {
+// an empty credential to a backend. Without load it checks every reference
+// without reading any secret and returns s verbatim, which catches every
+// error except a secret that does not exist.
+//
+// It relies on os.Expand, which silently drops a malformed `${}` or unclosed
+// `${`. What remains is literal text that fails authentication.
+func Expand(s string, load bool) (string, error) {
 	var errs []error
 
 	out := os.Expand(s, func(key string) string {
@@ -43,6 +35,10 @@ func expand(s string, load bool) (string, error) {
 
 		return v
 	})
+
+	if !load {
+		out = s
+	}
 
 	return out, errors.Join(errs...)
 }

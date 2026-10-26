@@ -31,7 +31,7 @@ func New(cfg *config.Config) (http.Handler, error) {
 	for name, m := range cfg.Models {
 		up, err := upstream.Parse(m.URL)
 		if err != nil {
-			return nil, fmt.Errorf("model %q: %w", name, err)
+			return nil, fmt.Errorf("models.%s: %w", name, err)
 		}
 
 		// Go carries Host outside the header map, so a configured one overrides r.Out.Host.

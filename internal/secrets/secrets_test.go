@@ -140,7 +140,7 @@ func TestExpand(t *testing.T) {
 			if c.setup != nil {
 				in = c.setup(t)
 			}
-			got, err := Expand(in)
+			got, err := Expand(in, true)
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got %q", got)
@@ -157,15 +157,15 @@ func TestExpand(t *testing.T) {
 	}
 }
 
-func TestValidate(t *testing.T) {
+func TestExpandWithoutLoad(t *testing.T) {
 	for _, in := range []string{"${file:tok}", "${cred:sub/tok}", "${env:}"} {
-		if err := Validate(in); err == nil {
-			t.Errorf("Validate(%q) accepted an invalid reference", in)
+		if _, err := Expand(in, false); err == nil {
+			t.Errorf("Expand(%q, false) accepted an invalid reference", in)
 		}
 	}
 
-	if err := Validate("${env:LLMHOP_TEST_MISSING}"); err != nil {
-		t.Errorf("Validate resolved a reference: %v", err)
+	if got, err := Expand("${env:LLMHOP_TEST_MISSING}", false); err != nil || got != "${env:LLMHOP_TEST_MISSING}" {
+		t.Errorf("Expand without load resolved a reference: %q, %v", got, err)
 	}
 }
 

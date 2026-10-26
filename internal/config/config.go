@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/mirkolenz/llmhop/internal/secrets"
-	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 type Model struct {
@@ -109,12 +108,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 		cfg.Port = DefaultPort
 	}
 
-	resolve := secrets.Expand
-	if !expandSecrets {
-		resolve = func(s string) (string, error) { return s, secrets.Validate(s) }
-	}
-
-	if err := cfg.resolveSecrets(resolve); err != nil {
+	if err := cfg.resolveSecrets(expandSecrets); err != nil {
 		return nil, err
 	}
 
@@ -144,10 +138,6 @@ func (cfg *Config) validate() error {
 			return errors.New("model name must not be empty")
 		}
 
-		if _, err := upstream.Parse(model.URL); err != nil {
-			return fmt.Errorf("models.%s: %w", name, err)
-		}
-
 		seen := make(map[string]bool, len(model.Headers))
 
 		for header := range model.Headers {
@@ -167,12 +157,13 @@ func (cfg *Config) validate() error {
 	return nil
 }
 
-// resolveSecrets passes auth tokens and per-model header values through
-// resolve in place and validates the results. Raw references are valid
-// header values, so the same checks serve `-check` runs and startup.
-func (cfg *Config) resolveSecrets(resolve func(string) (string, error)) error {
+// resolveSecrets expands auth tokens and per-model header values in place,
+// or with load unset only checks their references, and validates the results.
+// Raw references are valid header values, so the same checks serve `-check`
+// runs and startup.
+func (cfg *Config) resolveSecrets(load bool) error {
 	for i, token := range cfg.AuthTokens {
-		v, err := resolve(token)
+		v, err := secrets.Expand(token, load)
 		if err == nil {
 			err = validateAuthToken(v)
 		}
@@ -186,7 +177,7 @@ func (cfg *Config) resolveSecrets(resolve func(string) (string, error)) error {
 
 	for name, model := range cfg.Models {
 		for k, value := range model.Headers {
-			v, err := resolve(value)
+			v, err := secrets.Expand(value, load)
 			if err == nil && !validHeaderValue(v) {
 				err = errors.New("invalid header value")
 			}

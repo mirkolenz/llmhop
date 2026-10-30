@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -420,10 +421,9 @@ func TestBufferedRequestLimit(t *testing.T) {
 }
 
 func TestBufferedSlotReleasedOnceSent(t *testing.T) {
-	entered, unblock := make(chan struct{}), make(chan struct{})
+	unblock := make(chan struct{})
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		entered <- struct{}{}
 		<-unblock
 	}))
 	t.Cleanup(slow.Close)
@@ -433,14 +433,19 @@ func TestBufferedSlotReleasedOnceSent(t *testing.T) {
 		Models:              map[string]config.Model{"slow": {URL: slow.URL}, "fast": {URL: fast.URL}},
 	})
 
-	done := make(chan struct{})
+	// The router's own WroteRequest hook, which releases the slot, runs before this outer one.
+	sent, done := make(chan struct{}), make(chan struct{})
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { close(sent) },
+	})
 
 	go func() {
-		send(t, h, http.MethodPost, "/", `{"model":"slow"}`, "")
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(`{"model":"slow"}`))
+		h.ServeHTTP(httptest.NewRecorder(), req)
 		close(done)
 	}()
 
-	<-entered
+	<-sent
 
 	// The slow response still runs, but its body was sent.
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"fast"}`, ""); rec.Code != http.StatusOK {

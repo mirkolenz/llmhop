@@ -4,16 +4,17 @@ let
   inherit (lib) mkOption types;
   inherit (common)
     backendOptions
-    cacheDirectoryRule
+    cacheDirectory
     chainEntries
     engines
     environmentFiles
-    fetchHook
+    hubCache
     fetchUnit
     fetcherOf
     fetches
     healthTarget
     hostPort
+    hubDirectories
     mkFetcher
     modelModule
     modelsOption
@@ -26,7 +27,6 @@ let
     socketUMask
     sortedWorkloads
     startupOrderingOption
-    unitCacheDirectory
     workloadArgs
     ;
 
@@ -124,7 +124,7 @@ let
       name,
       engine,
       cfg,
-      hook,
+      hubCache,
       quadlet,
     }:
     entry:
@@ -135,15 +135,17 @@ let
       # A host directory mounted at the same path.
       cacheMount =
         directory: options: "${directory}:${directory}${mountSuffix (options ++ cfg.cache.mountOptions)}";
+      cache = cacheMount (cacheDirectory cfg workload) [ ];
       fetch = mkFetcher {
         inherit
           engine
           cfg
-          hook
+          hubCache
           workload
           credentialDirectory
           ;
         inherit (engine.quadlet) fetcher;
+        backend = name;
         server = quadlet.containers.${unit}.serviceName;
       };
       image = imageUnit {
@@ -170,7 +172,7 @@ let
       containers = {
         ${unit} = {
           # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
-          serviceConfig = serverServiceConfig cfg workload;
+          serviceConfig = serverServiceConfig cfg workload // fetch.serverServiceConfig;
           unitConfig = sharedUnitConfig // {
             Wants = fetcher;
             After = fetcher ++ entry.after;
@@ -186,9 +188,10 @@ let
               HealthInterval = "10s";
               HealthTimeout = "5s";
               Volume = [
-                (cacheMount cfg.cache.directory [ "ro" ])
-                (cacheMount (unitCacheDirectory unit) [ ])
+                cache
               ]
+              # The server only reads the hub cache.
+              ++ map (directory: cacheMount directory [ "ro" ]) (hubDirectories cfg workload)
               ++ entry.mounts
               # `U` hands the directory to whatever host UID the container
               # user maps to, so the socket works under any `User=` and
@@ -220,7 +223,7 @@ let
                 fetchScriptPath
               ];
               Volume = [
-                (cacheMount cfg.cache.directory [ ])
+                cache
                 "${builtins.toFile "fetch.sh" fetch.script}:${fetchScriptPath}:ro"
               ]
               ++ credentials cfg.fetch.credentials;
@@ -296,10 +299,9 @@ let
             default = [ ];
             example = [ "idmap" ];
             description = ''
-              Options appended to the Quadlet `Volume=` entries of
-              `cache.directory` and of each server's own cache directory, for
-              Podman ownership mechanisms such as `idmap` or SELinux
-              relabeling.
+              Options appended to the Quadlet `Volume=` entries of the cache
+              directories below `cache.directory`, for Podman ownership
+              mechanisms such as `idmap` or SELinux relabeling.
             '';
           };
           user = mkOption {
@@ -399,16 +401,12 @@ let
                   cfg
                   quadlet
                   ;
-                hook = fetchHook pkgs;
+                hubCache = hubCache pkgs;
               }) entries
-            );
-            systemd.tmpfiles.settings."10-${name}" = lib.mkMerge (
-              map (e: cacheDirectoryRule cfg.cache (unitCacheDirectory e.workload.unit)) entries
             );
           }
           (sharedConfig {
             inherit
-              engine
               backend
               cfg
               pkgs

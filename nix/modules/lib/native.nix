@@ -4,14 +4,16 @@ let
   inherit (lib) mkOption types;
   inherit (common)
     backendOptions
+    cacheDirectory
     chainEntries
     engines
     environmentFiles
-    fetchHook
+    hubCache
     fetchUnit
     fetcherOf
     fetches
     healthTarget
+    hubDirectories
     identityConfig
     identityOptions
     isLoopback
@@ -28,7 +30,7 @@ let
     socketUMask
     sortedWorkloads
     startupOrderingOption
-    unitCacheDirectory
+    stateDirectory
     ;
 
   # Universal systemd-exec(5) hardening of every native unit, gateways and
@@ -73,7 +75,7 @@ let
 
   # A model worker's relaxations for GPUs and for NCCL in tensor-parallel
   # inference, and its own state directory.
-  gpuServiceConfig = unit: {
+  gpuServiceConfig = state: {
     PrivateDevices = false;
     SupplementaryGroups = [
       "render"
@@ -87,8 +89,8 @@ let
     SocketBindAllow = "tcp";
     KillSignal = "SIGINT";
     TasksMax = 4096;
-    StateDirectory = unit;
-    WorkingDirectory = "/var/lib/${unit}";
+    StateDirectory = state;
+    WorkingDirectory = "/var/lib/${state}";
   };
 
   # A native unit's credential directory as `${cred:…}` resolves to it. It
@@ -123,8 +125,9 @@ let
   units =
     {
       engine,
+      backend,
       cfg,
-      hook,
+      hubCache,
       pkgs,
       utils,
     }:
@@ -133,12 +136,14 @@ let
       inherit (engine.native) uv;
       inherit (entry) workload;
       inherit (workload) unit;
+      cache = cacheDirectory cfg workload;
       fetcher = fetcherOf workload;
       fetch = mkFetcher {
         inherit
           engine
+          backend
           cfg
-          hook
+          hubCache
           workload
           ;
         server = unit;
@@ -183,7 +188,7 @@ let
         environment = serverEnvironment {
           inherit engine cfg workload;
           environment = {
-            HOME = unitCacheDirectory unit;
+            HOME = cache;
           }
           // lib.optionalAttrs uv {
             LD_LIBRARY_PATH = "/run/opengl-driver/lib";
@@ -207,10 +212,12 @@ let
         unitConfig = sharedUnitConfig;
         serviceConfig =
           serverServiceConfig cfg workload
+          // fetch.serverServiceConfig
           # Its group owns the worker socket, which every client joins.
           // serviceConfig cfg
           // {
-            CacheDirectory = unit;
+            ReadWritePaths = [ cache ];
+            ReadOnlyPaths = hubDirectories cfg workload;
             EnvironmentFile = environmentFiles cfg workload;
           }
           // offline {
@@ -229,7 +236,7 @@ let
           };
       })
     ]
-    # The fetcher shares its server's identity and hub, with network access
+    # The fetcher shares its server's identity and cache, with network access
     # and the backend's `fetch` credentials.
     ++ lib.optional (fetches workload) (
       lib.nameValuePair (fetchUnit unit) {
@@ -243,7 +250,7 @@ let
           serviceConfig cfg
           // fetch.serviceConfig
           // {
-            ReadWritePaths = [ cfg.cache.directory ];
+            ReadWritePaths = [ cache ];
             UMask = "0077";
             EnvironmentFile = fetch.environmentFile;
             ExecStart = pkgs.writeShellScript (fetchUnit unit) fetch.script;
@@ -276,7 +283,7 @@ let
           # The working directory of a worker and the only port it may bind,
           # unless `gpuServiceConfig` replaces it.
           serviceConfig = {
-            WorkingDirectory = unitCacheDirectory e.workload.unit;
+            WorkingDirectory = cacheDirectory cfg e.workload;
           }
           // lib.optionalAttrs (e.workload.port != null) {
             SocketBindAllow = "tcp:${toString e.workload.port}";
@@ -290,7 +297,7 @@ let
           description = "${engine.displayName} server for ${model.name}";
           inherit (model) command;
           environment = distributedEnvironment;
-          serviceConfig = gpuServiceConfig model.unit;
+          serviceConfig = gpuServiceConfig (stateDirectory name model);
         };
       entries =
         chainEntries (uv && cfg.startupOrdering) (e: "${e.workload.unit}.service") (
@@ -377,7 +384,8 @@ let
                   pkgs
                   utils
                   ;
-                hook = fetchHook pkgs;
+                backend = name;
+                hubCache = hubCache pkgs;
               }) entries
             );
           }
@@ -390,19 +398,10 @@ let
             );
           }
           (sharedConfig {
-            inherit
-              engine
-              cfg
-              pkgs
-              entries
-              ;
+            inherit cfg pkgs entries;
             backend = name;
             serviceName = name;
             cacheOwner = cfg;
-            updateServiceConfig = serviceConfig cfg // {
-              ReadWritePaths = [ cfg.cache.directory ];
-              PrivateNetwork = true;
-            };
           })
           (identityConfig { inherit name cfg; })
         ]

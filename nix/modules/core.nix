@@ -12,7 +12,7 @@ let
     engines
     native
     smg
-    socketRootRule
+    rootDirectoryRule
     watermark
     ;
 
@@ -134,7 +134,7 @@ in
       ];
       description = ''
         Resources that only one owner may hold, by kind (`port`, `unit`,
-        `model`, `directory`) and key, each listing the option paths of its
+        `model`) and key, each listing the option paths of its
         owners. An assertion rejects every key with more than one owner.
       '';
     };
@@ -157,6 +157,6 @@ in
 
     systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (e: e.socket != null) (
       lib.attrValues cfg.endpoints
-    )) (socketRootRule cfg.socketDirectory);
+    )) (rootDirectoryRule cfg.socketDirectory);
   };
 }

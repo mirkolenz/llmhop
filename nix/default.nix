@@ -42,11 +42,12 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        inherit (config.legacyPackages) check-elf prune-hub;
+        inherit (config.legacyPackages) check-elf;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;
+        inherit (config.legacyPackages) hub-cache;
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
         eval = pkgs.callPackage ./checks/eval.nix {
           inherit self mkEvalCheck;

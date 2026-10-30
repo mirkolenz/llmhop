@@ -38,10 +38,9 @@ RCCL reads the same variables, while oneCCL uses `CCL_*` and ignores them.
 
 ### Caches
 
-Every accelerator stack caches compiled kernels below `$HOME`, which `ProtectSystem = "strict"` makes read-only, so each is redirected into the unit's own cache directory, the one place `systemctl clean` reaches.
+Every accelerator stack caches compiled kernels below `$HOME`, which `ProtectSystem = "strict"` makes read-only, so each is redirected into the workload's own cache directory.
 The variables are set unconditionally, since one of an absent stack is never read.
 MIOpen needs two of them, or its kernel database and compiled-kernel cache land under separate roots.
-transformers keeps the remote code of `trust_remote_code` models in `$HF_HOME/modules`, so `HF_MODULES_CACHE` moves it out of the read-only hub cache.
 SYCL and the Intel compute runtime cache their SPIR-V to ISA compilation only when asked to, which turns a multi-minute JIT into a one-time cost.
 
 ## Unix sockets
@@ -101,33 +100,43 @@ The loop also watches `$MAINPID`, since systemd waits for `ExecStartPost=` to fi
 A fetcher mirrors a Quadlet image unit, a oneshot with `RemainAfterExit=`.
 The server `Wants=` its fetcher and is ordered after it, but does not `Requires=` it as a container does its image, since that would propagate every restart by `<backend>-update` to the server, changed model or not.
 The fetcher shares its server's identity, a named user natively and, in a container, whatever `User=` and `UserNS=` the deployer gives both, so both see the cache under one owner.
-That is why llama.cpp does not use `DynamicUser` either.
+That is why llama.cpp does not use `DynamicUser` either, which would also tie the cache to a `CacheDirectory=` below `/var/cache`.
 
-A failed download keeps the cache only while it holds the requested revision, a ref of that name or a snapshot of that commit, with `main` standing for the default branch, as huggingface_hub records it.
-llama.cpp names the default branch's ref after the branch, but pins no revision, so any of its refs will do.
+Every workload has a hub cache of its own, even when another one serves the same repository.
+A shared cache would save disk space, but each fetch could then change or prune what other servers loaded, so every server would have to track the cache state it loaded and pruning would have to wait for every fetcher.
 
-The fetcher records the refs and snapshot files of its repositories before downloading and compares them afterwards.
+After a complete download, the fetcher prunes the hub cache to the repositories and revisions of the workload, with `main` standing for the default branch.
+It keeps every ref of llama.cpp, since llama.cpp names the default branch after the branch but pins no revision, and removes the blobs no remaining snapshot resolves to, including the shared blob store of recent `huggingface_hub` releases.
+A native fetcher prunes as its own user, so a symlink planted in the cache cannot redirect a privileged deletion.
+
+It then records a fingerprint in its state directory `/var/lib/<backend>/<name>-fetch`, which the server cannot write, covering the fetch specification, the requested refs and the files of their snapshots.
 A change runs `try-restart`, which leaves a stopped server alone, and a failed server is reset and started again.
-Both run with full privileges, since a native fetcher's user may not manage units, and with `--no-block`, since the server is ordered after the fetcher.
+This step runs with full privileges, since a native fetcher's user may not manage units, and queues the server with `--no-block`, since the server is ordered after the fetcher.
 
-`<backend>-update` restarts every fetcher with full privileges, one at a time in startup order, so each server restart is queued after that of its predecessor and the startup chain holds.
-Pruning keeps every ref of llama.cpp, since all of them name a default branch, and removes the blobs no remaining snapshot resolves to, including the shared blob store of recent `huggingface_hub` releases, but only extensionless ones, so a concurrent download keeps its `.incomplete` files.
+`huggingface_hub` updates a ref before it downloads the snapshot, so a failed or interrupted download may leave a ref pointing at an incomplete one.
+The record therefore also holds the refs of the complete download, which the fetcher writes back whenever it stops, through `ExecStopPost=` as its own user, a no-op after a complete download.
+The server then starts from its last complete download, offline too, while the partial files stay for the next fetch, which resumes them with HTTP range requests.
+As a safety net, the server checks the cache against the record before it starts, so a damaged snapshot or a changed fetch specification blocks startup until a fetch succeeds.
+
+`<backend>-update` restarts every fetcher, one at a time in startup order, so each server restart is queued after that of its predecessor and the startup chain holds.
+A failed fetcher does not stop the update, since it affects no other workload.
 
 ## Claims
 
-Ports, unit names, routing keys and cache directories each admit only one owner, but nothing in NixOS would reject a second one at evaluation.
-A port clash fails at boot, a unit or routing key clash merges silently or fails with an opaque conflict, and a shared cache directory lets one backend prune the other's models.
+Ports, unit names and routing keys each admit only one owner, but nothing in NixOS would reject a second one at evaluation.
+A port clash fails at boot, and a unit or routing key clash merges silently or fails with an opaque conflict.
 So every owner adds its option path to the internal `services.llmhop.claims.<kind>.<key>`, and one assertion per key names all owners of a clash.
-This also keeps a native backend and its Quadlet twin apart, which share unit names and the default cache directory.
+This also keeps a native backend and its Quadlet twin apart, which share unit names.
+Cache directories need no claim, since each is named after a unique routing key.
 
 ## Directory layout
 
 The layout follows systemd, Hugging Face and the engines' own defaults, and every engine reads the standard hub cache below `HF_HOME`, llama.cpp included.
-`cache.directory` holds it in `hub/`, each server keeps its compile and runtime caches in `/var/cache/<unit>` and, natively, its state in `/var/lib/<unit>`, and containers mount each directory at its host path.
-The shared directory is no `CacheDirectory=`, since systemd ties those to one unit, so `systemctl clean` on any fetcher would wipe every model of the backend, and systemd would chown it recursively whenever an owner differs.
-Fetchers and the update unit write it through `ReadWritePaths=`, while servers only read it, natively through `ProtectSystem=strict`.
+Each workload's directory `cache.directory/<name>` is the `HF_HOME` of its fetcher and its server, holding the hub cache in `hub/` beside the server's compile and runtime caches, while a native server keeps its state in `/var/lib/<backend>/<name>`, and containers mount each directory at its host path.
+The root is owned by root and only passable, so a native backend and its Quadlet twin can share it.
+It is no `CacheDirectory=`, which would have to stay below `/var/cache` rather than on a data disk.
+The fetcher writes the directory through `ReadWritePaths=`, while the server only reads `hub/`, natively through `ReadOnlyPaths=` and in a container through a read-only mount.
 Xet keeps its chunk cache in `xet/` beside `hub/`.
-Each per-unit directory carries its unit's name, so `systemctl clean <unit>` removes exactly what that server regenerates.
 
 ## Offline servers
 

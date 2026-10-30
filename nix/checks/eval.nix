@@ -383,8 +383,8 @@ let
       };
       expected = {
         Volume = [
-          "/var/cache/llama-cpp:/var/cache/llama-cpp:ro"
-          "/var/cache/llama-cpp-b:/var/cache/llama-cpp-b"
+          "/var/cache/llama-cpp/b:/var/cache/llama-cpp/b"
+          "/var/cache/llama-cpp/b/hub:/var/cache/llama-cpp/b/hub:ro"
           "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U"
         ];
         PodmanArgs = [ "--umask=0007" ];
@@ -535,8 +535,8 @@ let
         quadlet = {
           arguments = true;
           volumes = [
-            "/var/cache/vllm"
-            "/var/cache/vllm-detector-watermark"
+            "/var/cache/vllm/watermark"
+            "/var/cache/vllm/watermark/hub"
             "/run/llmhop/watermark.py"
             "/run/llmhop/credentials"
           ];
@@ -561,11 +561,28 @@ let
     testNativeFetch = {
       expr = {
         script = containsAll [
-          "/bin/hf download example/test --revision v1 || test -e /var/cache/vllm/hub/models--example--test/refs/v1 || test -d /var/cache/vllm/hub/models--example--test/snapshots/v1"
+          "/bin/hf download example/test --revision v1"
         ] nativeFetcher.serviceConfig.ExecStart.text;
-        inherit (nativeFetcher.environment) HF_TOKEN_PATH;
+        guarded = containsAll [
+          "llmhop-hub-cache load /var/lib/vllm/test-fetch"
+        ] nativeWorker.serviceConfig.ExecStartPre;
+        # Only the fetcher writes the hub cache, which no other workload shares.
+        hooks = map (containsAll [
+          "llmhop-hub-cache prune"
+        ]) nativeFetcher.serviceConfig.ExecStartPost;
+        restore = containsAll [
+          "llmhop-hub-cache restore /var/lib/vllm/test-fetch/completed"
+        ] nativeFetcher.serviceConfig.ExecStopPost;
+        inherit (nativeFetcher.environment) HF_HOME HF_TOKEN_PATH;
+        inherit (nativeFetcher.serviceConfig) ReadWritePaths;
         inherit (nativeWorker.environment) HF_HUB_OFFLINE;
-        inherit (nativeWorker.serviceConfig) IPAddressDeny Restart;
+        inherit (nativeWorker.serviceConfig)
+          IPAddressDeny
+          ReadOnlyPaths
+          Restart
+          StateDirectory
+          ;
+        fetchState = nativeFetcher.serviceConfig.StateDirectory;
         # A local path has nothing to fetch, and this server opted out of
         # the offline mode.
         local = {
@@ -577,10 +594,21 @@ let
       };
       expected = {
         script = true;
+        guarded = true;
+        hooks = [
+          true
+          false
+        ];
+        restore = true;
+        HF_HOME = "/var/cache/vllm/test";
         HF_TOKEN_PATH = "%d/llmhop.hf-token";
+        ReadWritePaths = [ "/var/cache/vllm/test" ];
         HF_HUB_OFFLINE = "1";
         IPAddressDeny = "any";
+        ReadOnlyPaths = [ "/var/cache/vllm/test/hub" ];
         Restart = "always";
+        StateDirectory = "vllm/test";
+        fetchState = "vllm/test-fetch";
         local = {
           fetcher = false;
           restricted = false;
@@ -594,7 +622,7 @@ let
     testQuadletFetch = {
       expr = {
         inherit (quadletWorker.unitConfig) Wants;
-        hook = containsAll [ "llmhop-fetch-hook apply vllm-test.service" ] (
+        hook = containsAll [ "llmhop-hub-cache apply vllm-test /var/lib/vllm/test-fetch" ] (
           toString quadlet.virtualisation.quadlet.containers.vllm-test-fetch.serviceConfig.ExecStartPost
         );
         offline = lib.elem (lib.toJSON "HF_HUB_OFFLINE=1") quadletWorker.containerConfig.Environment;
@@ -686,8 +714,8 @@ let
       };
     };
 
-    # A native backend and its Quadlet twin share the cache directory and the
-    # update unit, and here also a port.
+    # A native backend and its Quadlet twin share the update unit, and here
+    # also a port, while each workload has its own cache directory.
     testTwinBackends = {
       expr = failing "is claimed by" (mkSystem {
         vllm = {
@@ -707,7 +735,7 @@ let
           };
         };
       });
-      expected = 3;
+      expected = 2;
     };
 
     # The listener and the derived flags win over `settings`, so gateways and

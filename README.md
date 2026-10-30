@@ -217,7 +217,7 @@ nixpkgs lacks Bifrost, so the native `package` comes from Bifrost's own flake, a
 ### Inference backends
 
 Each backend exposes a `models` attrset under `services.llmhop.<backend>`, and every entry becomes an isolated worker on a unix socket or port, routed by the selected [gateway](#gateways) automatically.
-All backends can be enabled side by side, while a backend's native and container variants share unit names and the default `cache.directory`, so evaluation rejects any port, unit, routing key or cache directory that two of them claim.
+All backends can be enabled side by side, while a backend's native and container variants share unit names, so evaluation rejects any port, unit or routing key that two of them claim.
 See the [options reference](https://mirkolenz.github.io/llmhop/) for every option.
 
 ```nix
@@ -267,7 +267,10 @@ Containers see their socket directory at `/run/llmhop/socket`, mounted with Podm
 #### Fetching and offline servers
 
 Every model runs as two units, the fetcher `<backend>-<model>-fetch`, which downloads everything the server loads, and the offline server `<backend>-<model>`.
-The fetcher runs before its server and stays active, so a restarted server does not fetch again, and a failed download keeps the cache as long as it holds the requested revision.
+The fetcher runs before its server and stays active, so a restarted server does not fetch again.
+Each model has its own cache `cache.directory/<name>`, which no other model touches, even one serving the same repository.
+A failed or interrupted download leaves the server on its last complete download, and the next fetch resumes the partial files.
+A server never starts from an incomplete snapshot.
 Fetchers use `hf download` from the backend's package or image, or `llama download`, which resolves quantization tags, split files and the mmproj as `llama-server` would.
 A `model` that is an absolute path is served as is without a fetcher.
 
@@ -292,14 +295,15 @@ services.llmhop.vllm.fetch = {
 };
 ```
 
-Servers only read `cache.directory`, so they always get `HF_HUB_OFFLINE`, llama.cpp also `--offline`, and native servers have no DNS resolver.
+Servers only read their hub cache, so they always get `HF_HUB_OFFLINE`, llama.cpp also `--offline`, and native servers have no DNS resolver.
 On its default unix socket, a server runs without any network, while a native server on a `port` can only reach `127.0.0.1` and `::1`, and a container on a `port` stays in Podman's default network, so prefer the socket.
 `offline = false` lifts these network restrictions for one model or detector.
-Point `cache.directory` at a data disk for large models and manage it with the standard `hf cache` tooling.
+Point `cache.directory` at a data disk for large models, and inspect a model's cache with the standard `hf cache` tooling and `HF_HOME=<cache.directory>/<name>`.
 
 `<backend>-update` restarts every fetcher of its backend one after another on the `fetch.interval` schedule, daily by default.
-A fetcher restarts its server when the downloaded revision changed, and starts it if it failed, such as after a first boot without network.
-`fetch.prune = true` then deletes every repository and revision that no enabled workload references, while llama.cpp keeps every downloaded quantization of a referenced repository.
+A complete download deletes every repository and revision its model no longer references, while llama.cpp keeps every downloaded quantization of its repository.
+It then restarts the server if the cache changed, and starts it if it failed, such as after a first boot without network.
+A failed fetcher stays failed until the next update and leaves the other fetchers alone.
 Containers reference a shared Quadlet image unit `<backend>-<image-hash>-image` with `Pull=never`, and the image unit uses Podman's default pull policy.
 A server tracking a tag is labeled `AutoUpdate=registry`, while digest-pinned servers and fetchers do not auto update.
 Set `virtualisation.quadlet.autoUpdate.enable = true` to update and restart tagged servers through Quadlet Nix's timer, which runs `podman-auto-update.service`.

@@ -10,9 +10,19 @@ rec {
     host: port:
     if lib.hasInfix ":" host then "[${host}]:${toString port}" else "${host}:${toString port}";
 
-  # The cache directory of the server in `unit`, named after it like its
-  # `CacheDirectory=`, at the same path in a container.
-  unitCacheDirectory = unit: "/var/cache/${unit}";
+  # The cache directory of `workload`, which no other workload shares, holding
+  # the hub cache its fetcher writes in `hub/` beside the runtime caches of
+  # its server, at the same path in a container. See "Directory layout" in the
+  # module internals documentation.
+  cacheDirectory = cfg: workload: "${cfg.cache.directory}/${workload.name}";
+  hubDirectory = cfg: workload: "${cacheDirectory cfg workload}/hub";
+  # The hub cache exists only for a workload that fetches.
+  hubDirectories = cfg: workload: lib.optional (fetches workload) (hubDirectory cfg workload);
+
+  # The `StateDirectory=` of `workload`, below that of `backend` like its
+  # cache directory, and that of its fetcher beside it.
+  stateDirectory = backend: workload: "${backend}/${workload.name}";
+  fetchStateDirectory = backend: workload: "${backend}/${fetchUnit workload.name}";
 
   # A workload without a `port` binds `socketName` in a `RuntimeDirectory=` of
   # its own below `services.llmhop.socketDirectory`. See "Unix sockets" in the
@@ -362,10 +372,9 @@ rec {
   # Whether `workload` has a repository to fetch.
   fetches = workload: workload.repositories != [ ];
 
-  # Every server runs offline from the hub cache of its backend, which the
-  # fetcher `<unit>-fetch` fills before it. See "Fetching" in the module
-  # internals documentation.
-  hubDirectory = cfg: "${cfg.cache.directory}/hub";
+  # Every server runs offline from its hub cache, which the fetcher
+  # `<unit>-fetch` fills before it. See "Fetching" in the module internals
+  # documentation.
   fetchUnit = unit: "${unit}-fetch";
 
   # The fetcher a server `Wants=` and starts after.
@@ -394,142 +403,104 @@ rec {
     engine: repository:
     if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
 
-  # Directory of `repository` in the hub cache of `cfg`.
-  repoDirectory = cfg: repository: "${hubDirectory cfg}/${repoCacheName repository.repo}";
-
-  # A shell test passing if the hub cache of `cfg` holds the revision of
-  # `repository`, or any ref without one.
-  cachedTest =
-    engine: cfg: repository:
-    let
-      directory = repoDirectory cfg repository;
-      revision = cachedRevision engine repository;
-    in
-    if revision == null then
-      "test -d ${lib.escapeShellArg "${directory}/refs"}"
-    else
-      "test -e ${lib.escapeShellArg "${directory}/refs/${revision}"} || test -d ${lib.escapeShellArg "${directory}/snapshots/${revision}"}";
-
-  # The hub cache entries pruning keeps for `repository`, its directory and
-  # the revision it caches.
-  pruneEntries =
-    engine: repository:
-    let
-      name = repoCacheName repository.repo;
-      revision = cachedRevision engine repository;
-    in
-    [ name ] ++ lib.optional (revision != null) "${name}/${revision}";
-
-  # The hook of every fetcher, built once per backend. See `mkFetcher`.
-  fetchHook =
-    pkgs:
-    lib.getExe (
-      pkgs.writeShellApplication {
-        name = "llmhop-fetch-hook";
-        runtimeInputs = [
-          pkgs.coreutils
-          pkgs.findutils
-          pkgs.gnugrep
-          pkgs.systemd
-        ];
-        text = ''
-          mode=$1
-          server=$2
-          shift 2
-          repos=("$@")
-          # The files of every snapshot and the commit of every ref, missing until
-          # the first download.
-          fingerprint() {
-            for repo in "''${repos[@]}"; do
-              find "$repo/snapshots" -printf '%P %l\n' 2>/dev/null || true
-              grep -r "" "$repo/refs" 2>/dev/null || true
-            done | sort
-          }
-          state="$RUNTIME_DIRECTORY/fingerprint"
-          if [[ $mode == save ]]; then
-            fingerprint >"$state"
-          elif [[ $(fingerprint) != "$(<"$state")" ]]; then
-            if systemctl is-failed --quiet "$server"; then
-              action=start
-            else
-              action=try-restart
-            fi
-            systemctl reset-failed "$server"
-            systemctl "$action" --no-block "$server"
-          fi
-        '';
-      }
-    );
+  # The tool pruning, recording and validating hub caches.
+  hubCache = pkgs: toString (pkgs.callPackage ../../pkgs/hub-cache/package.nix { });
 
   # The fetcher of `workload`, downloading its repositories with the engine's
-  # `fetcher` into the hub cache of `cfg`, with the fetch credentials in
+  # `fetcher` into its hub cache, with the fetch credentials in
   # `credentialDirectory`, before the unit `server` starts. See "Fetching" in
   # the module internals documentation.
   #
-  # Its `serviceConfig` holds the fetch credentials and keeps it active once
-  # it fetched, like an image unit, so a restarted server does not fetch
-  # again. It downloads until done and runs a hook with full privileges, since
-  # a native fetcher's user may not manage units. The hook records the refs
-  # and snapshot files of the repositories before a fetch (`save`), and
-  # afterwards (`apply`) restarts the server if they changed, or starts it
-  # again if it failed. The rate limit is reset first, so a planned restart
-  # does not count as a crash.
-  #
-  # Its `script` downloads every repository or keeps it from the cache when
-  # that fails, such as offline, as long as it holds the revision.
+  # After a complete download, `hubCache` prunes the hub cache unprivileged and
+  # records it with full privileges, since a native fetcher's user may not
+  # manage units, restarting the server on a change. Whenever the fetcher
+  # stops, `hubCache` points the refs back to the recorded download, which
+  # only an interrupted one changed, and the server starts only from a cache
+  # matching that record.
   mkFetcher =
     {
       engine,
+      backend,
       cfg,
-      hook,
+      hubCache,
       workload,
       server,
       fetcher,
       credentialDirectory,
     }:
     let
-      args = lib.escapeShellArgs (
-        [ "${server}.service" ] ++ lib.unique (map (repoDirectory cfg) workload.repositories)
-      );
+      # The fingerprint covers it, so a changed one invalidates the cache.
+      specification = lib.toJSON {
+        hub = hubDirectory cfg workload;
+        repositories = map (
+          repository:
+          repository
+          // {
+            name = repoCacheName repository.repo;
+            revision = cachedRevision engine repository;
+          }
+        ) workload.repositories;
+      };
+      state = fetchStateDirectory backend workload;
+      completed = "/var/lib/${state}/completed";
+      # `+` runs a command with full privileges.
+      run =
+        prefix: arguments: prefix + lib.escapeShellArgs ([ hubCache ] ++ arguments ++ [ specification ]);
     in
     {
       serviceConfig = credentialServiceConfig cfg.fetch.credentials // {
         Type = "oneshot";
         RemainAfterExit = true;
         TimeoutStartSec = "infinity";
-        RuntimeDirectory = fetchUnit server;
-        ExecStartPre = "+${hook} save ${args}";
-        ExecStartPost = "+${hook} apply ${args}";
+        StateDirectory = state;
+        StateDirectoryMode = "0700";
+        ExecStartPost = [
+          (run "" [ "prune" ])
+          (run "+" [
+            "apply"
+            server
+            completed
+          ])
+        ];
+        ExecStopPost = run "" [
+          "restore"
+          completed
+        ];
+      };
+      serverServiceConfig = lib.optionalAttrs (fetches workload) {
+        ExecStartPre = run "+" [
+          "load"
+          completed
+        ];
       };
       environment = {
-        HF_HOME = cfg.cache.directory;
+        HF_HOME = cacheDirectory cfg workload;
       }
       // resolveCredentialRefs credentialDirectory cfg.fetch.credentials cfg.fetch.environment;
       environmentFile = lib.optional (cfg.fetch.environmentFile != null) cfg.fetch.environmentFile;
       script =
         "set -e\n"
         + lib.concatMapStrings (repository: ''
-          ${lib.escapeShellArgs (engine.fetch fetcher repository)} || ${cachedTest engine cfg repository}
+          ${lib.escapeShellArgs (engine.fetch fetcher repository)}
         '') workload.repositories;
     };
 
-  # The tmpfiles rule of the root of every socket, which anyone may pass but
-  # not list. See "Unix sockets" in the module internals documentation.
-  socketRootRule = directory: {
+  # The tmpfiles rule creating `directory` for the `user` and `group` of
+  # `owner` with `mode`.
+  directoryRule = owner: mode: directory: {
     ${directory}.d = {
-      mode = "0711";
-      user = "root";
-      group = "root";
+      inherit (owner) user group;
+      inherit mode;
     };
   };
 
-  # A tmpfiles rule creating the cache `directory` for `owner`.
-  cacheDirectoryRule = owner: directory: {
-    ${directory}.d = {
-      inherit (owner) user group;
-      mode = "0700";
-    };
-  };
+  # The tmpfiles rule of a root `directory`, which anyone may pass but not
+  # list, such as that of every socket. See "Unix sockets" in the module
+  # internals documentation.
+  rootDirectoryRule = directoryRule {
+    user = "root";
+    group = "root";
+  } "0711";
 
   # Hard-fail after 3 errors/hour so journald surfaces the underlying error
   # instead of an endless restart loop.
@@ -597,34 +568,29 @@ rec {
     ++ lib.optional (workload.environmentFile != null) workload.environmentFile;
 
   # Configuration every backend emits: the endpoints of its workloads, their
-  # firewall ports, the hub cache directory, the update unit and the claims of
-  # all of them. `entries` are the backend's workloads, an unlisted one being
-  # no inference model, which only a gateway that routes it serves.
+  # firewall ports, their cache directories owned by `cacheOwner`, the update
+  # unit and the claims of all of them. `entries` are the backend's workloads,
+  # an unlisted one being no inference model, which only a gateway that
+  # routes it serves.
   #
-  # The update unit `<serviceName>-update`, running under
-  # `updateServiceConfig`, is the counterpart of `podman auto-update` for
-  # models: it restarts the fetcher of every workload, each of which restarts
-  # its server if the model changed, and afterwards, with `fetch.prune`,
-  # prunes the hub cache. It exists only with anything to fetch or prune. The
-  # fetchers run one at a time in startup order, so the server restarts queue
-  # in that order too and keep to the startup chain.
+  # The update unit `<serviceName>-update` is the counterpart of
+  # `podman auto-update` for models: it restarts the fetcher of every
+  # workload, each of which restarts its server if the model changed. It
+  # exists only with anything to fetch. The fetchers run one at a time in
+  # startup order, so the server restarts queue in that order too and keep to
+  # the startup chain, and a failed one leaves the others alone.
   sharedConfig =
     {
-      engine,
       backend,
       serviceName,
       cfg,
       pkgs,
       cacheOwner,
       entries,
-      updateServiceConfig ? { },
     }:
     let
       workloads = map (e: e.workload) entries;
-      # Every repository and the revision each of them caches.
-      pruneKeep = lib.unique (
-        lib.concatMap (pruneEntries engine) (lib.concatMap (w: w.repositories) workloads)
-      );
+      fetchers = lib.concatMap fetcherOf workloads;
       # The routing key, the units and the port of a workload.
       workloadClaims =
         workload:
@@ -638,35 +604,11 @@ rec {
         // lib.optionalAttrs (workload.port != null) {
           port.${toString workload.port} = [ workload.owner ];
         };
-      updateCommands =
-        map (
-          fetcher:
-          "+${
-            lib.escapeShellArgs [
-              (lib.getExe' pkgs.systemd "systemctl")
-              "restart"
-              fetcher
-            ]
-          }"
-        ) (lib.concatMap fetcherOf workloads)
-        ++ lib.optional cfg.fetch.prune (
-          lib.escapeShellArgs (
-            [
-              "${pkgs.callPackage ../../pkgs/prune-hub/package.nix { }}"
-              (hubDirectory cfg)
-            ]
-            ++ pruneKeep
-          )
-        );
-      update = updateCommands != [ ];
-      owner = [ "services.llmhop.${backend}" ];
+      update = fetchers != [ ];
     in
     {
       services.llmhop.claims = lib.mkMerge (
-        [
-          { directory.${cfg.cache.directory} = owner; }
-          (lib.optionalAttrs update { unit."${serviceName}-update" = owner; })
-        ]
+        lib.optional update { unit."${serviceName}-update" = [ "services.llmhop.${backend}" ]; }
         ++ map workloadClaims workloads
       );
       # Keyed by `name`, not the attribute: that is what the worker advertises
@@ -697,22 +639,28 @@ rec {
       networking.firewall.allowedTCPPorts = map (w: w.port) (
         lib.filter (w: w.socket == null && w.openFirewall) workloads
       );
-      systemd.tmpfiles.settings."10-${serviceName}" = cacheDirectoryRule cacheOwner cfg.cache.directory;
+      # A native backend and its Quadlet twin may share the root, since every
+      # workload owns its own directory.
+      systemd.tmpfiles.settings."10-${serviceName}" = lib.mkMerge (
+        [ (rootDirectoryRule cfg.cache.directory) ]
+        ++ map (directoryRule cacheOwner "0700") (
+          lib.concatMap (w: [ (cacheDirectory cfg w) ] ++ hubDirectories cfg w) workloads
+        )
+      );
       systemd.services."${serviceName}-update" = lib.mkIf update {
-        description = "Fetch and prune the models of ${serviceName}";
+        description = "Fetch the models of ${serviceName}";
         startAt = lib.optional (cfg.fetch.interval != null) cfg.fetch.interval;
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = updateCommands;
-        }
-        // updateServiceConfig;
+          ExecStart = map (fetcher: "-${lib.getExe' pkgs.systemd "systemctl"} restart ${fetcher}") fetchers;
+        };
       };
     };
 
   # The environment of the server of `workload`, layered under `environment`,
-  # the backend's and the workload's own. It reads the hub cache of `cfg` and
-  # keeps its runtime caches in its own cache directory rather than the
-  # read-only or ephemeral `$HOME`.
+  # the backend's and the workload's own. It reads its hub cache and keeps
+  # its runtime caches beside it rather than in the read-only or ephemeral
+  # `$HOME`.
   serverEnvironment =
     {
       engine,
@@ -721,14 +669,13 @@ rec {
       environment,
     }:
     let
-      cache = unitCacheDirectory workload.unit;
+      cache = cacheDirectory cfg workload;
     in
     {
-      HF_HOME = cfg.cache.directory;
+      HF_HOME = cache;
       # Only the fetcher writes the hub, so even a server with network access
       # never downloads into it.
       HF_HUB_OFFLINE = "1";
-      HF_MODULES_CACHE = "${cache}/modules";
       HF_HUB_DISABLE_TELEMETRY = "1";
       DO_NOT_TRACK = "1";
       XDG_CACHE_HOME = cache;
@@ -762,10 +709,6 @@ rec {
             `null` fetches only when a server starts.
           '';
         };
-        prune = lib.mkEnableOption ''
-          pruning the hub cache once `${serviceName}-update` ran every fetcher.
-          It deletes every repository and revision that no enabled workload
-          references, so the cache must belong to this backend alone'';
         environment = mkOption {
           type = with types; attrsOf str;
           default = { };
@@ -801,9 +744,10 @@ rec {
         type = types.path;
         default = "/var/cache/${serviceName}";
         description = ''
-          `HF_HOME` of every fetcher and server of this backend, created with
-          mode `0700`, which the fetchers write and the servers only read.
-          Point it at a data disk for large models.
+          Root of the cache directories of this backend's workloads, each
+          `<name>` the `HF_HOME` of one fetcher and its server, created with
+          mode `0700`. The fetcher writes its `hub/`, which the server only
+          reads. Point it at a data disk for large models.
         '';
       };
       environment = mkOption {

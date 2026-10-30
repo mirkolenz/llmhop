@@ -27,7 +27,7 @@ let
     identityConfig
     identityOptions
     sharedUnitConfig
-    socketRootRule
+    rootDirectoryRule
     ;
 
   configFile = format.generate "llmhop.json" cfg.settings;
@@ -197,7 +197,7 @@ in
           # Its socket listeners share the root of the worker sockets.
           tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (listener: listener.port == null) (
             lib.attrValues cfg.listen
-          )) (socketRootRule socketDirectory);
+          )) (rootDirectoryRule socketDirectory);
 
           sockets = lib.mapAttrs' (
             listenerName: listener:

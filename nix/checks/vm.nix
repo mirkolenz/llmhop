@@ -23,18 +23,32 @@ let
     import sys
 
     repo = sys.argv[sys.argv.index("-hf") + 1].split(":")[0]
+    failure = pathlib.Path("/var/lib/fake-failure")
+
+    if failure.exists() and failure.read_text().strip() == "offline":
+        sys.exit(1)
+
     commit = pathlib.Path("${upstream}").read_text().strip()
     cache = pathlib.Path(os.environ["HF_HOME"], "hub", "models--" + repo.replace("/", "--"))
     snapshot = cache / "snapshots" / commit
     snapshot.mkdir(parents=True, exist_ok=True)
-    (snapshot / "model.gguf").write_text(commit)
     (cache / "refs").mkdir(exist_ok=True)
     (cache / "refs" / "main").write_text(commit)
+
+    if failure.exists():
+        (snapshot / "config.json").write_text("{}")
+        sys.exit(1)
+
+    (snapshot / "model.gguf").write_text(commit)
   '';
 
   upstream = "/var/lib/fake-upstream";
-  hub = "/var/cache/llama-cpp/hub";
+  # The hub caches of `fake-model` and `shared`, which serve the same
+  # repository from caches of their own.
+  hubOf = name: "/var/cache/llama-cpp/${name}/hub";
+  hub = hubOf "fake-model";
   repo = "${hub}/models--example--fake";
+  sharedRepo = "${hubOf "shared"}/models--example--fake";
 
   # Stands in for `llama-server`: binds the unix socket the module renders as
   # `--host` and answers 503 while "loading", 200 afterwards, or exits at once
@@ -45,6 +59,8 @@ let
   fakeServer = pkgs.writeScriptBin "llama-server" ''
     #!${lib.getExe pkgs.python3Minimal}
     import http.server
+    import os
+    import pathlib
     import socketserver
     import sys
 
@@ -54,12 +70,22 @@ let
     socket = sys.argv[sys.argv.index("--host") + 1]
     # Reached through `%d`, so this fails unless systemd expanded it.
     open(sys.argv[sys.argv.index("--api-key-file") + 1]).read()
+    repo = sys.argv[sys.argv.index("--hf-repo") + 1].split(":")[0]
+    cache = pathlib.Path(os.environ["HF_HOME"], "hub", "models--" + repo.replace("/", "--"))
+    commit = (cache / "refs" / "main").read_text().strip()
+    assert (cache / "snapshots" / commit / "model.gguf").read_text() == commit
 
 
     class Handler(http.server.BaseHTTPRequestHandler):
         health_checks = 0
 
         def do_GET(self):
+            if self.path == "/revision":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(commit.encode())
+                return
+
             type(self).health_checks += 1
             # Long enough for the test to observe the loading state.
             self.send_response(200 if self.health_checks > 3 else 503)
@@ -99,6 +125,10 @@ testers.nixosTest {
       # racing the rest of the test script.
       systemd.services = {
         llama-cpp-fake-model.wantedBy = lib.mkForce [ ];
+        llama-cpp-shared = {
+          wantedBy = lib.mkForce [ ];
+          serviceConfig.Restart = lib.mkForce "no";
+        };
         llama-cpp-dying = {
           wantedBy = lib.mkForce [ ];
           serviceConfig.Restart = lib.mkForce "no";
@@ -116,9 +146,13 @@ testers.nixosTest {
                 fakeDownload
               ];
             };
-            fetch.prune = true;
             models = {
               "fake-model" = {
+                model = "example/fake:Q4_K_M";
+                credentials.api-keys = "/etc/llmhop/worker-key";
+                settings.api-key-file = "\${cred:api-keys}";
+              };
+              shared = {
                 model = "example/fake:Q4_K_M";
                 credentials.api-keys = "/etc/llmhop/worker-key";
                 settings.api-key-file = "\${cred:api-keys}";
@@ -180,7 +214,7 @@ testers.nixosTest {
     with subtest("health is served without a token"):
         # `test-model` plus the llama.cpp models.
         body = machine.succeed("curl -fsS http://127.0.0.1:8080/health")
-        assert json.loads(body) == {"status": "ok", "models": 3}, f"unexpected body: {body!r}"
+        assert json.loads(body) == {"status": "ok", "models": 4}, f"unexpected body: {body!r}"
 
     with subtest("missing auth is rejected"):
         machine.fail(curl({"model": "test-model"}))
@@ -216,28 +250,72 @@ testers.nixosTest {
     with subtest("readiness probes every worker, but not the remote model"):
         # `dying` never starts, so llmhop is not ready.
         body = machine.succeed("curl -sS http://127.0.0.1:8080/readiness")
-        assert json.loads(body) == {"status": "unavailable", "ready": 1, "probed": 2}, f"unexpected body: {body!r}"
+        assert json.loads(body) == {"status": "unavailable", "ready": 1, "probed": 3}, f"unexpected body: {body!r}"
 
-    with subtest("an upstream change restarts the server"):
-        invocation = machine.get_unit_property("llama-cpp-fake-model", "InvocationID")
+    workers = ["llama-cpp-fake-model", "llama-cpp-shared"]
+
+    with subtest("an upstream change restarts every worker of the repository"):
+        machine.succeed("systemctl start llama-cpp-shared")
+        invocations = {worker: machine.get_unit_property(worker, "InvocationID") for worker in workers}
         machine.succeed("echo b2 > ${upstream}")
         machine.succeed("systemctl start llama-cpp-update")
-        machine.wait_until_succeeds(f"[ $(systemctl show -P InvocationID llama-cpp-fake-model) != {invocation} ]")
-        machine.wait_for_unit("llama-cpp-fake-model.service")
+
+        for worker, invocation in invocations.items():
+            machine.wait_until_succeeds(f"[ $(systemctl show -P InvocationID {worker}) != {invocation} ]")
+            machine.wait_for_unit(f"{worker}.service")
+            assert machine.succeed(f"curl -fsS --unix-socket /run/llmhop/{worker}/http.sock http://localhost/revision") == "b2"
+
+        machine.succeed("test -e ${sharedRepo}/snapshots/b2/model.gguf")
         body = machine.succeed(curl({"model": "fake-model"}, token="client-secret"))
         assert body == "socket ok", f"unexpected body: {body!r}"
+
+    with subtest("unchanged downloads leave every worker running"):
+        invocations = {worker: machine.get_unit_property(worker, "InvocationID") for worker in workers}
+        machine.succeed("systemctl start llama-cpp-update")
+        assert all(machine.get_unit_property(worker, "InvocationID") == invocation for worker, invocation in invocations.items())
+
+    with subtest("an interrupted download leaves workers on the last complete one"):
+        machine.succeed("echo broken > ${upstream}", "echo partial > /var/lib/fake-failure")
+        # A failed fetcher leaves the others to run.
+        machine.succeed("systemctl start llama-cpp-update")
+        machine.succeed("systemctl is-failed llama-cpp-fake-model-fetch llama-cpp-shared-fetch")
+        assert all(machine.get_unit_property(worker, "InvocationID") == invocation for worker, invocation in invocations.items())
+        # The refs point back to the complete download, while the partial one
+        # stays for the next fetch to resume.
+        assert machine.succeed("cat ${sharedRepo}/refs/main") == "b2"
+        machine.succeed("test -e ${sharedRepo}/snapshots/broken/config.json")
+        machine.succeed("systemctl restart llama-cpp-shared")
+        assert machine.succeed("curl -fsS --unix-socket /run/llmhop/llama-cpp-shared/http.sock http://localhost/revision") == "b2"
+
+    with subtest("a worker never starts from an incomplete snapshot"):
+        machine.succeed("rm ${sharedRepo}/snapshots/b2/model.gguf")
+        machine.fail("systemctl restart llama-cpp-shared")
+        machine.succeed("journalctl -u llama-cpp-shared | grep -q 'cache does not match a completed download'")
+        machine.succeed("rm /var/lib/fake-failure", "echo b2 > ${upstream}")
+        machine.succeed("systemctl reset-failed llama-cpp-fake-model-fetch llama-cpp-shared-fetch", "systemctl start llama-cpp-update")
+        machine.wait_for_unit("llama-cpp-shared.service")
+        machine.fail("test -e ${sharedRepo}/snapshots/broken")
+
+    with subtest("an offline start can use a previously completed download"):
+        machine.succeed("echo offline > /var/lib/fake-failure")
+        machine.succeed("systemctl start llama-cpp-update")
+        machine.succeed("systemctl restart llama-cpp-fake-model")
+        machine.wait_for_unit("llama-cpp-fake-model.service")
+        machine.succeed("rm /var/lib/fake-failure", "systemctl reset-failed llama-cpp-fake-model-fetch llama-cpp-shared-fetch")
 
     with subtest("pruning keeps only what the configuration references"):
         machine.succeed("runuser -u llama-cpp -- mkdir -p ${hub}/models--example--stale/snapshots/c3 ${repo}/snapshots/c3")
         # llama.cpp pins no revision and names the default branch after it,
         # so every ref it records stays.
         machine.succeed("runuser -u llama-cpp -- sh -c 'echo c3 > ${repo}/refs/trunk'")
+        machine.succeed("runuser -u llama-cpp -- sh -c 'echo c3 > ${repo}/snapshots/c3/model.gguf'")
         machine.succeed("systemctl start llama-cpp-update")
         machine.succeed("test -e ${repo}/snapshots/b2/model.gguf")
         machine.fail("test -e ${repo}/snapshots/a1")
         machine.succeed("test -e ${repo}/refs/trunk")
         machine.succeed("test -e ${repo}/snapshots/c3")
         machine.fail("test -e ${hub}/models--example--stale")
+        machine.succeed("test -e ${sharedRepo}/snapshots/b2/model.gguf")
 
     with subtest("the worker restarts over its stale socket"):
         machine.succeed("systemctl kill --signal=SIGKILL llama-cpp-fake-model.service")

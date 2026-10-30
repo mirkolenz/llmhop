@@ -1,10 +1,10 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/examples/basic/online_serving/watermark_detection_server.py
-"""vLLM watermarking with the key read from a file.
+"""vLLM watermarking with keys read from files.
 
-`serve` runs `vllm serve` and `detect` a server detecting its watermark.
-Both take the `--watermark-config` JSON of `vllm serve` without its `key`,
-which `--watermark-key-file` supplies instead,
-so the key never appears on a command line.
+`serve` runs `vllm serve` and `detect` a server detecting its watermarks.
+Both take the `WatermarkConfig` of `vllm serve` without its `key`,
+which a key file supplies instead,
+so no key ever appears on a command line.
 """
 
 import argparse
@@ -21,7 +21,7 @@ import vllm.v1.watermarking
 from fastapi import FastAPI
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from vllm.config.watermarking import WatermarkConfig, WatermarkingAlgorithm
-from vllm.tokenizers import TokenizerLike, cached_get_tokenizer
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.v1.watermarking import WatermarkDetection, WatermarkDetector
 
 # Concrete detectors keyed like `WatermarkConfig.algorithm` without underscores,
@@ -46,6 +46,26 @@ class DetectionRequest(BaseModel):
     text: str
 
 
+class Profile(BaseModel):
+    """Tokenizer and watermark of one generation configuration."""
+
+    tokenizer: str
+    revision: str | None = None
+    key_file: Path
+    config: dict[str, Any] = {}
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Detection(WatermarkDetection):
+    """Detection of the most significant profile, named by `profile`."""
+
+    profile: str
+
+
+# A tokenizer and the detectors of the profiles sharing it, keyed by name.
+Group = tuple[TokenizerLike, dict[str, WatermarkDetector]]
+
+
 def read_key(path: Path) -> int:
     """Watermark key of a file holding only the integer, errors omitting it."""
     text = path.read_text().strip()
@@ -64,7 +84,7 @@ def load_config(config: Mapping[str, Any], key_file: Path) -> WatermarkConfig:
     Errors omit the input, since it holds the key.
     """
     if "key" in config:
-        raise ValueError("pass the watermark key as --watermark-key-file")
+        raise ValueError("pass the watermark key as a file")
 
     try:
         return TypeAdapter(WatermarkConfig).validate_python(
@@ -76,24 +96,6 @@ def load_config(config: Mapping[str, Any], key_file: Path) -> WatermarkConfig:
             for details in error.errors(include_input=False)
         )
         raise ValueError(f"invalid watermark config: {', '.join(messages)}") from None
-
-
-def watermark_parser(**kwargs: Any) -> argparse.ArgumentParser:
-    """Parser of the watermark arguments both commands share."""
-    parser = argparse.ArgumentParser(allow_abbrev=False, **kwargs)
-    parser.add_argument(
-        "--watermark-config",
-        type=json.loads,
-        default={},
-        help="JSON watermark configuration of `vllm serve`, without `key`.",
-    )
-    parser.add_argument(
-        "--watermark-key-file",
-        type=Path,
-        required=True,
-        help="File holding only the watermark key.",
-    )
-    return parser
 
 
 def config_field(fields: Container[str], algorithm: str, parameter: str) -> str:
@@ -148,8 +150,36 @@ def check() -> None:
         create_detector(config, 0.01).detect(list(range(16)))
 
 
-def create_app(tokenizer: TokenizerLike, detector: WatermarkDetector) -> FastAPI:
-    """Serve `GET /health` and `POST /detect`."""
+def create_groups(
+    profiles: Mapping[str, Profile], p_value_threshold: float
+) -> list[Group]:
+    """Detectors of `profiles` grouped by tokenizer, each loaded once."""
+    groups: dict[tuple[str, str | None], dict[str, WatermarkDetector]] = {}
+
+    for name, profile in profiles.items():
+        try:
+            config = load_config(profile.config, profile.key_file)
+        except ValueError as error:
+            error.add_note(f"in profile {name!r}")
+            raise
+
+        groups.setdefault((profile.tokenizer, profile.revision), {})[name] = (
+            create_detector(config, p_value_threshold)
+        )
+
+    return [
+        (get_tokenizer(tokenizer, revision=revision), detectors)
+        for (tokenizer, revision), detectors in groups.items()
+    ]
+
+
+def create_app(groups: Sequence[Group], p_value_threshold: float) -> FastAPI:
+    """Serve `GET /health` and `POST /detect`.
+
+    The text is encoded once per tokenizer and tested against every profile.
+    The response is that of the lowest p-value,
+    Bonferroni-corrected for the number of profiles as vLLM recommends.
+    """
     app = FastAPI()
 
     @app.get("/health")
@@ -157,9 +187,25 @@ def create_app(tokenizer: TokenizerLike, detector: WatermarkDetector) -> FastAPI
         pass
 
     @app.post("/detect")
-    def detect(request: DetectionRequest) -> WatermarkDetection:
-        token_ids = tokenizer.encode(request.text, add_special_tokens=False)
-        return detector.detect(token_ids)
+    def detect(request: DetectionRequest) -> Detection:
+        results: dict[str, WatermarkDetection] = {}
+
+        for tokenizer, detectors in groups:
+            token_ids = tokenizer.encode(request.text, add_special_tokens=False)
+            results |= {
+                name: detector.detect(token_ids) for name, detector in detectors.items()
+            }
+
+        profile = min(results, key=lambda name: results[name].p_value)
+        best = results[profile]
+        p_value = min(1.0, best.p_value * len(results))
+        return Detection(
+            score=best.score,
+            p_value=p_value,
+            num_scored_tokens=best.num_scored_tokens,
+            is_watermarked=p_value <= p_value_threshold,
+            profile=profile,
+        )
 
     return app
 
@@ -170,7 +216,11 @@ def serve(argv: Sequence[str]) -> None:
     vLLM redacts `watermark_config` in its logs,
     and hands it to its engine processes through multiprocessing.
     """
-    parser = watermark_parser(prog="watermark.py serve", add_help=False)
+    parser = argparse.ArgumentParser(
+        prog="watermark.py serve", add_help=False, allow_abbrev=False
+    )
+    parser.add_argument("--watermark-config", type=json.loads, default={})
+    parser.add_argument("--watermark-key-file", type=Path, required=True)
     args, rest = parser.parse_known_args(argv)
     config = load_config(args.watermark_config, args.watermark_key_file)
 
@@ -187,19 +237,28 @@ def serve(argv: Sequence[str]) -> None:
 
 
 def detect(argv: Sequence[str]) -> None:
-    """Serve detection for the watermark of `vllm serve`."""
-    parser = watermark_parser(prog="watermark.py detect")
-    parser.add_argument("--tokenizer", required=True)
+    """Serve detection for the watermarks of `vllm serve`."""
+    parser = argparse.ArgumentParser(prog="watermark.py detect", allow_abbrev=False)
+    parser.add_argument(
+        "--profiles",
+        type=json.loads,
+        required=True,
+        help="JSON object of the profiles to test, keyed by name, each with "
+        "`tokenizer`, `revision`, `key_file` and the keyless `config`.",
+    )
     parser.add_argument("--p-value-threshold", type=float, default=0.01)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--uds", help="Unix socket to bind instead of a port.")
     args = parser.parse_args(argv)
 
-    config = load_config(args.watermark_config, args.watermark_key_file)
+    profiles = TypeAdapter(dict[str, Profile]).validate_python(args.profiles)
+
+    if not profiles:
+        parser.error("--profiles must hold at least one profile")
+
     app = create_app(
-        cached_get_tokenizer(args.tokenizer),
-        create_detector(config, args.p_value_threshold),
+        create_groups(profiles, args.p_value_threshold), args.p_value_threshold
     )
     uvicorn.run(app, host=args.host, port=args.port, uds=args.uds)
 

@@ -175,7 +175,7 @@ Credential references resolve to file paths for both native services and contain
 
 ## Watermarking
 
-`mkVllmWatermark`'s `serve` command merges the key into the `--watermark-config` of `vllm serve` in-process, and its `detect` command replaces vLLM's example detector, which lacks unix sockets, a health endpoint, a file-based key and every algorithm but `gumbel`.
+`mkVllmWatermark`'s `serve` command merges the key into the `--watermark-config` of `vllm serve` in-process, and its `detect` command replaces vLLM's example detector, which lacks unix sockets, a health endpoint, file-based keys, several profiles per detector and every algorithm but `gumbel`.
 The detector picks its class by vLLM's naming conventions, so a new upstream algorithm that follows them works unchanged, and one that does not fails loudly.
 Native builds check the script against the vLLM environment, so a `uv lock` that breaks it fails the build, while containers run it unchecked with the image's interpreter and fail at startup instead.
 

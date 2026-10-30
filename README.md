@@ -508,33 +508,49 @@ Literal values such as `settings.api-key = "development-only"` still work, but e
 ### vLLM watermarking
 
 vLLM ships watermark generation and detection primitives, but its OpenAI server exposes no detector.
-Both vLLM modules can watermark a model's output and run detector servers next to their workers, configured by the same `watermark` option, vLLM's `WatermarkConfig` fields without the key:
+Both vLLM modules can watermark a model's output and run detector servers next to their workers.
+A `watermark` holds vLLM's `WatermarkConfig` fields without the key, plus the `credential` holding the key, `vllm.watermark-key` by default.
+A detector tests every one of its `profiles`, each the tokenizer, revision and `watermark` of a generation configuration:
 
 ```nix
 services.llmhop.vllm = {
   models.qwen = {
     model = "Qwen/Qwen3-8B";
-    watermark.algorithm = "dual_key_gumbel";
+    revision = "main";
+    watermark = {
+      algorithm = "dual_key_gumbel";
+      credential = "vllm.watermark-key.2026-10";
+    };
   };
   detectors.production = {
-    tokenizer = "Qwen/Qwen3-8B";
-    watermark.algorithm = "dual_key_gumbel";
+    profiles.qwen = {
+      tokenizer = "Qwen/Qwen3-8B";
+      inherit (config.services.llmhop.vllm.models.qwen) revision watermark;
+    };
     settings.p-value-threshold = 0.01;
   };
 };
 ```
 
-The key is the unsigned 64-bit integer credential `vllm.watermark-key`, imported from the system credential store by every service with a `watermark`, or given per service as a file, which is also how two models use different keys:
+Each key is an unsigned 64-bit integer credential, imported from the system credential store, or given per service as a file in `credentials`:
 
 ```sh
-(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key)
+(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key.2026-10)
 ```
 
-The key never enters the Nix store, the command line or the journal, and a `key` in `watermark` or in `settings.watermark-config` fails evaluation.
+The key never enters the Nix store, the command line or the journal, and a `key` in a `watermark` or in `settings.watermark-config` fails evaluation.
 Both sides validate the configuration with vLLM's own `WatermarkConfig`, so a typo fails at startup rather than changing the watermark.
 Speculative decoding needs `dual_key_gumbel`, or `allow_target_only_watermarking = true` for the others.
-`p-value-threshold` is the only detection-side setting, while `tokenizer` and `watermark` must match the generation side.
-Each detector is a `vllm-detector-<name>` service serving `POST /detect` with readiness from `GET /health`, and receives no GPU in Quadlet mode.
+`p-value-threshold` is the only detection-side setting, while every profile must match its generation side, including the tokenizer revision.
+
+A detector encodes the text once per tokenizer and revision and tests it against every profile.
+It responds with the most significant profile, its `p_value` Bonferroni-corrected by the number of profiles as vLLM recommends, and `is_watermarked` decided on that corrected value.
+Every profile therefore weakens detection a little, so keep only those whose text still needs checking.
+
+To rotate a key, provision it under a new credential name and point the model's `watermark.credential` to it, which restarts the worker.
+Keep a profile with the old credential to detect text generated before the rotation, unless the key is compromised, since anyone holding it can forge the watermark.
+Replacing the contents of a credential under the same name restarts nothing.
+Each detector is a `vllm-<name>` service, named like a model, serving `POST /detect` with readiness from `GET /health`, and receives no GPU in Quadlet mode.
 A detector's `script` replaces the default server with your own, which receives the same flags after `detect`.
 Watermarking requires a vLLM revision with `vllm.v1.watermarking`, which no release before 0.30.0 has.
 
@@ -549,7 +565,7 @@ curl https://llmhop.example.com/route/production/detect \
   -d '{"text":"candidate text"}'
 ```
 
-The response contains `score`, `p_value`, `num_scored_tokens` and `is_watermarked`.
+The response contains `score`, `p_value`, `num_scored_tokens` and `is_watermarked` like vLLM's example detector, plus the name of the matching `profile`.
 A detector given a `port` is unauthenticated there, like any worker on a port.
 SGLang and llama.cpp output is only detectable if they implement the same algorithm and parameters.
 

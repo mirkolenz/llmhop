@@ -106,9 +106,20 @@ let
     };
     detectors.watermark = {
       image = "registry.example/detector:latest";
-      tokenizer = "example/test";
       port = 18002;
-      inherit watermark;
+      # Two keys of the same tokenizer, the retired one rotated out.
+      profiles = rec {
+        current = {
+          tokenizer = "example/test";
+          revision = "v1";
+          inherit watermark;
+        };
+        retired = current // {
+          watermark = watermark // {
+            credential = "vllm.watermark-key.retired";
+          };
+        };
+      };
     };
   };
 
@@ -149,10 +160,12 @@ let
         };
       };
       detectors.watermark = {
-        tokenizer = "example/test";
         port = 21002;
         script = detectorScript;
-        inherit watermark;
+        profiles.test = {
+          tokenizer = "example/test";
+          inherit watermark;
+        };
       };
     };
   };
@@ -187,11 +200,11 @@ let
   quadletImage =
     quadlet.virtualisation.quadlet.images.${lib.removeSuffix ".image" quadletWorker.containerConfig.Image};
   quadletMarked = quadlet.virtualisation.quadlet.containers.vllm-marked;
-  quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-detector-watermark;
+  quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-watermark;
   nativeWorker = native.systemd.services.vllm-test;
   nativeFetcher = native.systemd.services.vllm-test-fetch;
   nativeMarked = native.systemd.services.vllm-marked;
-  nativeDetector = native.systemd.services.vllm-detector-watermark;
+  nativeDetector = native.systemd.services.vllm-watermark;
 
   # A model of each engine kind on a port, which every gateway reaches.
   routable = {
@@ -499,14 +512,16 @@ let
         quadlet = {
           arguments = containsAll [
             "/run/llmhop/watermark.py detect"
-            "--watermark-key-file /run/llmhop/credentials/vllm.watermark-key"
-            "--tokenizer example/test"
+            "--profiles"
+            "/run/llmhop/credentials/vllm.watermark-key\""
+            "/run/llmhop/credentials/vllm.watermark-key.retired"
           ] quadletDetector.containerConfig.Exec;
+          import = quadletDetector.serviceConfig.ImportCredential;
           volumes = volumeTargets quadletDetector;
           port = quadletDetector.containerConfig.PublishPort;
-          # Only the tokenizer files, not the weights.
-          fetch = containsAll [ "hf download example/test --include '*.json'" ] (
-            fetchScript quadlet.virtualisation.quadlet.containers.vllm-detector-watermark-fetch
+          # Only the tokenizer files, not the weights, once for both profiles.
+          fetch = lib.splitString "\n" (
+            fetchScript quadlet.virtualisation.quadlet.containers.vllm-watermark-fetch
           );
           # Only llmhop routes it, outside the OpenAI catalog.
           routed = {
@@ -517,7 +532,7 @@ let
           command = containsAll [
             "${detectorScript}"
             "detect"
-            "--tokenizer"
+            "--profiles"
           ] nativeDetector.serviceConfig.ExecStart;
           # An auxiliary service, so no GPU access and no state directory.
           state = nativeDetector.serviceConfig ? StateDirectory;
@@ -526,7 +541,7 @@ let
         # Both claim the same routing key.
         collision = failing "model `test` is claimed" (mkQuadlet {
           detectors.test = {
-            tokenizer = "example/test";
+            profiles.test.tokenizer = "example/test";
             port = 23002;
           };
         });
@@ -534,6 +549,10 @@ let
       expected = {
         quadlet = {
           arguments = true;
+          import = [
+            "vllm.watermark-key"
+            "vllm.watermark-key.retired"
+          ];
           volumes = [
             "/var/cache/vllm/watermark"
             "/var/cache/vllm/watermark/hub"
@@ -541,7 +560,11 @@ let
             "/run/llmhop/credentials"
           ];
           port = [ "127.0.0.1:18002:8000" ];
-          fetch = true;
+          fetch = [
+            "set -e"
+            "hf download example/test --revision v1 --include '*.json' --include '*.jinja' --include '*.model' --include '*.py' --include '*.tiktoken' --include '*.txt'"
+            ""
+          ];
           routed = {
             url = "http://127.0.0.1:18002";
             unlisted = true;
@@ -790,7 +813,7 @@ let
 
   result = pkgs.runCommand "llmhop-eval-tests" { } ''
     test -e ${units}/lib/systemd/system/vllm-test.service
-    test -e ${units}/lib/systemd/system/vllm-detector-watermark.service
+    test -e ${units}/lib/systemd/system/vllm-watermark.service
     test -e ${units}/lib/systemd/system/llama-cpp-b.service
     test -e ${units}/lib/systemd/system/bifrost.service
     grep -q '^Requires=${quadletImage.serviceName}.service$' ${units}/lib/systemd/system/vllm-test.service

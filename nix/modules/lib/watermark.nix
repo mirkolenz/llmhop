@@ -1,6 +1,6 @@
 # vLLM watermarking, configured declaratively apart from the key, and the
 # detectors serving `POST /detect` beside the workers, as modules extending
-# both vLLM backends. The key is the systemd credential `vllm.watermark-key`,
+# both vLLM backends. Each watermark names the systemd credential of its key,
 # imported from the system credential store unless a workload's `credentials`
 # names a file, which `mkVllmWatermark`'s script merges into the configuration
 # in-process, so it enters neither the Nix store nor a command line.
@@ -21,7 +21,6 @@ let
     ;
 
   engine = engines.vllm;
-  credential = "vllm.watermark-key";
   source = ../../pkgs/mkVllmWatermark/watermark.py;
   containerScript = "${quadlet.containerRuntimeDirectory}/watermark.py";
 
@@ -32,36 +31,113 @@ let
     mounts = [ "${script}:${containerScript}:ro" ];
   };
 
-  # Adds `watermark` and grants its key, optional for model workers and always
-  # set for detectors.
-  watermarkModule =
-    { optional }:
+  # vLLM's `WatermarkConfig` without `key`, beside the `credential` holding
+  # it, so a model's watermark can be copied into a detector profile.
+  watermarkType = types.submodule {
+    freeformType = with types; attrsOf anything;
+    options.credential = mkOption {
+      type = types.str;
+      default = "vllm.watermark-key";
+      example = "vllm.watermark-key.2026-10";
+      description = ''
+        Credential holding the key, an unsigned 64-bit integer, imported from
+        the system credential store unless the service's `credentials` names
+        a file for it. A new name per key, such as a date suffix, restarts
+        every service using it when the key is rotated.
+      '';
+    };
+  };
+  watermarkExample = {
+    algorithm = "dual_key_gumbel";
+    credential = "vllm.watermark-key.2026-10";
+  };
+
+  # The `WatermarkConfig` of `watermark` and the reference to its key.
+  watermarkConfig = watermark: removeAttrs watermark [ "credential" ];
+  keyReference = watermark: "\${cred:${watermark.credential}}";
+
+  # Files of a repository that a tokenizer may need.
+  tokenizerFiles = [
+    "*.json"
+    "*.jinja"
+    "*.model"
+    "*.py"
+    "*.tiktoken"
+    "*.txt"
+  ];
+
+  # Adds the internal `watermarks` of a workload, derived from its config by
+  # `watermarks`, and grants their keys.
+  watermarksModule =
+    watermarks:
     { config, ... }:
     {
+      options.watermarks = mkOption {
+        internal = true;
+        readOnly = true;
+        type = with types; listOf attrs;
+        default = watermarks config;
+        description = "Watermarks whose keys this workload is granted.";
+      };
+      config.credentials = lib.genAttrs (map (watermark: watermark.credential) config.watermarks) (
+        _: lib.mkDefault null
+      );
+    };
+
+  # Adds the optional `watermark` of a model worker.
+  modelWatermarkModule =
+    { config, ... }:
+    {
+      imports = [ (watermarksModule (model: lib.optional (model.watermark != null) model.watermark)) ];
       options.watermark = mkOption {
-        type = with types; if optional then nullOr (attrsOf anything) else attrsOf anything;
-        default = if optional then null else { };
-        example = {
-          algorithm = "dual_key_gumbel";
-          context_width = 4;
-        };
+        type = types.nullOr watermarkType;
+        default = null;
+        example = watermarkExample;
         description = ''
-          vLLM's `WatermarkConfig` without `key`, which a generating worker
-          and its detector must share. The key is the credential
-          `${credential}`, an unsigned 64-bit integer, imported from the
-          system credential store unless `credentials."${credential}"` names a
-          file.
+          vLLM's `WatermarkConfig` without `key`, which a detector profile must
+          repeat, and the `credential` holding the key.
         '';
       };
       config = lib.mkIf (config.watermark != null) {
-        credentials.${credential} = lib.mkDefault null;
         # Flags `mkVllmWatermark`'s script reads, which win like derived ones.
         settings = lib.mapAttrs (_: lib.mkForce) {
-          watermark-config = config.watermark;
-          watermark-key-file = "\${cred:${credential}}";
+          watermark-config = watermarkConfig config.watermark;
+          watermark-key-file = keyReference config.watermark;
         };
       };
     };
+
+  # A generation configuration a detector tests.
+  profileModule = {
+    options = {
+      tokenizer = mkOption {
+        type = types.str;
+        example = "Qwen/Qwen3-8B";
+        description = ''
+          Tokenizer used to encode candidate text, a Hugging Face repository or
+          an absolute path. It must exactly match the tokenizer used for
+          watermarked generation. The fetcher downloads only the files of a
+          repository that a tokenizer may need, not its weights.
+        '';
+      };
+      revision = mkOption {
+        type = with types; nullOr str;
+        default = null;
+        example = "main";
+        description = ''
+          Branch, tag or commit of `tokenizer`, which must match the
+          `revision` of the generating model, or its
+          `settings.tokenizer-revision`. `null` follows the default branch.
+        '';
+      };
+      watermark = mkOption {
+        type = watermarkType;
+        default = { };
+        example = watermarkExample;
+        description = "The `watermark` of the generating model.";
+      };
+    };
+  };
 
   # Options of a detector, whose `script` default each backend sets.
   detectorModule =
@@ -71,44 +147,54 @@ let
       imports = [
         (workloadModule {
           inherit engine socketDirectory listen;
-          unitPrefix = "vllm-detector";
+          unitPrefix = "vllm";
           noun = "watermark detector";
-          derivedSettings = detector: { inherit (detector) tokenizer; };
+          derivedSettings = detector: {
+            profiles = lib.mapAttrs (_: profile: {
+              inherit (profile) tokenizer revision;
+              key_file = keyReference profile.watermark;
+              config = watermarkConfig profile.watermark;
+            }) detector.profiles;
+          };
         })
-        (watermarkModule { optional = false; })
+        (watermarksModule (detector: map (profile: profile.watermark) (lib.attrValues detector.profiles)))
       ];
       options = {
-        tokenizer = mkOption {
-          type = types.str;
-          example = "Qwen/Qwen3-8B";
+        profiles = mkOption {
+          type = types.attrsOf (types.submodule profileModule);
+          example = lib.literalExpression ''
+            {
+              qwen = {
+                tokenizer = "Qwen/Qwen3-8B";
+                inherit (config.services.llmhop.vllm.models.qwen) revision watermark;
+              };
+            }
+          '';
           description = ''
-            Tokenizer used to encode candidate text, a Hugging Face repository or
-            an absolute path. It must exactly match the tokenizer used for
-            watermarked generation. The fetcher downloads only the files of a
-            repository that a tokenizer may need, not its weights.
+            Generation configurations to test, keyed by the name a response
+            reports as `profile`. Profiles sharing a tokenizer and revision
+            share its encoding of the text, and the reported p-value is that
+            of the most significant profile multiplied by their number.
           '';
         };
         repositories = repositoriesOption (
-          lib.optional (isRepository config.tokenizer) {
-            repo = config.tokenizer;
-            include = [
-              "*.json"
-              "*.jinja"
-              "*.model"
-              "*.py"
-              "*.tiktoken"
-              "*.txt"
-            ];
-          }
+          lib.unique (
+            map (profile: {
+              repo = profile.tokenizer;
+              inherit (profile) revision;
+              include = tokenizerFiles;
+            }) (lib.filter (profile: isRepository profile.tokenizer) (lib.attrValues config.profiles))
+          )
         );
         script = mkOption {
           type = types.path;
           defaultText = lib.literalMD "the script built by `mkVllmWatermark`";
           description = ''
             Detector server run by the detector's Python interpreter. It
-            receives `detect` and `settings`, and must serve `GET /health` and
-            `POST /detect`. `p-value-threshold` is the only detection-side
-            setting of the default.
+            receives `detect` and `settings`, the `profiles` among them as
+            JSON, and must serve `GET /health` and `POST /detect`.
+            `p-value-threshold` is the only detection-side setting of the
+            default.
           '';
         };
       };
@@ -120,7 +206,7 @@ let
     mkOption {
       type = types.attrsOf (
         types.submodule [
-          (watermarkModule { optional = true; })
+          modelWatermarkModule
           module
         ]
       );
@@ -151,7 +237,7 @@ let
   # Configuration of `backend` shared by both kinds: its detectors routed as
   # unlisted `entries`, each completed by `detectorEntry`, and the rejection
   # of an inline key, which would enter the Nix store and the command line.
-  watermarkConfig =
+  backendConfig =
     {
       backend,
       cfg,
@@ -170,16 +256,20 @@ let
         lib.mapAttrsToList
           (name: workload: {
             assertion =
-              !(
-                lib.isAttrs (workload.settings.watermark-config or null) && workload.settings.watermark-config ? key
+              !lib.any (config: lib.isAttrs config && config ? key) (
+                workload.watermarks ++ [ (workload.settings.watermark-config or null) ]
               )
               && !lib.any (lib.hasPrefix "watermark-config.") (lib.attrNames workload.settings);
-            message = "services.llmhop.${backend}: `${name}` configures the watermark key inline, which the `${credential}` credential provides.";
+            message = "services.llmhop.${backend}: `${name}` configures the watermark key inline, which its `credential` provides.";
           })
           (
             lib.mapAttrs' (name: lib.nameValuePair "models.${name}") cfg.models
             // lib.mapAttrs' (name: lib.nameValuePair "detectors.${name}") cfg.detectors
-          );
+          )
+        ++ lib.mapAttrsToList (name: detector: {
+          assertion = detector.profiles != { };
+          message = "services.llmhop.${backend}: detector `${name}` has no `profiles`.";
+        }) cfg.detectors;
     };
 in
 {
@@ -220,7 +310,7 @@ in
             };
         };
       };
-      config = watermarkConfig {
+      config = backendConfig {
         backend = "vllm";
         inherit cfg;
         detectorEntry = detector: {
@@ -267,7 +357,7 @@ in
           };
         };
       };
-      config = watermarkConfig {
+      config = backendConfig {
         backend = "vllm-quadlet";
         inherit cfg;
         detectorEntry = detector: containerCommand detector.script [ "detect" ];

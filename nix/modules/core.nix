@@ -147,7 +147,7 @@ in
           kind:
           lib.mapAttrsToList (
             key: owners: {
-              assertion = lib.length owners < 2;
+              assertion = lib.length (lib.unique owners) < 2;
               message = "services.llmhop: ${kind} `${key}` is claimed by ${lib.concatStringsSep ", " owners}.";
             }
           )

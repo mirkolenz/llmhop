@@ -52,24 +52,52 @@ let
     description = "Container image reference, including a tag or digest.";
   };
 
-  # Hash the complete reference so workloads sharing an image share its unit.
+  # The image unit `<name>-image` pulling `image`, claimed by `owner`.
   imageUnit =
     {
       images,
-      prefix,
+      name,
       image,
+      owner,
     }:
-    let
-      name = "${prefix}-${lib.hashString "sha256" image}";
-    in
     {
       images.${name}.imageConfig.Image = image;
+      claims.unit.${images.${name}.serviceName} = [ owner ];
       containerConfig = {
         Image = images.${name}.ref;
         Pull = "never";
       }
       // lib.optionalAttrs (!lib.hasInfix "@" image) { AutoUpdate = "registry"; };
     };
+
+  # The image unit of `workload` of the backend `name`: its own while it sets
+  # `image`, or else the one of the backend, shared by every such workload.
+  workloadImage =
+    {
+      name,
+      backend,
+      cfg,
+      quadlet,
+      workload,
+    }:
+    imageUnit (
+      {
+        inherit (quadlet) images;
+      }
+      // (
+        if workload.image == null then
+          {
+            inherit name;
+            inherit (cfg) image;
+            owner = "services.llmhop.${backend}";
+          }
+        else
+          {
+            name = workload.unit;
+            inherit (workload) image owner;
+          }
+      )
+    );
 
   # Assertion that the module of `owner` has Quadlet enabled.
   requireEnabled = config: owner: {
@@ -99,9 +127,12 @@ let
     }:
     {
       image = imageOption // {
-        default = cfg.image;
-        defaultText = lib.literalExpression "config.services.llmhop.${backend}.image";
-        description = "Image reference of this ${noun}, overriding the backend's `image`.";
+        type = with types; nullOr str;
+        default = null;
+        description = ''
+          Image reference of this ${noun} with its own image unit, or `null`
+          for the backend's `image` and the image unit it shares.
+        '';
       };
       mountOptions.credentials = mkOption {
         type = with types; listOf str;
@@ -122,6 +153,7 @@ let
   quadletConfig =
     {
       name,
+      backend,
       engine,
       cfg,
       hubCache,
@@ -148,10 +180,14 @@ let
         backend = name;
         server = quadlet.containers.${unit}.serviceName;
       };
-      image = imageUnit {
-        inherit (quadlet) images;
-        inherit (workload) image;
-        prefix = name;
+      image = workloadImage {
+        inherit
+          name
+          backend
+          cfg
+          quadlet
+          workload
+          ;
       };
       credentials = credentialMount workload.mountOptions.credentials;
       # A socket in a mounted directory and, offline, no network, or else
@@ -397,6 +433,7 @@ let
               map (quadletConfig {
                 inherit
                   name
+                  backend
                   engine
                   cfg
                   quadlet
@@ -417,6 +454,20 @@ let
           })
           {
             assertions = [ (requireEnabled config "services.llmhop.${backend}") ];
+            services.llmhop.claims = lib.mkMerge (
+              map (
+                entry:
+                (workloadImage {
+                  inherit
+                    name
+                    backend
+                    cfg
+                    quadlet
+                    ;
+                  inherit (entry) workload;
+                }).claims
+              ) entries
+            );
 
             # A container maps to no host group known in advance, so its socket
             # is reachable through a default ACL on the root instead. See "Unix

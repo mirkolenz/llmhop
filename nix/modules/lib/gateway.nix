@@ -178,11 +178,13 @@ rec {
       image = quadlet.imageUnit {
         inherit (config.virtualisation.quadlet) images;
         inherit (cfg) image;
-        prefix = unit;
+        name = unit;
+        owner = owner name;
       };
     in
     {
       assertions = [ (quadlet.requireEnabled config (owner name)) ];
+      services.llmhop.claims = image.claims;
       virtualisation.quadlet = {
         inherit (image) images;
         containers.${unit} = {

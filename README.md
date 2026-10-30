@@ -304,7 +304,7 @@ Point `cache.directory` at a data disk for large models, and inspect a model's c
 A complete download deletes every repository and revision its model no longer references, while llama.cpp keeps every downloaded quantization of its repository.
 It then restarts the server if the cache changed, and starts it if it failed, such as after a first boot without network.
 A failed fetcher stays failed until the next update and leaves the other fetchers alone.
-Containers reference a shared Quadlet image unit `<backend>-<image-hash>-image` with `Pull=never`, and the image unit uses Podman's default pull policy.
+Containers reference a Quadlet image unit with `Pull=never`, which uses Podman's default pull policy: `<engine>-image` shared by every workload on the backend's `image`, `<engine>-<name>-image` for one overriding it, and `<gateway>-image` for a gateway.
 A server tracking a tag is labeled `AutoUpdate=registry`, while digest-pinned servers and fetchers do not auto update.
 Set `virtualisation.quadlet.autoUpdate.enable = true` to update and restart tagged servers through Quadlet Nix's timer, which runs `podman-auto-update.service`.
 Its separate `autoPrune.enable` timer removes unused images, as described in [quadlet-nix](https://github.com/mirkolenz/quadlet-nix#updates-and-pruning).

@@ -197,8 +197,7 @@ let
   socketRoot = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
   socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
   quadletWorker = quadlet.virtualisation.quadlet.containers.vllm-test;
-  quadletImage =
-    quadlet.virtualisation.quadlet.images.${lib.removeSuffix ".image" quadletWorker.containerConfig.Image};
+  quadletImage = quadlet.virtualisation.quadlet.images.vllm;
   quadletMarked = quadlet.virtualisation.quadlet.containers.vllm-marked;
   quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-watermark;
   nativeWorker = native.systemd.services.vllm-test;
@@ -734,6 +733,27 @@ let
           "serve"
         ];
         acl = "default:user:caddy:-wx";
+      };
+    };
+
+    # Workloads on the backend's image share its unit, the others get their own.
+    testImageUnits = {
+      expr = {
+        names = lib.attrNames quadlet.virtualisation.quadlet.images;
+        collision = failing "unit `vllm-image` is claimed" (mkQuadlet {
+          models.image = {
+            model = "example/image";
+            port = 18005;
+          };
+        });
+      };
+      expected = {
+        names = [
+          "vllm"
+          "vllm-marked"
+          "vllm-watermark"
+        ];
+        collision = 1;
       };
     };
 

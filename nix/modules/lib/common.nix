@@ -939,7 +939,9 @@ rec {
   # precedes its name in the unit name, `listen` gives the listener its server
   # binds, `{ host, port, socket }` from the workload's config, and
   # `derivedSettings` the further flags derived from its options.
-  # Both become defaults of `settings`, under the backend-wide `defaults`.
+  # Both override `settings`, so the gateways, the health probe and the
+  # fetcher always agree with the server, while the backend-wide `defaults`
+  # only provide defaults.
   workloadModule =
     {
       engine,
@@ -1069,14 +1071,13 @@ rec {
           description = ''
             CLI flags of this ${noun}'s server, over the backend's
             `modelSettings`. The listener and the flags derived from the other
-            options are defaults here, so a definition replaces them, but
-            gateways keep routing to `port` or `socket`.
+            options, such as the served name, always win.
             ${settingsRendering engine}
           '';
         };
       };
       config.settings = lib.mkMerge [
-        (lib.mapAttrs (_: lib.mkOptionDefault) (
+        (lib.mapAttrs (_: lib.mkForce) (
           (
             if listener.socket == null then
               { inherit (listener) host port; }

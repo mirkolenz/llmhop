@@ -55,8 +55,8 @@ let
       };
       config = lib.mkIf (config.watermark != null) {
         credentials.${credential} = lib.mkDefault null;
-        # Flags `mkVllmWatermark`'s script reads.
-        settings = lib.mapAttrs (_: lib.mkOptionDefault) {
+        # Flags `mkVllmWatermark`'s script reads, which win like derived ones.
+        settings = lib.mapAttrs (_: lib.mkForce) {
           watermark-config = config.watermark;
           watermark-key-file = "\${cred:${credential}}";
         };

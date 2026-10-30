@@ -315,7 +315,7 @@ Features that download at runtime need another source:
 #### Settings rendering
 
 `settings` is rendered into the server's CLI flags, over the backend's `modelSettings`.
-The flags derived from the other options, such as the listener and the served model name, are defaults there, so a definition replaces them, while gateways keep routing to `port` or `socket`.
+The flags derived from the other options, such as the listener and the served model name, always win, so gateways, health checks and fetchers agree with the server.
 Strings and paths are passed verbatim and everything else as JSON, so `0.6` stays `0.6` and an attribute set becomes the JSON object that options like vLLM's `--speculative-config` parse.
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.

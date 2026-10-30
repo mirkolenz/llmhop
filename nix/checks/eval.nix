@@ -709,6 +709,47 @@ let
       });
       expected = 3;
     };
+
+    # The listener and the derived flags win over `settings`, so gateways and
+    # the health probe reach the server where it listens, by the name it
+    # serves.
+    testManagedSettings = {
+      expr =
+        let
+          ExecStart =
+            (mkSystem {
+              vllm = {
+                enable = true;
+                package = fakeVllm;
+                modelSettings.host = "0.0.0.0";
+                models.test = {
+                  model = "example/test";
+                  port = 25001;
+                  settings = {
+                    port = 25002;
+                    served-model-name = "other";
+                  };
+                };
+              };
+            }).systemd.services.vllm-test.serviceConfig.ExecStart;
+        in
+        {
+          managed = containsAll [
+            ''"--host" "127.0.0.1"''
+            ''"--port" "25001"''
+            ''"--served-model-name" "test"''
+          ] ExecStart;
+          overridden = lib.any (value: containsAll [ value ] ExecStart) [
+            "0.0.0.0"
+            "25002"
+            "other"
+          ];
+        };
+      expected = {
+        managed = true;
+        overridden = false;
+      };
+    };
   };
 
   units = pkgs.symlinkJoin {

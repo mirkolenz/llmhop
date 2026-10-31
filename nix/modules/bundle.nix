@@ -1,0 +1,175 @@
+# Renders the Quadlet backends and gateway of a system into files for a host
+# without Nix, which needs podman 5, systemd and python3. Every store path the
+# units reference moves below `assetDirectory`, except the host tools, which
+# map to the host's own.
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  inherit (lib) mkOption types;
+  cfg = config.services.llmhop.bundle;
+  llmhop = config.services.llmhop;
+  inherit (config.virtualisation) quadlet;
+  inherit (builtins) storeDir;
+  engines = lib.attrNames (import ./engines.nix lib);
+
+  tools = [
+    pkgs.python3Minimal.interpreter
+    (lib.getExe' pkgs.systemd "systemctl")
+  ];
+  hostTools = [
+    "/usr/bin/python3"
+    "/usr/bin/systemctl"
+  ];
+
+  # The file `path` of the bundle holding `text` as the host sees it, beside
+  # the store paths it references, which carry the context of `text`, so the
+  # bundle can copy them.
+  file =
+    path: text:
+    let
+      withHostTools = lib.replaceStrings tools hostTools text;
+      matches = builtins.split "(${storeDir}/[0-9a-z]{32}-[-.+_?=0-9a-zA-Z]+)" withHostTools;
+    in
+    {
+      inherit path;
+      text = builtins.unsafeDiscardStringContext (
+        lib.replaceStrings [ "${storeDir}/" ] [ "${cfg.assetDirectory}/" ] withHostTools
+      );
+      assets = lib.pipe matches [
+        (lib.filter lib.isList)
+        lib.concatLists
+        (map (asset: builtins.appendContext asset (builtins.getContext text)))
+      ];
+    };
+
+  # Every unit llmhop defines claims its name.
+  quadletUnits = lib.filter (unit: llmhop.claims.unit ? ${unit.serviceName}) (
+    lib.attrValues quadlet.containers ++ lib.attrValues quadlet.images
+  );
+  # The servers and gateway, which start at boot.
+  wantedUnits = lib.filter (unit: unit.wantedBy != [ ]) quadletUnits;
+  # A Quadlet file, installed into the targets that NixOS makes it wanted by.
+  quadletFile =
+    unit:
+    file "etc/containers/systemd/${unit.ref}" (
+      unit.text
+      + lib.optionalString (unit.wantedBy != [ ]) ''
+
+        [Install]
+        WantedBy=${lib.concatStringsSep " " unit.wantedBy}
+      ''
+    );
+
+  # The update units, rendered here, since those of NixOS set a store `PATH=`.
+  toUnit = lib.generators.toINI { listsAsDuplicateKeys = true; };
+  updates = lib.filter (name: config.systemd.services ? ${name}) (
+    map (engine: "${engine}-update") engines
+  );
+  timers = lib.filter (name: config.systemd.services.${name}.startAt != [ ]) updates;
+  updateFiles = lib.concatMap (
+    name:
+    let
+      service = config.systemd.services.${name};
+    in
+    [
+      (file "etc/systemd/system/${name}.service" (toUnit {
+        Unit.Description = service.description;
+        Service = service.serviceConfig;
+      }))
+    ]
+    ++ lib.optional (lib.elem name timers) (
+      file "etc/systemd/system/${name}.timer" (toUnit {
+        Unit.Description = service.description;
+        Timer.OnCalendar = service.startAt;
+        Install.WantedBy = "timers.target";
+      })
+    )
+  ) updates;
+
+  # The rules of every llmhop setting, as NixOS renders them.
+  tmpfiles = lib.findFirst (
+    package: package.name == "10-llmhop.conf"
+  ) null config.systemd.tmpfiles.packages;
+
+  installScript = ''
+    #!/bin/sh
+    # Installs this bundle and starts its units.
+    set -eu
+    cd "$(dirname "$0")"
+    cp -r etc/. /etc/
+    rm -rf ${cfg.assetDirectory}
+    mkdir -p ${cfg.assetDirectory}
+    cp -r .${cfg.assetDirectory}/. ${cfg.assetDirectory}/
+    systemctl daemon-reload
+    ${lib.optionalString (tmpfiles != null) "systemd-tmpfiles --create /etc/tmpfiles.d/10-llmhop.conf"}
+    ${lib.optionalString (timers != [ ])
+      "systemctl enable --now ${lib.concatMapStringsSep " " (name: "${name}.timer") timers}"
+    }
+    systemctl start --no-block ${
+      lib.concatMapStringsSep " " (unit: "${unit.serviceName}.service") wantedUnits
+    }
+  '';
+
+  files = map quadletFile quadletUnits ++ updateFiles;
+
+  native = lib.filter (engine: llmhop.${engine}.enable) engines;
+  gateway = llmhop.gateway.type;
+  errors =
+    map (a: a.message) (lib.filter (a: !a.assertion) config.assertions)
+    ++ lib.optional (
+      native != [ ]
+    ) "only Quadlet backends can be bundled, but `${lib.concatStringsSep "`, `" native}` is enabled."
+    ++ lib.optional (
+      gateway != null && !lib.hasSuffix "-quadlet" gateway
+    ) "only Quadlet gateways can be bundled, but the gateway is `${gateway}`.";
+
+  package =
+    lib.throwIf (errors != [ ])
+      "services.llmhop.bundle:\n${lib.concatMapStringsSep "\n" (error: "- ${error}") errors}"
+      (
+        pkgs.runCommand "llmhop-bundle" { } ''
+          ${lib.concatMapStrings (file: ''
+            install -Dm644 ${builtins.toFile (baseNameOf file.path) file.text} $out/${file.path}
+          '') files}
+          install -Dm755 ${builtins.toFile "install.sh" installScript} $out/install.sh
+          ${lib.optionalString (tmpfiles != null) ''
+            install -Dm644 ${tmpfiles}/lib/tmpfiles.d/10-llmhop.conf $out/etc/tmpfiles.d/10-llmhop.conf
+          ''}
+          mkdir -p $out${cfg.assetDirectory}
+          ${lib.concatMapStrings (asset: ''
+            cp -r ${asset} $out${cfg.assetDirectory}/
+          '') (lib.unique (lib.concatMap (file: file.assets) files))}
+
+          # Every asset must be self-contained.
+          if grep -rlF ${storeDir}/ $out; then
+            echo "these bundle files still reference the Nix store" >&2
+            exit 1
+          fi
+        ''
+      );
+in
+{
+  options.services.llmhop.bundle = {
+    assetDirectory = mkOption {
+      type = types.strMatching "/.+";
+      default = "/usr/local/lib/llmhop";
+      description = "Directory of the scripts and generated files that the units of a bundle reference.";
+    };
+    package = mkOption {
+      type = types.package;
+      readOnly = true;
+      default = package;
+      defaultText = lib.literalMD "the bundle of this system's Quadlet backends and gateways";
+      description = ''
+        The Quadlet backends and gateway of this system as files for a host
+        without Nix, with podman 5, systemd and python3, below the root they
+        belong to. Its `install.sh` copies them into place and starts them.
+        Firewall and user options do not apply there.
+      '';
+    };
+  };
+}

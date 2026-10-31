@@ -49,6 +49,7 @@
       // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
+        bundle = pkgs.callPackage ./checks/bundle.nix { inherit (config.legacyPackages) mkQuadletBundle; };
         eval = pkgs.callPackage ./checks/eval.nix {
           inherit mkEvalCheck;
           inherit (config.legacyPackages) mkQuadletSystem;
@@ -84,7 +85,8 @@
         }
         // {
           # A minimal system with Quadlet and llmhop's modules, configured by
-          # `modules`.
+          # `modules`, and its Quadlet units as files for a host without Nix,
+          # see `services.llmhop.bundle`.
           mkQuadletSystem =
             { modules }:
             inputs.nixpkgs.lib.nixosSystem {
@@ -99,6 +101,8 @@
               ]
               ++ modules;
             };
+          mkQuadletBundle =
+            args: (config.legacyPackages.mkQuadletSystem args).config.services.llmhop.bundle.package;
           docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
             github = {
               enable = true;

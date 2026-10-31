@@ -1,5 +1,6 @@
 # llmhop in front of every endpoint, as a native service under
-# `services.llmhop.gateway.llmhop`, the only gateway reaching unix sockets.
+# `services.llmhop.gateway.llmhop`, the only gateway reaching unix sockets, and
+# as a Quadlet container under `services.llmhop.gateway.llmhop-quadlet`.
 lib:
 let
   inherit (lib) mkOption types;
@@ -59,6 +60,7 @@ let
     else
       file;
 
+  containerConfigFile = "${util.containerRuntimeDirectory}/llmhop.json";
 in
 {
   native =
@@ -258,6 +260,81 @@ in
               };
             };
           }
+        ]
+      );
+    };
+
+  quadlet =
+    { config, pkgs, ... }:
+    let
+      name = "llmhop-quadlet";
+      cfg = config.services.llmhop.gateway.${name};
+      # Every endpoint, unlisted ones included, which it reaches on TCP only.
+      endpoints = lib.attrValues config.services.llmhop.endpoints;
+      package = pkgs.callPackage ../../package.nix { };
+      file = configFile pkgs package cfg.settings;
+      # The image of the binary that validated `file`, unless `image` replaces it.
+      archive = pkgs.callPackage ../../docker.nix {
+        llmhop = package;
+        stream = false;
+      };
+    in
+    {
+      options.services.llmhop.gateway = {
+        type = mkOption { type = types.nullOr (types.enum [ name ]); };
+        ${name} = gateway.options "llmhop" // {
+          image = util.imageOption // {
+            type = with types; nullOr str;
+            default = null;
+            example = "ghcr.io/mirkolenz/llmhop:latest";
+            description = ''
+              Container image reference, including a tag or digest, or `null`
+              for an archive of this flake's llmhop, which validated the config
+              at build time and never auto-updates.
+            '';
+          };
+          credentials = credentialsOption;
+          settings = settingsOption pkgs;
+        };
+      };
+      config = lib.mkIf (config.services.llmhop.gateway.type == name) (
+        lib.mkMerge [
+          (gateway.config {
+            inherit
+              name
+              unit
+              cfg
+              endpoints
+              ;
+          })
+          {
+            services.llmhop.gateway.${name}.settings = {
+              host = lib.mkDefault cfg.host;
+              port = lib.mkDefault cfg.port;
+              models = models endpoints;
+            };
+          }
+          (gateway.quadletContainer {
+            inherit
+              config
+              name
+              cfg
+              unit
+              ;
+            inherit (cfg) credentials;
+            image = if cfg.image == null then "docker-archive:${archive}" else cfg.image;
+            imageTag = if cfg.image == null then "localhost/llmhop:${archive.imageTag}" else null;
+            arguments = [
+              "-config"
+              containerConfigFile
+            ];
+            environment = lib.optionalAttrs (cfg.credentials != { }) {
+              CREDENTIALS_DIRECTORY = util.containerCredentialDirectory;
+            };
+            volumes = [ "${file}:${containerConfigFile}:ro" ];
+            # Pairs with the binary's sd_notify call, as natively.
+            containerConfig.Notify = true;
+          })
         ]
       );
     };

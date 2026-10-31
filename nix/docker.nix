@@ -1,11 +1,14 @@
+# The llmhop image, streamed for publishing or, with `stream = false`, as the
+# archive that the llmhop-quadlet gateway loads.
 {
-  lib,
   dockerTools,
   cacert,
   tzdata,
+  lib,
   llmhop,
+  stream ? true,
 }:
-dockerTools.streamLayeredImage {
+(if stream then dockerTools.streamLayeredImage else dockerTools.buildLayeredImage) {
   name = "llmhop";
   contents = [
     cacert

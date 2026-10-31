@@ -7,8 +7,6 @@
 }:
 dockerTools.streamLayeredImage {
   name = "llmhop";
-  tag = "latest";
-  created = "now";
   contents = [
     cacert
     tzdata

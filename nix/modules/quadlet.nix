@@ -1,19 +1,9 @@
 { lib, ... }:
-let
-  inherit (import ./lib lib)
-    bifrost
-    engines
-    quadlet
-    smg
-    watermark
-    ;
-in
 {
-  imports = [
+  imports = map (import ./backends/quadlet.nix lib) (lib.attrNames (import ./engines.nix lib)) ++ [
     ./core.nix
-    watermark.quadlet
-    smg.quadlet
-    bifrost.quadlet
-  ]
-  ++ map quadlet.mkBackend (lib.attrNames engines);
+    (import ./backends/watermark.nix lib).quadlet
+    (import ./gateways/smg.nix lib).quadlet
+    (import ./gateways/bifrost.nix lib).quadlet
+  ];
 }

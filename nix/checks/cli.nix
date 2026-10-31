@@ -6,7 +6,8 @@
   mkEvalCheck,
 }:
 let
-  inherit (import ../modules/lib lib) engines renderCliArgs;
+  inherit (import ../modules/lib.nix lib) renderCliArgs;
+  engines = import ../modules/engines.nix lib;
 
   settings = {
     temperature = 0.6;

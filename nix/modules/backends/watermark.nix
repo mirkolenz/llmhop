@@ -5,29 +5,20 @@
 # names a file, which `mkVllmWatermark`'s script merges into the configuration
 # in-process, so it enters neither the Nix store nor a command line.
 lib:
-{
-  common,
-  native,
-  quadlet,
-}:
 let
   inherit (lib) mkOption types;
-  inherit (common)
-    engines
-    isRepository
-    repositoriesOption
-    sortedWorkloads
-    workloadModule
-    ;
+  util = import ../lib.nix lib;
+  shared = import ./shared.nix lib;
+  opts = import ./options.nix lib;
+  engine = (import ../engines.nix lib).vllm;
 
-  engine = engines.vllm;
   source = ../../pkgs/mkVllmWatermark/watermark.py;
-  containerScript = "${quadlet.containerRuntimeDirectory}/watermark.py";
+  containerScript = "${util.containerRuntimeDirectory}/watermark.py";
 
-  # Runs the script with the image's Python.
-  containerCommand = script: arguments: {
-    arguments = [ containerScript ] ++ arguments;
+  # The container of a workload running `script` with the image's Python.
+  scriptContainer = script: arguments: {
     entrypoint = [ "python" ];
+    arguments = [ containerScript ] ++ arguments;
     mounts = [ "${script}:${containerScript}:ro" ];
   };
 
@@ -56,39 +47,19 @@ let
   watermarkConfig = watermark: removeAttrs watermark [ "credential" ];
   keyReference = watermark: "\${cred:${watermark.credential}}";
 
-  # Files of a repository that a tokenizer may need.
-  tokenizerFiles = [
-    "*.json"
-    "*.jinja"
-    "*.model"
-    "*.py"
-    "*.tiktoken"
-    "*.txt"
-  ];
-
-  # Adds the internal `watermarks` of a workload, derived from its config by
-  # `watermarks`, and grants their keys.
-  watermarksModule =
+  # Imports the key of every one of `watermarks` unless `credentials` names a
+  # file for it.
+  keyCredentials =
     watermarks:
-    { config, ... }:
-    {
-      options.watermarks = mkOption {
-        internal = true;
-        readOnly = true;
-        type = with types; listOf attrs;
-        default = watermarks config;
-        description = "Watermarks whose keys this workload is granted.";
-      };
-      config.credentials = lib.genAttrs (map (watermark: watermark.credential) config.watermarks) (
-        _: lib.mkDefault null
-      );
-    };
+    lib.genAttrs' watermarks (watermark: lib.nameValuePair watermark.credential (lib.mkDefault null));
 
-  # Adds the optional `watermark` of a model worker.
-  modelWatermarkModule =
+  # The watermarks of every profile of `detector`.
+  profileWatermarks = detector: lib.mapAttrsToList (_: profile: profile.watermark) detector.profiles;
+
+  # Extends a model with its optional `watermark`.
+  modelModule =
     { config, ... }:
     {
-      imports = [ (watermarksModule (model: lib.optional (model.watermark != null) model.watermark)) ];
       options.watermark = mkOption {
         type = types.nullOr watermarkType;
         default = null;
@@ -99,6 +70,7 @@ let
         '';
       };
       config = lib.mkIf (config.watermark != null) {
+        credentials = keyCredentials [ config.watermark ];
         # Flags `mkVllmWatermark`'s script reads, which win like derived ones.
         settings = lib.mapAttrs (_: lib.mkForce) {
           watermark-config = watermarkConfig config.watermark;
@@ -139,15 +111,14 @@ let
     };
   };
 
-  # Options of a detector, whose `script` default each backend sets.
+  # A detector, an unlisted workload whose `script` default each backend sets.
   detectorModule =
-    { socketDirectory, listen }:
+    { socketDirectory, listener }:
     { config, ... }:
     {
       imports = [
-        (workloadModule {
-          inherit engine socketDirectory listen;
-          unitPrefix = "vllm";
+        (opts.workloadModule {
+          inherit engine socketDirectory listener;
           noun = "watermark detector";
           derivedSettings = detector: {
             profiles = lib.mapAttrs (_: profile: {
@@ -157,7 +128,6 @@ let
             }) detector.profiles;
           };
         })
-        (watermarksModule (detector: map (profile: profile.watermark) (lib.attrValues detector.profiles)))
       ];
       options = {
         profiles = mkOption {
@@ -177,15 +147,6 @@ let
             of the most significant profile multiplied by their number.
           '';
         };
-        repositories = repositoriesOption (
-          lib.unique (
-            map (profile: {
-              repo = profile.tokenizer;
-              inherit (profile) revision;
-              include = tokenizerFiles;
-            }) (lib.filter (profile: isRepository profile.tokenizer) (lib.attrValues config.profiles))
-          )
-        );
         script = mkOption {
           type = types.path;
           defaultText = lib.literalMD "the script built by `mkVllmWatermark`";
@@ -198,74 +159,90 @@ let
           '';
         };
       };
+      config = {
+        unlisted = true;
+        credentials = keyCredentials (profileWatermarks config);
+        # Only the files of a repository that a tokenizer may need.
+        repositories = lib.pipe config.profiles [
+          lib.attrValues
+          (lib.filter (profile: util.isRepository profile.tokenizer))
+          (map (profile: {
+            repo = profile.tokenizer;
+            inherit (profile) revision;
+            include = [
+              "*.json"
+              "*.jinja"
+              "*.model"
+              "*.py"
+              "*.tiktoken"
+              "*.txt"
+            ];
+          }))
+          lib.unique
+        ];
+      };
     };
 
-  # A backend's `models`, watermarked and extended by `module`.
-  modelsOption =
-    module:
-    mkOption {
-      type = types.attrsOf (
-        types.submodule [
-          modelWatermarkModule
-          module
-        ]
-      );
-    };
-
-  # The standalone detectors of a backend, extended by `module`.
-  detectorsOption =
+  # The `models` and `detectors` options of a backend, extended by the
+  # submodules `model` and `detector`.
+  backendOptions =
     {
       socketDirectory,
-      listen,
-      module,
+      listener,
+      model,
+      detector,
     }:
-    mkOption {
-      type = types.attrsOf (
-        types.submodule [
-          (detectorModule { inherit socketDirectory listen; })
-          module
-        ]
-      );
-      default = { };
-      description = ''
-        Standalone watermark detection services. The llmhop gateway routes
-        them as unlisted models, while every other gateway leaves them to
-        direct clients.
-      '';
+    {
+      models = mkOption {
+        type = types.attrsOf (
+          types.submodule [
+            modelModule
+            model
+          ]
+        );
+      };
+      detectors = mkOption {
+        type = types.attrsOf (
+          types.submodule [
+            (detectorModule { inherit socketDirectory listener; })
+            detector
+          ]
+        );
+        default = { };
+        description = ''
+          Standalone watermark detection services. The llmhop gateway routes
+          them as unlisted models, while every other gateway leaves them to
+          direct clients.
+        '';
+      };
     };
 
-  # Configuration of `backend` shared by both kinds: its detectors routed as
-  # unlisted `entries`, each completed by `detectorEntry`, and the rejection
-  # of an inline key, which would enter the Nix store and the command line.
+  # Serves the detectors of `backend` beside its models, and rejects an inline
+  # key, which would enter the Nix store and the command line.
   backendConfig =
-    {
-      backend,
-      cfg,
-      detectorEntry,
-    }:
+    backend: cfg:
+    let
+      inlineKey =
+        workload: watermarks:
+        lib.any (config: lib.isAttrs config && config ? key) (
+          watermarks ++ [ (workload.settings.watermark-config or null) ]
+        )
+        || lib.any (lib.hasPrefix "watermark-config.") (lib.attrNames workload.settings);
+      inlineKeyAssertion = path: workload: watermarks: {
+        assertion = !inlineKey workload watermarks;
+        message = "services.llmhop.${backend}: `${path}` configures the watermark key inline, which its `credential` provides.";
+      };
+    in
     lib.mkIf cfg.enable {
-      services.llmhop.${backend}.entries = map (
-        detector:
-        {
-          workload = detector;
-          unlisted = true;
-        }
-        // detectorEntry detector
-      ) (sortedWorkloads cfg.detectors);
+      services.llmhop.${backend}.extraWorkloads = shared.sortedWorkloads cfg.detectors;
       assertions =
-        lib.mapAttrsToList
-          (name: workload: {
-            assertion =
-              !lib.any (config: lib.isAttrs config && config ? key) (
-                workload.watermarks ++ [ (workload.settings.watermark-config or null) ]
-              )
-              && !lib.any (lib.hasPrefix "watermark-config.") (lib.attrNames workload.settings);
-            message = "services.llmhop.${backend}: `${name}` configures the watermark key inline, which its `credential` provides.";
-          })
-          (
-            lib.mapAttrs' (name: lib.nameValuePair "models.${name}") cfg.models
-            // lib.mapAttrs' (name: lib.nameValuePair "detectors.${name}") cfg.detectors
-          )
+        lib.mapAttrsToList (
+          name: model:
+          inlineKeyAssertion "models.${name}" model (lib.optional (model.watermark != null) model.watermark)
+        ) cfg.models
+        ++ lib.mapAttrsToList (
+          name: detector: inlineKeyAssertion "detectors.${name}" detector (profileWatermarks detector)
+        ) cfg.detectors
         ++ lib.mapAttrsToList (name: detector: {
           assertion = detector.profiles != { };
           message = "services.llmhop.${backend}: detector `${name}` has no `profiles`.";
@@ -273,8 +250,8 @@ let
     };
 in
 {
-  # The module of the native backend. A detector runs in its own vLLM
-  # environment, which checks the default script at build time.
+  # The native backend. A detector runs in its own vLLM environment, which
+  # checks the default script at build time.
   native =
     { config, pkgs, ... }:
     let
@@ -282,8 +259,10 @@ in
       mkScript = pkgs.callPackage ../../pkgs/mkVllmWatermark/package.nix { };
     in
     {
-      options.services.llmhop.vllm = {
-        models = modelsOption (
+      options.services.llmhop.vllm = backendOptions {
+        inherit (config.services.llmhop) socketDirectory;
+        listener = lib.id;
+        model =
           { config, ... }:
           {
             config.command = lib.mkIf (config.watermark != null) [
@@ -292,75 +271,66 @@ in
               "serve"
               config.model
             ];
-          }
-        );
-        detectors = detectorsOption {
-          inherit (native) listen;
-          inherit (config.services.llmhop) socketDirectory;
-          module =
-            { config, ... }:
-            {
-              options.package = mkOption {
+          };
+        detector =
+          { config, ... }:
+          {
+            options = {
+              package = mkOption {
                 type = types.package;
                 default = cfg.package;
                 defaultText = lib.literalExpression "config.services.llmhop.vllm.package";
                 description = "Environment this detector runs in.";
               };
-              config.script = lib.mkDefault (mkScript config.package);
+              command = mkOption {
+                type = with types; listOf (either str package);
+                internal = true;
+                default = [
+                  (lib.getExe' config.package "python")
+                  config.script
+                  "detect"
+                ];
+                description = "Command of this detector's server, followed by its settings.";
+              };
             };
-        };
+            config.script = lib.mkDefault (mkScript config.package);
+          };
       };
-      config = backendConfig {
-        backend = "vllm";
-        inherit cfg;
-        detectorEntry = detector: {
-          description = "vLLM watermark detector ${detector.name}";
-          command = [
-            (lib.getExe' detector.package "python")
-            detector.script
-            "detect"
-          ];
-        };
-      };
+      config = backendConfig "vllm" cfg;
     };
 
-  # The module of the Quadlet backend. The script is mounted into the image
-  # and run unchecked with its Python, since the image is opaque to the build.
+  # The Quadlet backend. The script is mounted into the image and run
+  # unchecked with its Python, since the image is opaque to the build.
   quadlet =
     { config, ... }:
-    let
-      cfg = config.services.llmhop.vllm-quadlet;
-    in
     {
-      options.services.llmhop.vllm-quadlet = {
-        models = modelsOption (
+      options.services.llmhop.vllm-quadlet = backendOptions {
+        inherit (config.services.llmhop) socketDirectory;
+        listener = opts.quadletListener engine;
+        model =
           { config, ... }:
           {
             config.container = lib.mkIf (config.watermark != null) (
-              containerCommand source [
+              scriptContainer source [
                 "serve"
                 config.model
               ]
             );
-          }
-        );
-        detectors = detectorsOption {
-          listen = quadlet.listen engine;
-          inherit (config.services.llmhop) socketDirectory;
-          module = {
-            options = quadlet.workloadOptions {
-              inherit cfg;
-              backend = "vllm-quadlet";
-              noun = "detector";
+          };
+        detector =
+          { config, ... }:
+          {
+            options = opts.containerOptions "watermark detector" // {
+              container = mkOption {
+                type = types.attrs;
+                internal = true;
+                default = scriptContainer config.script [ "detect" ];
+                description = "The `entrypoint`, `arguments` and `mounts` of this detector's container.";
+              };
             };
             config.script = lib.mkDefault source;
           };
-        };
       };
-      config = backendConfig {
-        backend = "vllm-quadlet";
-        inherit cfg;
-        detectorEntry = detector: containerCommand detector.script [ "detect" ];
-      };
+      config = backendConfig "vllm-quadlet" config.services.llmhop.vllm-quadlet;
     };
 }

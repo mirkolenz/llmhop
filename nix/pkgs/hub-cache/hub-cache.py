@@ -1,4 +1,7 @@
-"""Prune, record and validate the hub cache of one worker.
+"""Prune, record, restore and validate the hub cache of one worker.
+
+Usage: hub-cache.py prune | restore <completed> | load <completed>
+| apply <server> <completed>, followed by the specification.
 
 The specification is a JSON object with the `hub` and its `repositories`,
 each with its cache `name` and the `revision` it caches, or null for every
@@ -10,14 +13,11 @@ import hashlib
 import json
 import subprocess
 import sys
-from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from shutil import rmtree
 from typing import TypedDict
 
 __all__ = ["main"]
-
-SYSTEMCTL = "@systemctl@"
 
 
 class Repository(TypedDict):
@@ -42,28 +42,22 @@ class Download(TypedDict):
     refs: dict[str, str]
 
 
-def refs_of(repo: Path, revision: str | None) -> list[Path]:
-    """Return the refs naming `revision` in `repo`, or every ref without one."""
-    refs = repo / "refs"
-
+def resolve(repo: Path, revision: str | None) -> tuple[dict[Path, str], set[str]]:
+    """Return the refs naming `revision` in `repo`, or every ref without one,
+    with their commits, and the commits of `revision`, which names a commit
+    if no ref does."""
     if revision is None:
-        return sorted(ref for ref in refs.rglob("*") if ref.is_file())
+        paths = sorted(ref for ref in (repo / "refs").rglob("*") if ref.is_file())
+    else:
+        ref = repo / "refs" / revision
+        paths = [ref] if ref.is_file() else []
 
-    ref = refs / revision
-    return [ref] if ref.is_file() else []
+    refs = {ref: ref.read_text().strip() for ref in paths}
 
-
-def resolve(repo: Path, revision: str | None) -> dict[Path, str]:
-    """Return the refs of `revision` in `repo` with their commits."""
-    return {ref: ref.read_text().strip() for ref in refs_of(repo, revision)}
-
-
-def commits_of(revision: str | None, refs: dict[Path, str]) -> set[str]:
-    """Return the commits of `revision`, which names a commit if no ref does."""
     if revision is not None and not refs:
-        return {revision}
+        return refs, {revision}
 
-    return set(refs.values())
+    return refs, set(refs.values())
 
 
 def prune(specification: Specification) -> None:
@@ -80,15 +74,15 @@ def prune(specification: Specification) -> None:
             rmtree(hub / ".locks" / repo.name, ignore_errors=True)
             continue
 
-        kept: dict[Path, str] = {}
+        kept: set[Path] = set()
         commits: set[str] = set()
 
         for revision in revisions[repo.name]:
-            refs = resolve(repo, revision)
-            kept |= refs
-            commits |= commits_of(revision, refs)
+            refs, revision_commits = resolve(repo, revision)
+            kept |= refs.keys()
+            commits |= revision_commits
 
-        for ref in refs_of(repo, None):
+        for ref in resolve(repo, None)[0]:
             if ref not in kept:
                 ref.unlink()
 
@@ -116,14 +110,14 @@ def record(specification: Specification) -> Download:
 
     for repository in specification["repositories"]:
         repo = hub / repository["name"]
-        resolved = resolve(repo, repository["revision"])
+        resolved, commits = resolve(repo, repository["revision"])
 
         if repository["revision"] is None and not resolved:
             raise FileNotFoundError(f"no cached refs in {repo}")
 
         refs |= {str(ref): commit for ref, commit in resolved.items()}
 
-        for commit in sorted(commits_of(repository["revision"], resolved)):
+        for commit in sorted(commits):
             snapshot = repo / "snapshots" / commit
             paths = sorted(path for path in snapshot.rglob("*") if not path.is_dir())
 
@@ -152,27 +146,17 @@ def read(completed: Path) -> Download | None:
     return json.loads(completed.read_text()) if completed.exists() else None
 
 
-def systemctl(*args: str) -> int:
-    """Run `systemctl` and return its exit code."""
-    return subprocess.run([SYSTEMCTL, *args], check=False).returncode
-
-
-def prune_command(args: Namespace) -> None:
-    """Delete everything in the hub cache that the specification does not reference."""
-    prune(args.specification)
-
-
-def restore_command(args: Namespace) -> None:
+def restore(specification: Specification, completed: Path) -> None:
     """Point the refs back to the last complete download of the specification."""
-    recorded = read(args.completed)
+    recorded = read(completed)
 
-    if recorded is None or recorded["specification"] != args.specification:
+    if recorded is None or recorded["specification"] != specification:
         return
 
-    hub = Path(args.specification["hub"])
+    hub = Path(specification["hub"])
 
-    for repository in args.specification["repositories"]:
-        for ref in refs_of(hub / repository["name"], repository["revision"]):
+    for repository in specification["repositories"]:
+        for ref in resolve(hub / repository["name"], repository["revision"])[0]:
             if str(ref) not in recorded["refs"]:
                 ref.unlink()
 
@@ -180,12 +164,12 @@ def restore_command(args: Namespace) -> None:
         Path(ref).write_text(commit)
 
 
-def load_command(args: Namespace) -> None:
+def load(specification: Specification, completed: Path) -> None:
     """Fail unless the cache matches the last complete download."""
-    recorded = read(args.completed)
+    recorded = read(completed)
 
     try:
-        current = record(args.specification)
+        current = record(specification)
     except FileNotFoundError as error:
         sys.exit(f"cache does not match a completed download: {error}")
 
@@ -193,18 +177,20 @@ def load_command(args: Namespace) -> None:
         sys.exit("cache does not match a completed download")
 
 
-def apply_command(args: Namespace) -> None:
+def apply(specification: Specification, server: str, completed: Path) -> None:
     """Record a complete download and restart or start the server."""
-    completed: Path = args.completed
     previous = read(completed)
-    current = record(args.specification)
+    current = record(specification)
     temporary = completed.with_suffix(".tmp")
     temporary.write_text(json.dumps(current))
     # Readable by the fetcher's own `restore`, but writable by root only.
     temporary.chmod(0o644)
     temporary.replace(completed)
 
-    if systemctl("is-failed", "--quiet", args.server) == 0:
+    def systemctl(*args: str) -> int:
+        return subprocess.run(["systemctl", *args, server], check=False).returncode
+
+    if systemctl("is-failed", "--quiet") == 0:
         action = "start"
     elif previous is None or previous["fingerprint"] != current["fingerprint"]:
         # Leaves a stopped server alone.
@@ -213,33 +199,25 @@ def apply_command(args: Namespace) -> None:
         return
 
     # A planned restart does not count towards the start limit.
-    systemctl("reset-failed", args.server)
+    systemctl("reset-failed")
 
-    if systemctl(action, "--no-block", args.server) != 0:
-        sys.exit(f"could not {action} {args.server}")
+    if systemctl(action, "--no-block") != 0:
+        sys.exit(f"could not {action} {server}")
 
 
 def main() -> None:
     """Run the command given on the command line."""
-    parser = ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(required=True)
-
-    for name, command, arguments in [
-        ("prune", prune_command, []),
-        ("restore", restore_command, [("completed", Path)]),
-        ("load", load_command, [("completed", Path)]),
-        ("apply", apply_command, [("server", str), ("completed", Path)]),
-    ]:
-        subparser = commands.add_parser(name, help=command.__doc__)
-        subparser.set_defaults(command=command)
-
-        for argument, kind in arguments:
-            subparser.add_argument(argument, type=kind)
-
-        subparser.add_argument("specification", type=json.loads)
-
-    args = parser.parse_args()
-    args.command(args)
+    match sys.argv[1:]:
+        case ["prune", specification]:
+            prune(json.loads(specification))
+        case ["restore", completed, specification]:
+            restore(json.loads(specification), Path(completed))
+        case ["load", completed, specification]:
+            load(json.loads(specification), Path(completed))
+        case ["apply", server, completed, specification]:
+            apply(json.loads(specification), server, Path(completed))
+        case _:
+            sys.exit(__doc__)
 
 
 if __name__ == "__main__":

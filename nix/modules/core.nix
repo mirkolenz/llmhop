@@ -6,21 +6,20 @@
 let
   cfg = config.services.llmhop;
 
-  inherit (import ./lib lib)
-    bifrost
-    builtin
-    engines
-    native
-    smg
-    rootDirectoryRule
-    watermark
-    ;
+  util = import ./lib.nix lib;
 
-  # Assertions of every routed endpoint, which only the gateway may expose.
+  # Assertion that only one owner claims the resource `key` of `kind`.
+  claimAssertion = kind: key: owners: {
+    assertion = lib.length (lib.unique owners) < 2;
+    message = "services.llmhop: ${kind} `${key}` is claimed by ${lib.concatStringsSep ", " owners}.";
+  };
+
+  # Assertion of the routed endpoint of `owner`, which only the gateway may
+  # expose.
   gatewayAssertion =
-    name:
+    owner:
     let
-      endpoint = cfg.endpoints.${name};
+      endpoint = cfg.endpoints.${owner};
     in
     {
       assertion = !endpoint.exposed;
@@ -61,13 +60,12 @@ let
   };
 in
 {
-  imports = [
-    watermark.native
-    builtin
-    smg.native
-    bifrost.native
-  ]
-  ++ map native.mkBackend (lib.attrNames engines);
+  imports = map (import ./backends/native.nix lib) (lib.attrNames (import ./engines.nix lib)) ++ [
+    (import ./backends/watermark.nix lib).native
+    (import ./gateways/llmhop.nix lib).native
+    (import ./gateways/smg.nix lib).native
+    (import ./gateways/bifrost.nix lib).native
+  ];
 
   meta = {
     maintainers = with lib.maintainers; [ mirkolenz ];
@@ -100,7 +98,7 @@ in
       type = lib.mkOption {
         type = lib.types.nullOr (lib.types.enum [ ]);
         default = null;
-        example = "builtin";
+        example = "llmhop";
         description = ''
           The one gateway in front of every backend, configured by the option
           set of the same name, or `null` for none, so clients connect to each
@@ -113,7 +111,7 @@ in
         type = with lib.types; listOf str;
         default = [ ];
         internal = true;
-        description = "Names of the endpoints the selected gateway routes, all others staying direct.";
+        description = "Owners of the endpoints the selected gateway routes, all others staying direct.";
       };
     };
 
@@ -121,7 +119,7 @@ in
       type = with lib.types; attrsOf (submodule endpointModule);
       default = { };
       internal = true;
-      description = "Every workload by its `name`, which gateways route.";
+      description = "Every workload by its `owner`, which gateways route by its `name`.";
     };
 
     claims = lib.mkOption {
@@ -129,7 +127,7 @@ in
       default = { };
       internal = true;
       example.port."8080" = [
-        "services.llmhop.gateway.builtin.listen.default"
+        "services.llmhop.gateway.llmhop.listen.default"
         "services.llmhop.vllm.models.qwen3-8b"
       ];
       description = ''
@@ -142,21 +140,11 @@ in
 
   config = {
     assertions =
-      lib.concatLists (
-        lib.mapAttrsToList (
-          kind:
-          lib.mapAttrsToList (
-            key: owners: {
-              assertion = lib.length (lib.unique owners) < 2;
-              message = "services.llmhop: ${kind} `${key}` is claimed by ${lib.concatStringsSep ", " owners}.";
-            }
-          )
-        ) cfg.claims
-      )
+      lib.concatLists (lib.mapAttrsToList (kind: lib.mapAttrsToList (claimAssertion kind)) cfg.claims)
       ++ map gatewayAssertion cfg.gateway.routes;
 
     systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (e: e.socket != null) (
       lib.attrValues cfg.endpoints
-    )) (rootDirectoryRule cfg.socketDirectory);
+    )) (util.rootDirectoryRule cfg.socketDirectory);
   };
 }

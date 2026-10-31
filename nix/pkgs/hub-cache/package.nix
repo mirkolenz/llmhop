@@ -1,19 +1,7 @@
-# Prunes, records and validates the hub cache of a worker. The minimal Python
-# suffices, since it only uses the standard library, and treefmt lints it
-# instead of flake8 at build time, which would pull a full Python into every
-# deployment.
-{
-  lib,
-  writers,
-  replaceVars,
-  python3Minimal,
-  python3Packages,
-  buildPackages,
-  systemd,
-}:
-writers.makePythonWriter python3Minimal python3Packages buildPackages.python3Packages
-  "llmhop-hub-cache"
-  {
-    doCheck = false;
-  }
-  (replaceVars ./script.py { systemctl = lib.getExe' systemd "systemctl"; })
+# Prunes, records, restores and validates the hub cache of a worker. The
+# output is the script itself, which the units run with a Python of their
+# choice, so a bundle can use the host's. It finds `systemctl` on `PATH`.
+{ runCommandLocal }:
+runCommandLocal "hub-cache.py" { } ''
+  cp ${./hub-cache.py} $out
+''

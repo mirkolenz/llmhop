@@ -44,14 +44,14 @@
         inherit (config.packages) llmhop;
         inherit (config.legacyPackages) check-elf;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
+        hub-cache = pkgs.callPackage ./checks/hub-cache.nix { inherit (config.legacyPackages) hub-cache; };
       }
       // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;
-        inherit (config.legacyPackages) hub-cache;
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
         eval = pkgs.callPackage ./checks/eval.nix {
-          inherit self mkEvalCheck;
-          inherit (inputs.nixpkgs.lib) nixosSystem;
+          inherit mkEvalCheck;
+          inherit (config.legacyPackages) mkQuadletSystem;
         };
       };
       packages = {
@@ -83,6 +83,22 @@
           directory = ./pkgs;
         }
         // {
+          # A minimal system with Quadlet and llmhop's modules, configured by
+          # `modules`.
+          mkQuadletSystem =
+            { modules }:
+            inputs.nixpkgs.lib.nixosSystem {
+              modules = [
+                self.nixosModules.quadlet
+                {
+                  nixpkgs.pkgs = pkgs;
+                  system.stateVersion = lib.trivial.release;
+                  boot.isContainer = true;
+                  virtualisation.quadlet.enable = true;
+                }
+              ]
+              ++ modules;
+            };
           docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
             github = {
               enable = true;

@@ -35,7 +35,7 @@ let
       # A host directory mounted at the same path.
       cacheMount =
         directory: options:
-        "${directory}:${directory}${util.mountSuffix (options ++ cfg.cache.mountOptions)}";
+        "${directory}:${directory}${util.mountSuffix (options ++ cfg.mountOptions.cache)}";
       cache = cacheMount (shared.cacheDirectory cfg workload) [ ];
       credentialDirectory = util.containerCredentialDirectory;
       fetch = shared.fetcher {
@@ -49,7 +49,7 @@ let
         inherit (engine.quadlet) fetcher;
         server = unit;
       };
-      credentials = util.credentialMount workload.mountOptions.credentials;
+      credentials = util.credentialMount cfg.mountOptions.credentials;
       # A socket in a mounted directory and, offline, no network, or else
       # the published port.
       network =
@@ -121,7 +121,8 @@ let
             AddDevice = workload.devices;
             ShmSize = workload.shmSize;
             Ulimit = "host";
-          };
+          }
+          // cfg.containerConfig;
       };
     }
     // lib.optionalAttrs (shared.fetches workload) {
@@ -144,7 +145,8 @@ let
             ++ credentials cfg.fetch.credentials;
             EnvironmentFile = fetch.environmentFile;
             Environment = fetch.environment // util.credentialEnvironment cfg.fetch.credentials;
-          };
+          }
+          // cfg.containerConfig;
       };
     };
 
@@ -158,22 +160,13 @@ in
       example = engine.quadlet.imageExample;
     };
     cache = baseOptions.cache // {
-      mountOptions = mkOption {
-        type = with types; listOf str;
-        default = [ ];
-        example = [ "idmap" ];
-        description = ''
-          Options appended to the Quadlet `Volume=` entries of the cache
-          directories below `cache.directory`, for Podman ownership
-          mechanisms such as `idmap` or SELinux relabeling.
-        '';
-      };
       user = mkOption {
         type = types.str;
         default = "root";
         description = ''
-          Host owner of the cache directories. Override it when a
-          `User=`, `UIDMap` or `idmap` makes the container see another owner.
+          Host owner of the cache directories. Override it for a cache on a
+          filesystem without idmapped mounts, such as NFS, with the host ID
+          that `UIDMap=` gives the container user.
         '';
       };
       group = mkOption {
@@ -181,6 +174,20 @@ in
         default = "root";
         description = "Host group of the cache directories.";
       };
+    };
+    containerConfig = util.containerConfigOption "this backend, servers, fetchers and detectors alike";
+    mountOptions = {
+      cache = mkOption {
+        type = with types; listOf str;
+        default = [ ];
+        example = [ "idmap" ];
+        description = ''
+          Podman volume options of the cache mounts below `cache.directory`,
+          such as `idmap` so a user namespace owns them, or SELinux
+          relabeling.
+        '';
+      };
+      credentials = util.credentialMountOptionsOption "this backend";
     };
     startupOrdering = opts.startupOrderingOption "via its own `devices`";
     devices = mkOption {
@@ -223,7 +230,7 @@ in
           (
             { config, ... }:
             {
-              options = opts.containerOptions "model" // {
+              options = {
                 devices = mkOption {
                   type = with types; listOf str;
                   default = cfg.devices;

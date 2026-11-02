@@ -146,6 +146,7 @@ in
       options.services.llmhop.gateway = {
         type = mkOption { type = types.nullOr (types.enum [ name ]); };
         ${name} = gateway.options displayName // {
+          containerConfig = util.containerConfigOption "Bifrost";
           image = util.imageOption // {
             example = "docker.io/maximhq/bifrost:v2.3.2";
           };

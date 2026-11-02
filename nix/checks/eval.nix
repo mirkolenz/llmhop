@@ -59,6 +59,8 @@ let
     };
 
   quadlet = mkQuadlet {
+    containerConfig.UserNS = "auto";
+    mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
     models.test = {
       credentials = {
         api-keys = apiKeys;
@@ -70,7 +72,6 @@ let
         config = "\${cred:server-config}";
         api-key-file = "\${cred:api-keys}";
       };
-      mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
     };
     models.marked = {
       model = "example/marked";
@@ -198,6 +199,20 @@ let
       };
     };
   };
+  # A gateway in a user namespace, reading its credentials through an idmapped mount.
+  smgQuadlet =
+    (mkRoutable {
+      gateway = {
+        type = "smg-quadlet";
+        smg-quadlet = {
+          image = "ghcr.io/smg-project/smg:nightly";
+          credentials."smg.api-key" = apiKeys;
+          settings.api-key-file = "\${cred:smg.api-key}";
+          containerConfig.UserNS = "auto";
+          mountOptions.credentials = [ "idmap" ];
+        };
+      };
+    }).virtualisation.quadlet.containers.smg;
   bifrost = mkRoutable {
     gateway = {
       type = "bifrost-quadlet";
@@ -206,6 +221,30 @@ let
   };
 
   tests = {
+    # Every container of a backend or gateway runs in the configured user
+    # namespace, the gateway still as its root.
+    testUserNamespace = {
+      expr = {
+        backend = map (unit: quadlet.virtualisation.quadlet.containers.${unit}.containerConfig.UserNS) [
+          "vllm-test"
+          "vllm-test-fetch"
+          "vllm-watermark"
+        ];
+        inherit (smgQuadlet.containerConfig) UserNS User;
+        mount = lib.elem "%d:/run/llmhop/credentials:ro,idmap" smgQuadlet.containerConfig.Volume;
+      };
+      expected = {
+        backend = [
+          "auto"
+          "auto"
+          "auto"
+        ];
+        UserNS = "auto";
+        User = "0:0";
+        mount = true;
+      };
+    };
+
     # Paths are loaded, `null` is imported, and references resolve to the
     # credential directory, never a value on the command line.
     testCredentials = {

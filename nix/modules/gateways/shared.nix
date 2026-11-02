@@ -134,6 +134,7 @@ rec {
       entrypoint ? null,
       arguments ? [ ],
       credentials ? { },
+      credentialMountOptions ? [ ],
       environment ? { },
       volumes ? [ ],
       serviceConfig ? { },
@@ -166,7 +167,7 @@ rec {
                 // util.credentialEnvironment credentials
                 // environment;
               EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-              Volume = volumes ++ util.credentialMount [ ] credentials;
+              Volume = volumes ++ util.credentialMount credentialMountOptions credentials;
             }
             // lib.optionalAttrs (entrypoint != null) { Entrypoint = lib.toJSON [ entrypoint ]; }
             // lib.optionalAttrs (arguments != [ ]) {
@@ -175,9 +176,11 @@ rec {
               );
             }
             # The credential mount belongs to host root, so the container runs
-            # as root to read it, without any capability like every backend.
+            # as root to read it, without any capability like every backend,
+            # unless `containerConfig` maps another identity.
             // lib.optionalAttrs (credentials != { }) { User = "0:0"; }
-            // containerConfig;
+            // containerConfig
+            // cfg.containerConfig;
         };
       };
     };

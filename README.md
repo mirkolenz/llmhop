@@ -193,22 +193,28 @@ Strings and paths are passed verbatim and everything else as JSON, so attribute 
 
 #### Containers and user namespaces
 
-`[Container]` keys go on the generated server and fetcher containers alike, so both see the cache under one owner:
+Every Quadlet backend and gateway runs its containers as root by default, which a user namespace maps to an unprivileged host range.
+`containerConfig` adds `[Container]` keys to every container of a backend, servers, fetchers and detectors alike, or of a gateway, and idmapped mounts let the namespace own the cache and read the credentials:
 
 ```nix
-virtualisation.quadlet.containers = lib.genAttrs [ "vllm-qwen3-8b" "vllm-qwen3-8b-fetch" ] (_: {
-  containerConfig = {
-    User = "1000";
-    UserNS = "auto:size=65536";
+services.llmhop = {
+  vllm-quadlet = {
+    containerConfig.UserNS = "auto:size=65536";
+    mountOptions = {
+      cache = [ "idmap" ];
+      credentials = [ "idmap" ];
+    };
   };
-});
-services.llmhop.vllm-quadlet.cache = {
-  user = "1000";
-  group = "1000";
-  mountOptions = [ "idmap" ];
+  gateway.llmhop-quadlet = {
+    containerConfig.UserNS = "auto";
+    mountOptions.credentials = [ "idmap" ];
+  };
 };
 ```
 
+`UIDMap=` and `GIDMap=` work the same way in place of `UserNS=`.
+A non-root `User=` inside the namespace takes the mapping `idmap=uids=0-<uid>-1;gids=0-<gid>-1` in both lists, so the cache stays owned by host root.
+Only a cache on a filesystem without idmapped mounts, such as NFS, needs `cache.user` and `cache.group` set to the host IDs that an explicit `UIDMap=` and `GIDMap=` give the container user.
 Rootful `UserNS=auto` needs subordinate IDs for a `containers` user, which NixOS does not declare.
 
 #### Hosts without Nix
@@ -281,7 +287,7 @@ systemd-ask-password -n | systemd-creds encrypt --name=llmhop.hf-token - /etc/cr
 ```
 
 vLLM and SGLang read a YAML file with `api-key` through `settings.config`, as in `credentials."config.yaml"` with `settings.config = "\${cred:config.yaml}"`, while llama.cpp uses `api-key-file`.
-Containers see their credentials at `/run/llmhop/credentials`, readable by root inside the container, or by another `User=` through `mountOptions.credentials = [ "idmap=..." ]`.
+Containers see their credentials at `/run/llmhop/credentials`, named by `$CREDENTIALS_DIRECTORY` as natively, and readable through a user namespace with the backend's or gateway's `mountOptions.credentials`, see [user namespaces](#containers-and-user-namespaces).
 
 ### vLLM watermarking
 

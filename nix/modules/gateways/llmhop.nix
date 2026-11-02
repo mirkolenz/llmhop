@@ -295,6 +295,8 @@ in
           };
           credentials = credentialsOption;
           settings = settingsOption pkgs;
+          containerConfig = util.containerConfigOption "the llmhop gateway";
+          mountOptions.credentials = util.credentialMountOptionsOption "the llmhop gateway";
         };
       };
       config = lib.mkIf (config.services.llmhop.gateway.type == name) (
@@ -322,6 +324,7 @@ in
               unit
               ;
             inherit (cfg) credentials;
+            credentialMountOptions = cfg.mountOptions.credentials;
             image = if cfg.image == null then "docker-archive:${archive}" else cfg.image;
             imageTag = if cfg.image == null then "localhost/llmhop:${archive.imageTag}" else null;
             arguments = [

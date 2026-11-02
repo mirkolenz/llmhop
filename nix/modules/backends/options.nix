@@ -390,18 +390,4 @@ rec {
       '';
       inherit description;
     };
-
-  # Options of a workload's container.
-  containerOptions = noun: {
-    mountOptions.credentials = mkOption {
-      type = with types; listOf str;
-      default = [ ];
-      example = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
-      description = ''
-        Podman volume options appended to the credential mount of this
-        ${noun}'s server. Use an `idmap` mapping when `[Container] User=`
-        selects a non-root identity. The mount is always read-only.
-      '';
-    };
-  };
 }

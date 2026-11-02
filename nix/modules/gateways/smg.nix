@@ -137,6 +137,8 @@ in
           };
           credentials = util.credentialsOption;
           settings = settingsOption;
+          containerConfig = util.containerConfigOption "SMG";
+          mountOptions.credentials = util.credentialMountOptionsOption "SMG";
         };
       };
       config = lib.mkIf (config.services.llmhop.gateway.type == name) (
@@ -159,6 +161,7 @@ in
               unit
               ;
             inherit (cfg) credentials;
+            credentialMountOptions = cfg.mountOptions.credentials;
             entrypoint = "python3";
             arguments = argv cfg;
             volumes = [

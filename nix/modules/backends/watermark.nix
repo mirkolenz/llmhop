@@ -320,7 +320,7 @@ in
         detector =
           { config, ... }:
           {
-            options = opts.containerOptions "watermark detector" // {
+            options = {
               container = mkOption {
                 type = types.attrs;
                 internal = true;

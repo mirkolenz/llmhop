@@ -334,6 +334,37 @@ rec {
     description = "Container image reference, including a tag or digest.";
   };
 
+  # `[Container]` keys of every container of `noun`, over the generated ones.
+  containerConfigOption =
+    noun:
+    mkOption {
+      type = with types; attrsOf anything;
+      default = { };
+      example = {
+        UserNS = "auto";
+      };
+      description = ''
+        `[Container]` keys of every container of ${noun}, over the generated
+        ones, such as `UserNS=` or `UIDMap=` and `GIDMap=` to run it without
+        host root, or `User=`.
+      '';
+    };
+
+  # Podman volume options of the credential mount of `noun`.
+  credentialMountOptionsOption =
+    noun:
+    mkOption {
+      type = with types; listOf str;
+      default = [ ];
+      example = [ "idmap" ];
+      description = ''
+        Podman volume options of the credential mount of every container of
+        ${noun}, which stays read-only. `idmap` lets a user namespace read the
+        credentials owned by host root, and `idmap=uids=0-<uid>-1;gids=0-<gid>-1`
+        a non-root `User=` in it.
+      '';
+    };
+
   # The image unit `<name>-image` pulling `image`, its claim by `owner`, and
   # the `containerConfig` of a container running it.
   # An archive `image` loads as `tag`, and only a registry reference without

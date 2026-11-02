@@ -37,16 +37,17 @@ let
         directory: options:
         "${directory}:${directory}${util.mountSuffix (options ++ cfg.cache.mountOptions)}";
       cache = cacheMount (shared.cacheDirectory cfg workload) [ ];
+      credentialDirectory = util.containerCredentialDirectory;
       fetch = shared.fetcher {
         inherit
           pkgs
           engine
           cfg
           workload
+          credentialDirectory
           ;
         inherit (engine.quadlet) fetcher;
         server = unit;
-        credentialDirectory = util.containerCredentialDirectory;
       };
       credentials = util.credentialMount workload.mountOptions.credentials;
       # A socket in a mounted directory and, offline, no network, or else
@@ -98,13 +99,18 @@ let
             ++ credentials workload.credentials;
             EnvironmentFile = shared.environmentFiles cfg workload;
             Environment = shared.serverEnvironment {
-              inherit engine cfg workload;
+              inherit
+                engine
+                cfg
+                workload
+                credentialDirectory
+                ;
               inherit (engine.quadlet) environment;
             };
             Exec = lib.escapeShellArgs (
               workload.container.arguments
               ++ util.renderCliArgs engine (
-                util.resolveCredentialRefs util.containerCredentialDirectory workload.credentials workload.settings
+                util.resolveCredentialRefs credentialDirectory workload.credentials workload.settings
               )
             );
           }

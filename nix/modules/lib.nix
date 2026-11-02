@@ -142,7 +142,7 @@ rec {
           ) names) string;
         in
         if lib.hasInfix "\${cred:" resolved then
-          throw "unknown credential reference in `${string}`"
+          throw "services.llmhop: `${string}` references a credential that `credentials` does not declare."
         else
           resolved;
     in
@@ -285,6 +285,10 @@ rec {
       SocketBindDeny = "any";
     };
 
+  # systemd's specifier of `$CREDENTIALS_DIRECTORY`, which it expands in
+  # `Environment=` as well.
+  credentialDirectory = "%d";
+
   # The `ExecStart=` of `command` with every `${cred:…}` resolved to systemd's
   # `%d`. A placeholder survives `utils.escapeSystemdExecArgs`, which would
   # turn `%d` into a literal, and is swapped for it afterwards.
@@ -293,7 +297,7 @@ rec {
     let
       placeholder = "@llmhopCredentialsDirectory@";
     in
-    lib.replaceStrings [ placeholder ] [ "%d" ] (
+    lib.replaceStrings [ placeholder ] [ credentialDirectory ] (
       utils.escapeSystemdExecArgs (resolveCredentialRefs placeholder credentials command)
     );
 

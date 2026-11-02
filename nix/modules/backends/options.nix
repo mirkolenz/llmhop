@@ -79,7 +79,8 @@ rec {
       default = { };
       description = ''
         Environment variables set on every model service, under the
-        `environment` of each model.
+        `environment` of each model, where `''${cred:<name>}` expands to the
+        path of a credential.
       '';
     };
     environmentFile = mkOption {
@@ -269,7 +270,11 @@ rec {
         environment = mkOption {
           type = with types; attrsOf str;
           default = { };
-          description = "Environment variables of this ${noun}'s server, over the backend's `environment`.";
+          description = ''
+            Environment variables of this ${noun}'s server, over the backend's
+            `environment`, where `''${cred:<name>}` expands to the path of a
+            credential.
+          '';
         };
         environmentFile = mkOption {
           type = with types; nullOr path;

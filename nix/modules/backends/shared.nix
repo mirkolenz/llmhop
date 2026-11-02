@@ -179,6 +179,7 @@ rec {
       cfg,
       workload,
       environment,
+      credentialDirectory,
     }:
     let
       cache = cacheDirectory cfg workload;
@@ -203,8 +204,9 @@ rec {
     // engine.environment
     // environment
     // lib.optionalAttrs (!workload.unlisted) distributedEnvironment
-    // cfg.environment
-    // workload.environment;
+    // util.resolveCredentialRefs credentialDirectory workload.credentials (
+      cfg.environment // workload.environment
+    );
 
   # `EnvironmentFile=` layering shared by every workload: the backend-wide file
   # first, so the per-workload one overrides its entries.

@@ -46,7 +46,10 @@ rec {
     environment = mkOption {
       type = with types; attrsOf str;
       default = { };
-      description = "Environment variables of ${displayName}.";
+      description = ''
+        Environment variables of ${displayName}. With `credentials`,
+        `''${cred:<name>}` expands to the path of one of them.
+      '';
     };
     environmentFile = mkOption {
       type = with types; nullOr externalPath;
@@ -99,7 +102,7 @@ rec {
         inherit description;
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ];
-        inherit (cfg) environment;
+        environment = util.resolveCredentialRefs util.credentialDirectory credentials cfg.environment;
         unitConfig = util.startLimitConfig;
         serviceConfig =
           util.hardenedServiceConfig
@@ -158,7 +161,9 @@ rec {
             // imageUnit.containerConfig
             // {
               Network = "host";
-              Environment = cfg.environment // environment;
+              Environment =
+                util.resolveCredentialRefs util.containerCredentialDirectory credentials cfg.environment
+                // environment;
               EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
               Volume = volumes ++ util.credentialMount [ ] credentials;
             }

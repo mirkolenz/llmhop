@@ -65,6 +65,7 @@ let
         server-config = serverConfig;
         "llmhop.hf-token" = null;
       };
+      environment.API_KEY_FILE = "\${cred:api-keys}";
       settings = {
         config = "\${cred:server-config}";
         api-key-file = "\${cred:api-keys}";
@@ -116,6 +117,8 @@ let
           model = "example/test";
           revision = "v1";
           port = 21001;
+          credentials.api-keys = apiKeys;
+          environment.API_KEY_FILE = "\${cred:api-keys}";
         };
         marked = {
           model = "example/marked";
@@ -224,6 +227,10 @@ let
         unknownReference = evaluates (
           util.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"
         );
+        environment = {
+          quadlet = lib.elem ''"API_KEY_FILE=/run/llmhop/credentials/api-keys"'' quadletWorker.containerConfig.Environment;
+          native = nativeWorker.environment.API_KEY_FILE;
+        };
       };
       expected = {
         LoadCredential = [
@@ -236,6 +243,10 @@ let
         invalidName = false;
         storePath = false;
         unknownReference = false;
+        environment = {
+          quadlet = true;
+          native = "%d/api-keys";
+        };
       };
     };
 

@@ -65,10 +65,9 @@ let
           cfg
           workload
           ;
+        inherit (util) credentialDirectory;
         server = unit;
         fetcher = engine.native.fetcher workload.package;
-        # `%d` names the credential directory in `Environment=` too.
-        credentialDirectory = "%d";
       };
       offline = lib.optionalAttrs workload.offline;
       # A socket's own network namespace, or else loopback only, unless
@@ -106,6 +105,7 @@ let
         after = fetcherUnits ++ after;
         environment = shared.serverEnvironment {
           inherit engine cfg workload;
+          inherit (util) credentialDirectory;
           environment = {
             HOME = cache;
           }

@@ -36,14 +36,10 @@ rec {
       environment = mkOption {
         type = with types; attrsOf str;
         default = { };
-        example = {
-          HF_TOKEN_PATH = "\${cred:llmhop.hf-token}";
-          HTTPS_PROXY = "http://proxy.example:3128";
-        };
+        example.HTTPS_PROXY = "http://proxy.example:3128";
         description = ''
-          Environment variables set on every fetcher, such as `HF_TOKEN_PATH`
-          for gated Hugging Face repositories or a proxy. Values may
-          reference `fetch.credentials` as `''${cred:<name>}`.
+          Environment variables set on every fetcher, such as a proxy. Values
+          may reference `fetch.credentials` as `''${cred:<name>}`.
           The servers run offline and never see them.
         '';
       };
@@ -52,8 +48,18 @@ rec {
         default = null;
         description = ''
           File in `KEY=VALUE` format forwarded to every fetcher, for
-          variables that only exist as values, such as `HF_TOKEN` for
-          llama.cpp, which reads no token file.
+          variables that only exist as values.
+        '';
+      };
+      tokenCredential = mkOption {
+        type = with types; nullOr str;
+        default = null;
+        example = "llmhop.hf-token";
+        description = ''
+          Credential holding a Hugging Face token for gated repositories,
+          imported from the system credential store unless
+          `fetch.credentials` names a file for it. Only the fetchers receive
+          it, as `HF_TOKEN`, and skip it while it is missing.
         '';
       };
       credentials = util.credentialsOption // {

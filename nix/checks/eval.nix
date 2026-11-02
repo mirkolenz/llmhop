@@ -104,8 +104,7 @@ let
     vllm = {
       enable = true;
       package = fakeVllm;
-      fetch.credentials."llmhop.hf-token" = null;
-      fetch.environment.HF_TOKEN_PATH = "\${cred:llmhop.hf-token}";
+      fetch.tokenCredential = "llmhop.hf-token";
       models = {
         local = {
           model = "/srv/models/local";
@@ -334,7 +333,10 @@ let
         guarded = containsAll [
           "hub-cache.py load /var/lib/vllm/test-fetch"
         ] nativeWorker.serviceConfig.ExecStartPre;
-        inherit (nativeFetcher.environment) HF_TOKEN_PATH;
+        token = containsAll [
+          ''HF_TOKEN=$(cat "$token")''
+        ] nativeFetcher.serviceConfig.ExecStart.text;
+        inherit (nativeFetcher.serviceConfig) ImportCredential;
         inherit (nativeWorker.environment) HF_HUB_OFFLINE;
         inherit (nativeWorker.serviceConfig) IPAddressDeny ReadOnlyPaths;
         # A local path has nothing to fetch.
@@ -344,7 +346,8 @@ let
       expected = {
         script = true;
         guarded = true;
-        HF_TOKEN_PATH = "%d/llmhop.hf-token";
+        token = true;
+        ImportCredential = [ "llmhop.hf-token" ];
         HF_HUB_OFFLINE = "1";
         IPAddressDeny = "any";
         ReadOnlyPaths = [ "/var/cache/vllm/test/hub" ];

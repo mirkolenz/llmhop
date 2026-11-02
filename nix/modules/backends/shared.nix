@@ -133,8 +133,16 @@ rec {
       }
       // util.resolveCredentialRefs credentialDirectory cfg.fetch.credentials cfg.fetch.environment;
       environmentFile = lib.optional (cfg.fetch.environmentFile != null) cfg.fetch.environmentFile;
+      # The token's value, since llama.cpp reads no token file.
       script =
         "set -e\n"
+        + lib.optionalString (cfg.fetch.tokenCredential != null) ''
+          token="$CREDENTIALS_DIRECTORY"/${lib.escapeShellArg cfg.fetch.tokenCredential}
+          if [ -r "$token" ]; then
+            HF_TOKEN=$(cat "$token")
+            export HF_TOKEN
+          fi
+        ''
         + lib.concatMapStrings (repository: ''
           ${lib.escapeShellArgs (engine.fetch fetcher repository)}
         '') workload.repositories;
@@ -257,6 +265,9 @@ rec {
         lib.optional update { unit."${engine.name}-update" = [ "services.llmhop.${backend}" ]; }
         ++ map workloadClaims workloads
       );
+      services.llmhop.${backend}.fetch.credentials = lib.mkIf (cfg.fetch.tokenCredential != null) {
+        ${cfg.fetch.tokenCredential} = lib.mkDefault null;
+      };
       # Keyed by the unique owner, so a clash of names reaches the claims
       # assertion rather than failing the merge.
       services.llmhop.endpoints = lib.genAttrs' workloads (

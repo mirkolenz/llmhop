@@ -174,7 +174,7 @@ services.llmhop.vllm.models."qwen3-8b" = {
 };
 ```
 
-Only fetchers get the backend's `fetch.credentials` and `fetch.environment`, such as `HF_TOKEN_PATH = "\${cred:llmhop.hf-token}"` for gated repositories, or `fetch.environmentFile` with `HF_TOKEN` for llama.cpp.
+Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the Hugging Face token of gated repositories, which `fetch.tokenCredential = "llmhop.hf-token"` imports for every engine.
 `<engine>-update` reruns every fetcher on `fetch.interval`, daily by default, prunes what the model no longer references, and restarts a server whose download changed.
 An interrupted download leaves the server on its last complete one.
 

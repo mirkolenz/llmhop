@@ -228,7 +228,10 @@ let
           util.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"
         );
         environment = {
-          quadlet = lib.elem ''"API_KEY_FILE=/run/llmhop/credentials/api-keys"'' quadletWorker.containerConfig.Environment;
+          quadlet = lib.all (entry: lib.elem entry quadletWorker.containerConfig.Environment) [
+            ''"API_KEY_FILE=/run/llmhop/credentials/api-keys"''
+            ''"CREDENTIALS_DIRECTORY=/run/llmhop/credentials"''
+          ];
           native = nativeWorker.environment.API_KEY_FILE;
         };
       };

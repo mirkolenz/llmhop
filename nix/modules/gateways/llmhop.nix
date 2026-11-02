@@ -328,9 +328,6 @@ in
               "-config"
               containerConfigFile
             ];
-            environment = lib.optionalAttrs (cfg.credentials != { }) {
-              CREDENTIALS_DIRECTORY = util.containerCredentialDirectory;
-            };
             volumes = [ "${file}:${containerConfigFile}:ro" ];
             # Pairs with the binary's sd_notify call, as natively.
             containerConfig.Notify = true;

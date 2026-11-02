@@ -163,6 +163,7 @@ rec {
               Network = "host";
               Environment =
                 util.resolveCredentialRefs util.containerCredentialDirectory credentials cfg.environment
+                // util.credentialEnvironment credentials
                 // environment;
               EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
               Volume = volumes ++ util.credentialMount [ ] credentials;

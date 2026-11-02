@@ -316,6 +316,11 @@ rec {
     lib.optional (credentials != { })
       "%d:${containerCredentialDirectory}${mountSuffix ([ "ro" ] ++ options)}";
 
+  # The variable naming that mount, which systemd sets natively.
+  credentialEnvironment =
+    credentials:
+    lib.optionalAttrs (credentials != { }) { CREDENTIALS_DIRECTORY = containerCredentialDirectory; };
+
   # Minimal hardening, Podman isolates the rest. The rootfs stays writable,
   # `/tmp` is a tmpfs for fast scratch.
   baseContainerConfig = {

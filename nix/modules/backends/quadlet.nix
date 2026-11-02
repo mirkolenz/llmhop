@@ -98,15 +98,17 @@ let
             ) "${dirOf workload.socket}:${util.containerSocketDirectory}:U"
             ++ credentials workload.credentials;
             EnvironmentFile = shared.environmentFiles cfg workload;
-            Environment = shared.serverEnvironment {
-              inherit
-                engine
-                cfg
-                workload
-                credentialDirectory
-                ;
-              inherit (engine.quadlet) environment;
-            };
+            Environment =
+              shared.serverEnvironment {
+                inherit
+                  engine
+                  cfg
+                  workload
+                  credentialDirectory
+                  ;
+                inherit (engine.quadlet) environment;
+              }
+              // util.credentialEnvironment workload.credentials;
             Exec = lib.escapeShellArgs (
               workload.container.arguments
               ++ util.renderCliArgs engine (
@@ -141,7 +143,7 @@ let
             ]
             ++ credentials cfg.fetch.credentials;
             EnvironmentFile = fetch.environmentFile;
-            Environment = fetch.environment;
+            Environment = fetch.environment // util.credentialEnvironment cfg.fetch.credentials;
           };
       };
     };

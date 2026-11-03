@@ -210,7 +210,7 @@ rec {
   # prunes the hub cache as the cache owner and restarts the server, the one
   # step running as root, with `systemctl` alone.
   #
-  # The update unit `<engine>-update` is the counterpart of
+  # The update unit `<backend>-update` is the counterpart of
   # `podman auto-update` for models: it restarts the fetcher of every
   # workload, each of which restarts its server if the model changed. It
   # exists only with anything to fetch. The fetchers run one at a time in
@@ -294,7 +294,7 @@ rec {
     in
     {
       services.llmhop.claims = lib.mkMerge (
-        lib.optional update { unit."${engine.name}-update" = [ "services.llmhop.${backend}" ]; }
+        lib.optional update { unit."${backend}-update" = [ "services.llmhop.${backend}" ]; }
         ++ map workloadClaims workloads
       );
       services.llmhop.${backend}.fetch.credentials = lib.mkIf (cfg.fetch.tokenCredential != null) {
@@ -335,8 +335,8 @@ rec {
               [ (util.rootDirectoryRule cfg.cache.directory) ]
               ++ map (util.directoryRule cacheOwner "0700") directories
             );
-            services."${engine.name}-update" = lib.mkIf update {
-              description = "Fetch the models of ${engine.name}";
+            services."${backend}-update" = lib.mkIf update {
+              description = "Fetch the models of ${backend}";
               startAt = lib.optional (cfg.fetch.interval != null) cfg.fetch.interval;
               serviceConfig = {
                 Type = "oneshot";

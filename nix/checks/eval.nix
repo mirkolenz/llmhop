@@ -548,8 +548,8 @@ let
         });
       };
       expected = {
-        # The update unit and the port.
-        twins = 2;
+        # The port.
+        twins = 1;
         names = 1;
       };
     };

@@ -71,7 +71,7 @@ Only its `systemctl` step runs as root, and it reads no file.
 
 `huggingface_hub` moves a ref before downloading its snapshot, so an interrupted download leaves the ref on an incomplete snapshot, which an offline server fails to load until the next complete download.
 
-`<engine>-update` restarts every fetcher one at a time in startup order, so the server restarts keep to the startup chain.
+`<backend>-update` restarts every fetcher one at a time in startup order, so the server restarts keep to the startup chain.
 
 ## Claims
 

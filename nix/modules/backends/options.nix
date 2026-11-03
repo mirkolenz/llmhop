@@ -28,8 +28,9 @@ rec {
         default = "daily";
         example = "weekly";
         description = ''
-          `OnCalendar=` schedule of `${engine.name}-update`, which runs every
-          fetcher, so each server whose model changed upstream restarts.
+          `OnCalendar=` schedule of this backend's `<backend>-update`, such
+          as `${engine.name}-update`, which runs every fetcher, so each server
+          whose model changed upstream restarts.
           `null` fetches only when a server starts.
         '';
       };

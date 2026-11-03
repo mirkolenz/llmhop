@@ -60,8 +60,8 @@ runCommand "llmhop-bundle-tests" { } ''
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'PathChanged=/var/cache/vllm/qwen/hub/models--Qwen--Qwen3-8B/snapshots' etc/systemd/system/vllm-qwen-refresh.path
   grep -qE 'Volume=/usr/local/lib/llmhop/[^ ]+-fetch.sh:' etc/containers/systemd/vllm-qwen-fetch.container
-  grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-update.timer
-  grep -q '/usr/bin/systemctl restart vllm-qwen-fetch.service' etc/systemd/system/vllm-update.service
+  grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-quadlet-update.timer
+  grep -q '/usr/bin/systemctl restart vllm-qwen-fetch.service' etc/systemd/system/vllm-quadlet-update.service
   test -f etc/tmpfiles.d/10-llmhop.conf
   grep -qE '^Image=docker-archive:/usr/local/lib/llmhop/[^ ]+\.tar\.gz$' etc/containers/systemd/llmhop.image
   grep -q '^ImageTag=localhost/llmhop:' etc/containers/systemd/llmhop.image

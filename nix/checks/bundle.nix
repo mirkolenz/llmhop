@@ -45,9 +45,12 @@ assert rejects { gateway.type = "llmhop"; };
 runCommand "llmhop-bundle-tests" { } ''
   set -euo pipefail
   cd ${bundle}
-  for file in vllm-qwen.container vllm-qwen-fetch.container vllm-detector.container vllm.image llmhop.container llmhop.image; do
-    test -f etc/containers/systemd/$file
-  done
+  test -f etc/containers/systemd/vllm-qwen.container
+  test -f etc/containers/systemd/vllm-qwen-fetch.container
+  test -f etc/containers/systemd/vllm-detector.container
+  test -f etc/containers/systemd/vllm.image
+  test -f etc/containers/systemd/llmhop.container
+  test -f etc/containers/systemd/llmhop.image
 
   # Every asset a unit references is bundled.
   grep -rhoE '/usr/local/lib/llmhop/[^ :"]+' etc | sort -u | while read -r asset; do

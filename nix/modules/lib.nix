@@ -57,15 +57,17 @@ rec {
       cliValue = value: if lib.isStringLike value then toString value else lib.toJSON value;
       # `false` becomes `--no-<key>` (and `no-<key> = false` becomes `--<key>`)
       # for the parsers that auto-register the negated twin.
-      negate = lib.mapAttrs' (
-        name: value:
-        if value == false then
-          lib.nameValuePair (
-            if lib.hasPrefix "no-" name then lib.removePrefix "no-" name else "no-${name}"
-          ) true
-        else
-          lib.nameValuePair name value
-      );
+      negate =
+        attrs:
+        lib.mapAttrs' (
+          name: value:
+          if value == false then
+            lib.nameValuePair (
+              if lib.hasPrefix "no-" name then lib.removePrefix "no-" name else "no-${name}"
+            ) true
+          else
+            lib.nameValuePair name value
+        ) attrs;
       render =
         name: value:
         if value == null || value == false then
@@ -84,12 +86,9 @@ rec {
             "--${name}"
             (cliValue element)
           ]) value;
+      rendered = if negateBools then negate settings else settings;
     in
-    lib.pipe settings [
-      (if negateBools then negate else lib.id)
-      (lib.mapAttrsToList render)
-      lib.concatLists
-    ];
+    lib.concatLists (lib.mapAttrsToList render rendered);
 
   credentialsOption = mkOption {
     type = with types; attrsOf (nullOr externalPath);
@@ -98,9 +97,11 @@ rec {
     # under `$CREDENTIALS_DIRECTORY`, so anything systemd would reject is
     # caught here.
     apply = lib.mapAttrs (
-      name:
-      lib.throwIfNot (lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}" name != null)
-        "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters."
+      name: source:
+      if lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}" name != null then
+        source
+      else
+        throw "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters."
     );
     example = lib.literalExpression ''
       {

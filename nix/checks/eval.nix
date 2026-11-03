@@ -247,20 +247,16 @@ let
     # namespace, the gateway still as its root.
     testUserNamespace = {
       expr = {
-        backend = map (unit: quadlet.virtualisation.quadlet.containers.${unit}.containerConfig.UserNS) [
-          "vllm-test"
-          "vllm-test-fetch"
-          "vllm-watermark"
-        ];
+        worker = quadletWorker.containerConfig.UserNS;
+        fetcher = quadletFetcher.containerConfig.UserNS;
+        detector = quadletDetector.containerConfig.UserNS;
         inherit (smgQuadlet.containerConfig) UserNS User;
         mount = lib.elem "%d:/run/llmhop/credentials:ro,idmap" smgQuadlet.containerConfig.Volume;
       };
       expected = {
-        backend = [
-          "auto"
-          "auto"
-          "auto"
-        ];
+        worker = "auto";
+        fetcher = "auto";
+        detector = "auto";
         UserNS = "auto";
         User = "0:0";
         mount = true;
@@ -288,10 +284,8 @@ let
           util.resolveCredentialRefs "/run/credentials/test" { } "\${cred:missing}"
         );
         environment = {
-          quadlet = lib.all (entry: lib.elem entry quadletWorker.containerConfig.Environment) [
-            ''"API_KEY_FILE=/run/llmhop/credentials/api-keys"''
-            ''"CREDENTIALS_DIRECTORY=/run/llmhop/credentials"''
-          ];
+          quadletApiKeyFile = lib.elem ''"API_KEY_FILE=/run/llmhop/credentials/api-keys"'' quadletWorker.containerConfig.Environment;
+          quadletCredentialsDirectory = lib.elem ''"CREDENTIALS_DIRECTORY=/run/llmhop/credentials"'' quadletWorker.containerConfig.Environment;
           native = nativeWorker.environment.API_KEY_FILE;
         };
       };
@@ -307,7 +301,8 @@ let
         storePath = false;
         unknownReference = false;
         environment = {
-          quadlet = true;
+          quadletApiKeyFile = true;
+          quadletCredentialsDirectory = true;
           native = "%d/api-keys";
         };
       };

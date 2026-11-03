@@ -111,7 +111,7 @@ def missing(
         results = pool.map(unresolved, (root / lib for lib in checked))
         found = {
             soname: library
-            for library, sonames in zip(checked, results)
+            for library, sonames in zip(checked, results, strict=True)
             for soname in sonames
         }
 

@@ -1,5 +1,5 @@
 # Renders the Quadlet backends and gateway of a system into files for a host
-# without Nix, which needs podman 5, systemd and python3. Every store path the
+# without Nix, which needs podman 5 and systemd. Every store path the
 # units reference moves below `assetDirectory`, except `systemctl`, which maps
 # to the host's own.
 {
@@ -171,7 +171,7 @@ in
       defaultText = lib.literalMD "the bundle of this system's Quadlet backends and gateways";
       description = ''
         The Quadlet backends and gateway of this system as files for a host
-        without Nix, with podman 5, systemd and python3, below the root they
+        without Nix, with podman 5 and systemd, below the root they
         belong to. Its `install.sh` copies them into place and starts them.
         Firewall and user options do not apply there.
       '';

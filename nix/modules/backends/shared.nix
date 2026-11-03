@@ -256,12 +256,11 @@ rec {
           # Only after a complete download.
           requires = fetchServices workload;
           after = fetchServices workload;
-          # A bundle drops this `PATH=` for the host's.
-          path = [ pkgs.python3Minimal ];
           serviceConfig = hubSandbox cacheOwner specification.hub // {
             Type = "oneshot";
             ExecStartPre = utils.escapeSystemdExecArgs [
-              (lib.getExe (pkgs.callPackage ../../pkgs/hub-prune/package.nix { }))
+              (lib.getExe (util.package pkgs))
+              "hub-prune"
               (lib.toJSON specification)
             ];
             # `+` runs them as root outside the sandbox, which `systemctl` needs.

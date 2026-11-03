@@ -144,7 +144,7 @@ in
           }
           // {
             package = lib.mkPackageOption pkgs "llmhop" { } // {
-              default = pkgs.callPackage ../../package.nix { };
+              default = util.package pkgs;
               defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
             };
 
@@ -275,7 +275,7 @@ in
       cfg = config.services.llmhop.gateway.${name};
       # Every endpoint, unlisted ones included, which it reaches on TCP only.
       endpoints = lib.attrValues config.services.llmhop.endpoints;
-      package = pkgs.callPackage ../../package.nix { };
+      package = util.package pkgs;
       file = configFile pkgs package cfg.settings;
       # The image of the binary that validated `file`, unless `image` replaces it.
       archive = pkgs.callPackage ../../docker.nix {

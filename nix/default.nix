@@ -42,7 +42,7 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        inherit (config.legacyPackages) check-elf hub-prune;
+        inherit (config.legacyPackages) check-elf;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs isLinux {

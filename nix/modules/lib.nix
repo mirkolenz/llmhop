@@ -20,6 +20,9 @@ rec {
   # Whether `model` names a repository to fetch rather than a local path.
   isRepository = model: !lib.hasPrefix "/" model;
 
+  # The llmhop package, whose binary also runs the worker commands.
+  package = pkgs: pkgs.callPackage ../package.nix { };
+
   # The curl target of the `/health` of a server listening on `socket`, or else
   # on its bind address, using loopback for wildcard listeners.
   healthTarget =

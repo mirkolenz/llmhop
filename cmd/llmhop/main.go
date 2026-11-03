@@ -20,6 +20,7 @@ import (
 const usage = `usage:
   llmhop serve [-config path]         serve the router
   llmhop check [-config path]         validate the config without serving
+  llmhop hub-prune <specification>    prune the hub cache of a worker
 `
 
 func main() {
@@ -35,6 +36,8 @@ func main() {
 		err = serve(args)
 	case "check":
 		_, _, err = load(name, args, false)
+	case "hub-prune":
+		err = hubPrune(args)
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)

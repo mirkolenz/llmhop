@@ -1,6 +1,6 @@
 # End-to-end test of the module wiring that only a booted system shows: socket
 # activation, credentials, the worker sandbox, readiness and fetching. The
-# router and the hub-prune tool have faster tests of their own.
+# router and the hub cache pruning have faster tests of their own.
 {
   pkgs,
   lib,

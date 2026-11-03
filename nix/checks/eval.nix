@@ -419,7 +419,7 @@ let
         native = {
           inherit (nativeRefresh.serviceConfig) User ReadWritePaths SystemCallFilter;
           inherit (nativeRefresh) requires;
-          prune = containsAll [ "/bin/hub-prune\" " ] nativeRefresh.serviceConfig.ExecStartPre;
+          prune = containsAll [ "/bin/llmhop\" \"hub-prune\" " ] nativeRefresh.serviceConfig.ExecStartPre;
           restart = nativeRefresh.serviceConfig.ExecStart;
         };
         quadlet = quadlet.systemd.services.vllm-test-refresh.serviceConfig.User;

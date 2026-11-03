@@ -220,7 +220,7 @@ Rootful `UserNS=auto` needs subordinate IDs for a `containers` user, which NixOS
 
 #### Hosts without Nix
 
-The Quadlet backends and gateways can be rendered into plain files for any host with podman 5, systemd and python3, such as Ubuntu 25.04:
+The Quadlet backends and gateways can be rendered into plain files for any host with podman 5 and systemd, such as Ubuntu 25.04:
 
 ```nix
 packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.mkQuadletBundle {

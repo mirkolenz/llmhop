@@ -2,10 +2,14 @@
 # rejects what cannot be bundled.
 {
   lib,
+  linkFarm,
   mkQuadletBundle,
   runCommand,
+  writeText,
 }:
 let
+  # A mounted asset of store symlinks, which the bundle must resolve.
+  templates = linkFarm "templates" { "chat.jinja" = writeText "chat.jinja" "{{ messages }}"; };
   config = {
     gateway = {
       type = "llmhop-quadlet";
@@ -18,6 +22,7 @@ let
       enable = true;
       image = "docker.io/vllm/vllm-openai:latest";
       fetch.interval = "weekly";
+      containerConfig.Mount = "type=bind,source=${templates},destination=/templates";
       models.qwen = {
         model = "Qwen/Qwen3-8B";
         port = 8001;
@@ -53,7 +58,7 @@ runCommand "llmhop-bundle-tests" { } ''
   test -f etc/containers/systemd/llmhop.image
 
   # Every asset a unit references is bundled.
-  grep -rhoE '/usr/local/lib/llmhop/[^ :"]+' etc | sort -u | while read -r asset; do
+  grep -rhoE '/usr/local/lib/llmhop/[^ :",]+' etc | sort -u | while read -r asset; do
     test -e ".$asset"
   done
 
@@ -79,8 +84,14 @@ runCommand "llmhop-bundle-tests" { } ''
   if grep -q AutoUpdate etc/containers/systemd/llmhop.container; then
     exit 1
   fi
-  grep -q 'enable --now .*vllm-quadlet-update.timer' install.sh
-  grep -q 'cmp -s etc/containers/systemd/vllm-qwen.container /etc/containers/systemd/vllm-qwen.container || changed="$changed vllm-qwen.service"' install.sh
-  sh -n install.sh
+  grep -qx 'Wants=vllm-quadlet-update.timer' etc/systemd/system/timers.target.d/llmhop.conf
+  grep -q 'start --no-block .*vllm-quadlet-update.timer' install.sh
+  grep -q 'cmp -s etc/containers/systemd/vllm-qwen.container /etc/containers/systemd/vllm-qwen.container || set -- "$@" vllm-qwen.service' install.sh
+  grep -qx vllm-quadlet-update.timer usr/local/lib/llmhop/units
+  grep -qx /etc/systemd/system/timers.target.d/llmhop.conf usr/local/lib/llmhop/files
+  grep -qx /etc/tmpfiles.d/10-llmhop.conf usr/local/lib/llmhop/files
+  test -z "$(find . -type l)"
+  test -x usr/local/lib/llmhop/uninstall.sh
+  test -f usr/local/lib/llmhop/${baseNameOf templates}/chat.jinja
   touch $out
 ''

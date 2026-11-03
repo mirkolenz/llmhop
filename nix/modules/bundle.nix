@@ -82,42 +82,97 @@ let
       plainFile name "timer" {
         Unit.Description = service.description;
         Timer.OnCalendar = service.startAt;
-        Install.WantedBy = "timers.target";
       }
     ) timers;
+  # A drop-in rather than `systemctl enable`, so retiring a timer only
+  # removes files, like it does for Quadlet units.
+  triggersPath = "etc/systemd/system/timers.target.d/llmhop.conf";
+  triggersFile = builtins.toFile "llmhop.conf" (toUnit {
+    Unit.Wants = triggers;
+  });
 
   # The rules of every llmhop setting, as NixOS renders them.
   tmpfiles = lib.findFirst (
     package: package.name == "10-llmhop.conf"
   ) null config.systemd.tmpfiles.packages;
+  tmpfilesPath = "etc/tmpfiles.d/10-llmhop.conf";
 
   files = map quadletFile quadletUnits ++ plainFiles;
 
+  # Every file the bundle installs below `/etc`, by its path there.
+  etcFiles =
+    lib.listToAttrs (
+      map (file: lib.nameValuePair file.path (builtins.toFile (baseNameOf file.path) file.text)) files
+    )
+    // lib.optionalAttrs (tmpfiles != null) {
+      ${tmpfilesPath} = "${tmpfiles}/lib/tmpfiles.d/10-llmhop.conf";
+    }
+    // lib.optionalAttrs (triggers != [ ]) { ${triggersPath} = triggersFile; };
+
+  assetDirectory = lib.escapeShellArg cfg.assetDirectory;
+
+  # The units and files of the installed bundle, by which the next one finds
+  # those it drops.
+  manifests = lib.mapAttrs (name: lines: builtins.toFile name (lib.concatLines lines)) {
+    units = map (file: file.unit) files;
+    files = map (path: "/${path}") (lib.attrNames etcFiles);
+  };
+  manifest = name: lib.escapeShellArg "${cfg.assetDirectory}/${name}";
+  # The lines of the installed manifest `name` missing from the one at
+  # `kept name`, if any is installed.
+  dropped = kept: name: "grep -svxFf ${kept name} ${manifest name}";
+  # Stops the installed units and removes the installed files that the
+  # manifests at `kept` lack. A unit that never loaded, such as one the
+  # generator rejected, does not abort.
+  retire = kept: ''
+    ${dropped kept "units"} | xargs -r systemctl stop || true
+    ${dropped kept "files"} | xargs -r rm -f
+  '';
+
+  # A POSIX shell script for the host, linted at build time.
+  script =
+    name: text:
+    pkgs.writeTextFile {
+      inherit name;
+      text = "#!/bin/sh\nset -eu\n" + text;
+      executable = true;
+      checkPhase = "${lib.getExe pkgs.shellcheck} $target";
+    };
+
   # Restarts every running unit whose file the installation changes, an image
-  # unit with every container requiring it.
-  installScript = ''
-    #!/bin/sh
-    # Installs this bundle, starts its units and restarts those it changed.
-    set -eu
+  # unit with every container requiring it. The units of the previous bundle
+  # that this one drops stop before their files and assets go.
+  installScript = script "install.sh" ''
+    # Installs this bundle, starts its units and restarts those it changed,
+    # collected as the positional parameters.
     cd "$(dirname "$0")"
-    changed=
+    set --
     ${lib.concatMapStrings (bundled: ''
-      cmp -s ${bundled.path} /${bundled.path} || changed="$changed ${bundled.unit}"
+      cmp -s ${lib.escapeShellArg bundled.path} ${lib.escapeShellArg "/${bundled.path}"} || set -- "$@" ${lib.escapeShellArg bundled.unit}
     '') files}
+    ${retire (name: ".${manifest name}")}
     cp -r etc/. /etc/
-    rm -rf ${cfg.assetDirectory}
-    mkdir -p ${cfg.assetDirectory}
-    cp -r .${cfg.assetDirectory}/. ${cfg.assetDirectory}/
+    rm -rf ${assetDirectory}
+    mkdir -p ${assetDirectory}
+    cp -r .${assetDirectory}/. ${assetDirectory}/
     systemctl daemon-reload
-    ${lib.optionalString (tmpfiles != null) "systemd-tmpfiles --create /etc/tmpfiles.d/10-llmhop.conf"}
-    ${lib.optionalString (triggers != [ ]) "systemctl enable --now ${toString triggers}"}
+    ${lib.optionalString (tmpfiles != null) "systemd-tmpfiles --create /${tmpfilesPath}"}
     systemctl start --no-block ${
-      lib.concatMapStringsSep " " (unit: "${unit.serviceName}.service") wantedUnits
+      lib.escapeShellArgs (map (unit: "${unit.serviceName}.service") wantedUnits ++ triggers)
     }
 
-    if [ -n "$changed" ]; then
-      systemctl try-restart --no-block $changed
+    if [ $# -gt 0 ]; then
+      systemctl try-restart --no-block "$@"
     fi
+  '';
+
+  # Installed beside the assets, so it outlives the bundle it came with.
+  uninstallScript = script "uninstall.sh" ''
+    # Stops and removes the installed bundle, but keeps the state directories
+    # its tmpfiles rules created, such as the hub cache.
+    ${retire (_: "/dev/null")}
+    rm -rf ${assetDirectory}
+    systemctl daemon-reload
   '';
 
   native = lib.filter (engine: llmhop.${engine}.enable) (lib.attrNames (import ./engines.nix lib));
@@ -136,16 +191,18 @@ let
       "services.llmhop.bundle:\n${lib.concatMapStringsSep "\n" (error: "- ${error}") errors}"
       (
         pkgs.runCommand "llmhop-bundle" { } ''
-          ${lib.concatMapStrings (file: ''
-            install -Dm644 ${builtins.toFile (baseNameOf file.path) file.text} $out/${file.path}
-          '') files}
-          install -Dm755 ${builtins.toFile "install.sh" installScript} $out/install.sh
-          ${lib.optionalString (tmpfiles != null) ''
-            install -Dm644 ${tmpfiles}/lib/tmpfiles.d/10-llmhop.conf $out/etc/tmpfiles.d/10-llmhop.conf
-          ''}
-          mkdir -p $out${cfg.assetDirectory}
+          install -Dm755 ${installScript} $out/install.sh
+          install -Dm755 ${uninstallScript} $out${assetDirectory}/uninstall.sh
+          ${lib.concatMapAttrsStringSep "\n" (
+            path: source: "install -Dm644 ${source} $out/${lib.escapeShellArg path}"
+          ) etcFiles}
+          ${lib.concatMapAttrsStringSep "\n" (
+            name: source: "install -Dm644 ${source} $out${manifest name}"
+          ) manifests}
+          # Dereferenced, since symlinks such as those of `linkFarm` point
+          # into the store.
           ${lib.concatMapStrings (asset: ''
-            cp -r ${asset} $out${cfg.assetDirectory}/
+            cp -rL ${asset} $out${assetDirectory}/
           '') (lib.unique (lib.concatMap (file: file.assets) files))}
 
           # Every asset must be self-contained. Nix base32 lacks `e`, so the

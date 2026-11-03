@@ -1,6 +1,6 @@
 # End-to-end test of the module wiring that only a booted system shows: socket
 # activation, credentials, the worker sandbox, readiness and fetching. The
-# router and the hub-cache tool have faster tests of their own.
+# router and the hub-prune tool have faster tests of their own.
 {
   pkgs,
   lib,
@@ -51,10 +51,17 @@ let
 
     repo = sys.argv[sys.argv.index("-hf") + 1].split(":")[0]
     cache = pathlib.Path(os.environ["HF_HOME"], "hub", "models--" + repo.replace("/", "--"))
-    (cache / "snapshots" / "a1").mkdir(parents=True)
-    (cache / "snapshots" / "a1" / "model.gguf").write_text("a1")
-    (cache / "refs").mkdir()
-    (cache / "refs" / "main").write_text("a1")
+    request = pathlib.Path(os.environ["HF_HOME"], "request")
+    commit = request.read_text().strip() if request.exists() else "a1"
+    (cache / "snapshots" / commit).mkdir(parents=True, exist_ok=True)
+    (cache / "refs").mkdir(exist_ok=True)
+    # Rewritten on every fetch, as by llama.cpp.
+    (cache / "refs" / "main").write_text(commit)
+
+    if pathlib.Path(os.environ["HF_HOME"], "fail-download").exists():
+        sys.exit(1)
+
+    (cache / "snapshots" / commit / "model.gguf").write_text(commit)
   '';
 
   # Stands in for `llama-server`: binds the unix socket the module renders as
@@ -63,6 +70,7 @@ let
   # check, the credential and the socket permissions under the full sandbox.
   fakeServer = pkgs.writeScriptBin "llama-server" ''
     #!${lib.getExe pkgs.python3Minimal}
+    from contextlib import suppress
     import http.server
     import os
     import pathlib
@@ -72,17 +80,21 @@ let
     if sys.argv[sys.argv.index("--alias") + 1] == "dying":
         sys.exit(1)
 
-    socket = sys.argv[sys.argv.index("--host") + 1]
+    host = sys.argv[sys.argv.index("--host") + 1]
     # Reached through `%d`, so this fails unless systemd expanded it.
-    open(sys.argv[sys.argv.index("--api-key-file") + 1]).read()
+    if "--api-key-file" in sys.argv:
+        open(sys.argv[sys.argv.index("--api-key-file") + 1]).read()
+
     # Served offline from what the fetcher downloaded.
     hub = pathlib.Path(os.environ["HF_HOME"], "hub", "models--example--fake")
-    assert (hub / "snapshots" / "a1" / "model.gguf").read_text() == "a1"
+    commit = (hub / "refs" / "main").read_text().strip()
+    assert (hub / "snapshots" / commit / "model.gguf").read_text() == commit
 
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200 if pathlib.Path("/var/lib/fake-loaded").exists() else 503)
+            loaded = os.environ.get("FAKE_LOADED") == "1" or pathlib.Path("/var/lib/fake-loaded").exists()
+            self.send_response(200 if loaded else 503)
             self.end_headers()
 
         def do_POST(self):
@@ -96,8 +108,33 @@ let
             pass
 
 
-    socketserver.UnixStreamServer(socket, Handler).serve_forever()
+    if host.endswith(".sock"):
+        server = socketserver.UnixStreamServer(host, Handler)
+    else:
+        server = http.server.HTTPServer((host, int(sys.argv[sys.argv.index("--port") + 1])), Handler)
+
+    with server, suppress(KeyboardInterrupt):
+        server.serve_forever()
   '';
+
+  fakeImage = pkgs.dockerTools.buildLayeredImage {
+    name = "fake-llama";
+    tag = "test";
+    maxLayers = 2;
+    contents = [
+      pkgs.bash
+      pkgs.curl
+      (pkgs.runCommand "fake-llama-app" { } ''
+        mkdir -p $out/app
+        ln -s ${lib.getExe fakeDownload} $out/app/llama
+        ln -s ${lib.getExe fakeServer} $out/app/llama-server
+      '')
+    ];
+    config = {
+      Env = [ "PATH=/bin" ];
+      StopSignal = "SIGINT";
+    };
+  };
 in
 testers.nixosTest {
   name = "llmhop";
@@ -163,6 +200,30 @@ testers.nixosTest {
     };
   };
 
+  nodes.containers = {
+    imports = [ self.nixosModules.quadlet ];
+    virtualisation = {
+      diskSize = 4096;
+      quadlet = {
+        enable = true;
+        images.llama-cpp.imageConfig.ImageTag = "localhost/fake-llama:test";
+      };
+    };
+    services.llmhop = {
+      llama-cpp-quadlet = {
+        enable = true;
+        image = "docker-archive:${fakeImage}";
+        containerConfig.AutoUpdate = "disabled";
+        environment.FAKE_LOADED = "1";
+        models.fake-model = {
+          model = "example/fake:Q4_K_M";
+          port = 18081;
+        };
+      };
+      gateway.type = "llmhop-quadlet";
+    };
+  };
+
   testScript = ''
     import json
 
@@ -170,7 +231,11 @@ testers.nixosTest {
         auth = f"-H 'Authorization: Bearer {token}'" if token else ""
         return f"""curl -fsS {auth} --json '{{"model": "fake-model"}}' http://127.0.0.1:8080/"""
 
+    def wait_restarted(node, unit, pid):
+        node.wait_until_succeeds(f"systemctl is-active --quiet {unit} && test $(systemctl show -P MainPID {unit}) != {pid}")
+
     # Type=notify, so the listener is bound once the unit is active.
+    start_all()
     machine.wait_for_unit("llmhop.service")
 
     with subtest("both listeners serve health without a token"):
@@ -186,8 +251,8 @@ testers.nixosTest {
         machine.wait_until_succeeds("systemctl show -P ActiveState llama-cpp-fake-model | grep -qx activating")
         assert machine.get_unit_property("llama-cpp-fake-model-fetch", "Result") == "success"
 
-    with subtest("a new snapshot refreshes the model once its fetch succeeded"):
-        machine.wait_until_succeeds("test $(systemctl show -P ExecMainExitTimestampMonotonic llama-cpp-fake-model-refresh) != 0")
+    with subtest("a successful fetch refreshes before the model starts"):
+        # Ordered before the model, which it found waiting rather than running.
         assert machine.get_unit_property("llama-cpp-fake-model-refresh", "Result") == "success"
 
     with subtest("the unit goes active once the model answers 200"):
@@ -196,6 +261,37 @@ testers.nixosTest {
 
     with subtest("llmhop reaches the worker through its socket"):
         assert machine.succeed(curl("client-secret")) == "socket ok"
+
+    containers.wait_for_unit("llmhop.service")
+    containers.wait_for_unit("llama-cpp-fake-model.service")
+
+    for node, request, backend in [
+        (machine, curl("client-secret"), "llama-cpp"),
+        (containers, curl(), "llama-cpp-quadlet"),
+    ]:
+        worker = "llama-cpp-fake-model"
+        cache = "/var/cache/llama-cpp/fake-model"
+        snapshots = f"{cache}/hub/models--example--fake/snapshots"
+
+        with subtest(f"{node.name}: only a successful resumed download prunes and restarts"):
+            pid = node.get_unit_property(worker, "MainPID")
+            node.succeed(f"echo b2 > {cache}/request; touch {cache}/fail-download")
+            node.fail(f"systemctl restart {worker}-fetch")
+            assert node.get_unit_property(worker, "MainPID") == pid
+            node.succeed(f"test -d {snapshots}/b2; test -f {snapshots}/a1/model.gguf")
+            node.fail(f"test -e {snapshots}/b2/model.gguf")
+
+            node.succeed(f"rm {cache}/fail-download; systemctl restart {worker}-fetch")
+            wait_restarted(node, worker, pid)
+            node.succeed(f"test -f {snapshots}/b2/model.gguf")
+            node.fail(f"test -e {snapshots}/a1")
+            assert node.succeed(request) == "socket ok"
+
+        # Starting the refresh waits for the one the fetch pulled in.
+        with subtest(f"{node.name}: a successful fetch leaves an explicitly stopped worker stopped"):
+            node.succeed(f"systemctl stop {worker}")
+            node.succeed(f"systemctl start {backend}-update; systemctl start {worker}-refresh")
+            assert node.get_unit_property(worker, "ActiveState") == "inactive"
 
     with subtest("readiness probes every worker"):
         machine.fail("curl -fsS http://127.0.0.1:8080/readiness")

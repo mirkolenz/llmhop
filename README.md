@@ -175,8 +175,9 @@ services.llmhop.vllm.models."qwen3-8b" = {
 ```
 
 Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the Hugging Face token of gated repositories, which `fetch.tokenCredential = "llmhop.hf-token"` imports for every engine.
-`<backend>-update`, such as `vllm-update` or `vllm-quadlet-update`, reruns every fetcher on `fetch.interval`, daily by default, prunes what the model no longer references, and restarts a server whose download changed.
-An interrupted download leaves the server on its last complete one.
+`<backend>-update`, such as `vllm-update` or `vllm-quadlet-update`, reruns every fetcher on `fetch.interval`, weekly by default, prunes what the model no longer references, and restarts each running server after a successful fetch, even if its model did not change.
+An interrupted download leaves a running server alone, and a successful retry refreshes it.
+An explicitly stopped server stays stopped.
 
 Servers never download: they get `HF_HUB_OFFLINE`, no DNS, and on a socket no network at all, on a native `port` only loopback.
 `offline = false` lifts the network restrictions for features like media URLs in requests.

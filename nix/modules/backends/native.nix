@@ -57,7 +57,7 @@ let
     let
       inherit (workload) unit;
       cache = shared.cacheDirectory cfg workload;
-      fetch = shared.fetcher {
+      fetch = shared.fetchUnitConfig {
         inherit
           engine
           cfg
@@ -98,7 +98,7 @@ let
           ]
         );
         wantedBy = [ "multi-user.target" ];
-        wants = shared.fetcherUnits workload;
+        wants = shared.fetchServices workload;
         after = shared.fetchOrder workload ++ after;
         environment = shared.serverEnvironment {
           inherit engine cfg workload;
@@ -155,6 +155,7 @@ let
     // lib.optionalAttrs (shared.fetches workload) {
       ${shared.fetchUnit unit} = {
         description = "Fetch the models of ${unit}";
+        inherit (fetch) unitConfig;
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
         environment = fetch.environment // {

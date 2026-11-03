@@ -58,7 +58,7 @@ let
     );
 
   # The plain units beside them, rendered here, since those of NixOS set a
-  # store `PATH=`, and the timers and paths triggering them.
+  # store `PATH=`, and the timers triggering them.
   toUnit = lib.generators.toINI { listsAsDuplicateKeys = true; };
   plainFile =
     name: type: sections:
@@ -68,10 +68,7 @@ let
     name: _: claimed name && !lib.elem name quadletServices
   ) config.systemd.services;
   timers = lib.filterAttrs (_: service: service.startAt != [ ]) services;
-  paths = lib.filterAttrs (name: _: claimed name) config.systemd.paths;
-  triggers =
-    lib.mapAttrsToList (name: _: "${name}.timer") timers
-    ++ lib.mapAttrsToList (name: _: "${name}.path") paths;
+  triggers = lib.mapAttrsToList (name: _: "${name}.timer") timers;
   plainFiles =
     lib.mapAttrsToList (
       name: service:
@@ -87,15 +84,7 @@ let
         Timer.OnCalendar = service.startAt;
         Install.WantedBy = "timers.target";
       }
-    ) timers
-    ++ lib.mapAttrsToList (
-      name: path:
-      plainFile name "path" {
-        Unit = path.unitConfig;
-        Path = path.pathConfig;
-        Install.WantedBy = path.wantedBy;
-      }
-    ) paths;
+    ) timers;
 
   # The rules of every llmhop setting, as NixOS renders them.
   tmpfiles = lib.findFirst (

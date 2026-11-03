@@ -55,10 +55,13 @@ runCommand "llmhop-bundle-tests" { } ''
   done
 
   grep -qx 'WantedBy=multi-user.target' etc/containers/systemd/vllm-qwen.container
-  grep -qE '^ExecStart=\+"/usr/local/lib/llmhop/[^ ]+-hub-cache-[^/]+/bin/hub-cache" "restart" "vllm-qwen"$' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qE '^ExecStartPre="/usr/local/lib/llmhop/[^ ]+-hub-prune-[^/]+/bin/hub-prune" ' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qx 'ExecStart=+-/usr/bin/systemctl reset-failed vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
   ! grep -q PATH= etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
-  grep -qx 'PathChanged=/var/cache/vllm/qwen/hub/models--Qwen--Qwen3-8B/snapshots' etc/systemd/system/vllm-qwen-refresh.path
+  grep -qx 'Wants=vllm-qwen-refresh.service' etc/containers/systemd/vllm-qwen-fetch.container
+  test ! -e etc/systemd/system/vllm-qwen-refresh.path
   grep -qE 'Volume=/usr/local/lib/llmhop/[^ ]+-fetch.sh:' etc/containers/systemd/vllm-qwen-fetch.container
   grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-quadlet-update.timer
   grep -q '/usr/bin/systemctl restart vllm-qwen-fetch.service' etc/systemd/system/vllm-quadlet-update.service
@@ -68,7 +71,7 @@ runCommand "llmhop-bundle-tests" { } ''
   if grep -q AutoUpdate etc/containers/systemd/llmhop.container; then
     exit 1
   fi
-  grep -q 'enable --now .*vllm-qwen-refresh.path' install.sh
+  grep -q 'enable --now .*vllm-quadlet-update.timer' install.sh
   grep -q 'cmp -s etc/containers/systemd/vllm-qwen.container /etc/containers/systemd/vllm-qwen.container || changed="$changed vllm-qwen.service"' install.sh
   sh -n install.sh
   touch $out

@@ -141,6 +141,7 @@ let
   nativeWorker = native.systemd.services.vllm-test;
   nativeFetcher = native.systemd.services.vllm-test-fetch;
   nativeRefresh = native.systemd.services.vllm-test-refresh;
+  systemctl = lib.getExe' native.systemd.package "systemctl";
   nativeDetector = native.systemd.services.vllm-watermark;
 
   # Without a `port`, workers bind a unix socket below a custom root. `b`
@@ -397,26 +398,27 @@ let
     # and runs nothing but `systemctl` as root.
     testRefresh = {
       expr = {
-        hooks =
-          lib.any (unit: unit.serviceConfig ? ExecStartPost || unit.serviceConfig ? ExecStopPost) [
-            nativeFetcher
-            quadletFetcher
-          ]
-          || lib.any (unit: unit.serviceConfig ? ExecStartPre) [
-            nativeWorker
-            quadletWorker
-          ];
+        trigger = {
+          native = nativeFetcher.unitConfig.Wants;
+          quadlet = quadletFetcher.unitConfig.Wants;
+        };
         native = {
           inherit (nativeRefresh.serviceConfig) User ReadWritePaths SystemCallFilter;
           inherit (nativeRefresh) requires;
-          prune = containsAll [ "\"prune\"" ] nativeRefresh.serviceConfig.ExecStartPre;
-          restart = containsAll [ "+\"" "\"restart\" \"vllm-test\"" ] nativeRefresh.serviceConfig.ExecStart;
+          prune = containsAll [ "/bin/hub-prune\" " ] nativeRefresh.serviceConfig.ExecStartPre;
+          restart = nativeRefresh.serviceConfig.ExecStart;
         };
         quadlet = quadlet.systemd.services.vllm-test-refresh.serviceConfig.User;
-        watched = native.systemd.paths.vllm-test-refresh.pathConfig.PathChanged;
+        fetcherLimit = quadletFetcher.unitConfig ? StartLimitIntervalSec;
       };
       expected = {
-        hooks = false;
+        trigger = {
+          native = [
+            "network-online.target"
+            "vllm-test-refresh.service"
+          ];
+          quadlet = [ "vllm-test-refresh.service" ];
+        };
         native = {
           User = "vllm";
           ReadWritePaths = [ "/var/cache/vllm/test/hub" ];
@@ -427,10 +429,13 @@ let
           ];
           requires = [ "vllm-test-fetch.service" ];
           prune = true;
-          restart = true;
+          restart = [
+            "+-${systemctl} reset-failed vllm-test.service"
+            "+${systemctl} try-restart --no-block vllm-test.service"
+          ];
         };
         quadlet = "root";
-        watched = [ "/var/cache/vllm/test/hub/models--example--test/snapshots" ];
+        fetcherLimit = false;
       };
     };
 

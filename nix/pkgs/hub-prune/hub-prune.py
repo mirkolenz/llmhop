@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Prune the hub cache of one worker, or restart its server.
+"""Prune the hub cache of one worker.
 
-Usage: hub-cache prune <specification> | restart <server>
+Usage: hub-prune <specification>
 
 The specification is a JSON object with the `hub` and its `repositories`,
 each with its cache `name` and the `revision` it caches, or null for every
-ref. Neither command keeps any state. `prune` runs as the owner of the hub
-cache, never with more privileges, since the fetcher controls everything in
-it, while `restart` reads no file.
+ref. Everything else is deleted. It keeps no state and runs as the owner of
+the hub cache, never with more privileges, since the fetcher controls
+everything in it.
 """
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 from shutil import rmtree
@@ -85,28 +84,11 @@ def prune(specification: Specification) -> None:
             blob.unlink()
 
 
-def restart(server: str) -> None:
-    """Restart the server after its download changed, or start it if it failed."""
-
-    def systemctl(*args: str) -> int:
-        return subprocess.run(["systemctl", *args, server], check=False).returncode
-
-    # Leaves a stopped server alone.
-    action = "start" if systemctl("is-failed", "--quiet") == 0 else "try-restart"
-    # A planned restart does not count towards the start limit.
-    systemctl("reset-failed")
-
-    if systemctl(action, "--no-block") != 0:
-        sys.exit(f"could not {action} {server}")
-
-
 def main() -> None:
-    """Run the command given on the command line."""
+    """Prune the hub cache of the specification given on the command line."""
     match sys.argv[1:]:
-        case ["prune", specification]:
+        case [specification]:
             prune(json.loads(specification))
-        case ["restart", server]:
-            restart(server)
         case _:
             sys.exit(__doc__)
 

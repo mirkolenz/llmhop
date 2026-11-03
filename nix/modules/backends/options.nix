@@ -25,13 +25,14 @@ rec {
     fetch = {
       interval = mkOption {
         type = with types; nullOr str;
-        default = "daily";
-        example = "weekly";
+        default = "weekly";
+        example = "daily";
         description = ''
           `OnCalendar=` schedule of this backend's `<backend>-update`, such
-          as `${engine.name}-update`, which runs every fetcher, so each server
-          whose model changed upstream restarts.
-          `null` fetches only when a server starts.
+          as `${engine.name}-update`, which runs every fetcher and restarts
+          each running server after a successful fetch, even if its model
+          did not change.
+          `null` disables scheduled fetching.
         '';
       };
       environment = mkOption {

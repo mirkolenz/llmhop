@@ -2,24 +2,16 @@
   lib,
   stdenvNoCC,
   python3Minimal,
-  writeShellScriptBin,
 }:
-let
-  # Only logs the server actions.
-  systemctl = writeShellScriptBin "systemctl" ''
-    [[ $1 == is-failed ]] && exit 1
-    echo "$*" >> "$SYSTEMCTL_LOG"
-  '';
-in
 stdenvNoCC.mkDerivation {
-  pname = "hub-cache";
+  pname = "hub-prune";
   version = "dev";
-  src = ./hub-cache.py;
+  src = ./hub-prune.py;
   dontUnpack = true;
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 $src $out/bin/hub-cache
+    install -Dm755 $src $out/bin/hub-prune
     runHook postInstall
   '';
 
@@ -27,19 +19,15 @@ stdenvNoCC.mkDerivation {
   dontPatchShebangs = true;
 
   doInstallCheck = true;
-  nativeInstallCheckInputs = [
-    python3Minimal
-    systemctl
-  ];
-  # Drives both commands on a fake hub cache.
+  nativeInstallCheckInputs = [ python3Minimal ];
+  # Prunes a fake hub cache.
   installCheckPhase = ''
     runHook preInstallCheck
 
-    export SYSTEMCTL_LOG=$PWD/systemctl.log
     hub=$PWD/hub
     repo=$hub/models--a--b
     spec='{"hub":"'$hub'","repositories":[{"name":"models--a--b","revision":"main"},{"name":"models--c--d","revision":null}]}'
-    run() { python3 $out/bin/hub-cache "$@"; }
+    prune() { python3 $out/bin/hub-prune "$spec"; }
 
     # Downloads `commit` of `repository`, as `hf download` would.
     download() {
@@ -56,7 +44,7 @@ stdenvNoCC.mkDerivation {
     download $hub/models--c--d y1 trunk
     mkdir -p $hub/models--stale/snapshots/s1
 
-    run prune "$spec"
+    prune
     test ! -e $hub/models--stale
     test ! -e $repo/refs/pr -a ! -e $repo/snapshots/p1 -a ! -e $repo/blobs/p1
     test -e $repo/snapshots/a1
@@ -64,22 +52,18 @@ stdenvNoCC.mkDerivation {
 
     # Pruning drops the previous snapshot of a moved ref and its blobs.
     download $repo b2
-    run prune "$spec"
+    prune
     test ! -e $repo/snapshots/a1 -a ! -e $repo/blobs/a1
     test -e $repo/snapshots/b2
-
-    # A running server restarts.
-    run restart server
-    grep -qx "try-restart --no-block server" "$SYSTEMCTL_LOG"
 
     runHook postInstallCheck
   '';
 
   meta = {
-    description = "Prune the hub cache of an llmhop worker and restart its server";
+    description = "Prune the hub cache of an llmhop worker";
     license = lib.licenses.mit;
     maintainers = with lib.maintainers; [ mirkolenz ];
     homepage = "https://github.com/mirkolenz/llmhop";
-    mainProgram = "hub-cache";
+    mainProgram = "hub-prune";
   };
 }

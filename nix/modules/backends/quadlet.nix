@@ -42,7 +42,7 @@ let
         "${directory}:${directory}${util.mountSuffix (options ++ cfg.mountOptions.cache)}";
       cache = cacheMount (shared.cacheDirectory cfg workload) [ ];
       credentialDirectory = util.containerCredentialDirectory;
-      fetch = shared.fetcher {
+      fetch = shared.fetchUnitConfig {
         inherit
           engine
           cfg
@@ -73,7 +73,7 @@ let
         # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
         serviceConfig = shared.serverServiceConfig cfg workload;
         unitConfig = util.startLimitConfig // {
-          Wants = shared.fetcherUnits workload;
+          Wants = shared.fetchServices workload;
           After = shared.fetchOrder workload ++ after;
         };
         containerConfig =
@@ -130,7 +130,7 @@ let
     // lib.optionalAttrs (shared.fetches workload) {
       ${shared.fetchUnit unit} = {
         inherit (fetch) serviceConfig;
-        unitConfig = util.startLimitConfig;
+        unitConfig = fetch.unitConfig;
         containerConfig =
           util.baseContainerConfig
           // image.containerConfig

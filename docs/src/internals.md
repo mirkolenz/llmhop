@@ -57,12 +57,15 @@ Startup is chained by `name`, since two workers profiling GPU memory on one devi
 
 ## Fetching
 
-A fetcher is a oneshot with `RemainAfterExit=`, which its server `Wants=` and is ordered after, but does not `Requires=`, so restarting the fetcher does not restart the server.
+A fetcher is a oneshot with `RemainAfterExit=`, which its server `Wants=` and is ordered after, but does not `Requires=`, so a failed fetch leaves a running server alone.
 It shares its server's identity, so both see the cache under one owner, and every workload has its own cache, so no fetch changes what another server loaded.
+Fetchers keep systemd's default start limit, since they do not restart automatically and may need several manual retries.
 
-A download changes the hub cache by adding a snapshot, and pruning changes it by removing the previous one, so `<unit>-refresh.path` watches the `snapshots` directory of every repository and keeps no state of its own.
-It starts `<unit>-refresh`, which `Requires=` and follows the fetcher, so it only acts on a complete download.
-It prunes the cache to the workload's repositories and revisions, then restarts the server, or starts it if it failed.
+Every start or restart of a fetcher also starts `<unit>-refresh`, which it `Wants=`.
+The refresh unit `Requires=` and follows the fetcher, so it only acts on a complete download.
+It prunes the cache to the workload's repositories and revisions, then restarts the server.
+Telling a changed model from an unchanged one would need state, since a moved ref can leave its previous commit pinned by another revision, so every successful fetch restarts a running server, which the weekly default of `fetch.interval` keeps rare.
+It resets the server's start limit first, so planned restarts do not use it up, and `try-restart` leaves a stopped or failed server down, so a server that hit its start limit waits for a manual start.
 The server starts after it, so a first download finds the server still waiting rather than restarting it.
 
 The fetcher controls everything in the cache, so no command touching it runs with more privileges than the cache owner, or a planted symlink could redirect a privileged write or deletion.
@@ -106,9 +109,9 @@ Native builds check the script against the vLLM environment, while containers ru
 
 ## Bundles
 
-A bundle renders the same units as NixOS and only rewrites their paths: the store path of `systemctl` becomes the host's own, `hub-cache` runs with the `python3` on `PATH`, and every other store path they reference is copied below `bundle.assetDirectory` under its store name.
+A bundle renders the same units as NixOS and only rewrites their paths: the store path of `systemctl` becomes the host's own, `hub-prune` runs with the `python3` on `PATH`, and every other store path they reference is copied below `bundle.assetDirectory` under its store name.
 The build fails if a copied file still references the store, so only self-contained files such as scripts, configs and the llmhop image archive can be bundled.
-The bundle adds the `[Install]` section that quadlet-nix leaves to NixOS, and renders the update and refresh units and their timers and paths itself, since the NixOS ones set a store `PATH=`.
+The bundle adds the `[Install]` section that quadlet-nix leaves to NixOS, and renders the update and refresh units and their timers itself, since the NixOS ones set a store `PATH=`.
 `install.sh` restarts every running unit whose file it changes, so a reinstalled bundle replaces the running deployment, and a changed image unit restarts the containers requiring it.
 
 ## Containers

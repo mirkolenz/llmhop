@@ -5,7 +5,7 @@
 # without a driver stub to link against.
 {
   lib,
-  pkgs,
+  symlinkJoin,
 }:
 {
   # The CUDA packages to merge. No default: which ones a server's JIT path needs
@@ -15,7 +15,7 @@
   packages,
   name ? "cuda-home",
 }:
-pkgs.symlinkJoin {
+symlinkJoin {
   inherit name;
   # `symlinkJoin` links outputs and drops propagation, so every output a package
   # splits its headers and libraries across has to be named rather than reached

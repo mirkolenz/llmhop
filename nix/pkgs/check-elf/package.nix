@@ -4,4 +4,4 @@
   lib,
   writers,
 }:
-writers.writePython3 "check-elf" { } (lib.readFile ./script.py)
+writers.writePython3Bin "check-elf" { } (lib.readFile ./script.py)

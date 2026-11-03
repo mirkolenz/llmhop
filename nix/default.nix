@@ -76,13 +76,18 @@
       # their own args, e.g.
       #   services.llmhop.vllm.package =
       #     inputs.llmhop.legacyPackages.${system}.mkUvEnv { workspaceRoot = ./vllm-env; };
+      # A scope, so every builder may take the others as arguments.
       legacyPackages =
-        lib.packagesFromDirectoryRecursive {
-          callPackage = pkgs.newScope {
+        lib.makeScope pkgs.newScope (
+          self:
+          {
             inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
-          };
-          directory = ./pkgs;
-        }
+          }
+          // lib.packagesFromDirectoryRecursive {
+            inherit (self) callPackage;
+            directory = ./pkgs;
+          }
+        )
         // {
           # A minimal system with Quadlet and llmhop's modules, configured by
           # `modules`, and its Quadlet units as files for a host without Nix,

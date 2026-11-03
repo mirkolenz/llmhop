@@ -3,7 +3,11 @@
 # libraries are resolved from nixpkgs, and unresolvable ones are deferred.
 {
   lib,
-  pkgs,
+  stdenv,
+  callPackage,
+  pythonInterpreters,
+  autoAddDriverRunpath,
+  check-elf,
   uv2nix,
   pyproject-nix,
   pyproject-build-systems,
@@ -63,7 +67,7 @@ let
 
   allowedByLock = pyproject-nix.lib.util.filterPythonInterpreters {
     requires-python = pep440.parseVersionConds uvLock.requires-python;
-    inherit (pkgs) pythonInterpreters;
+    inherit pythonInterpreters;
   };
 
   olderFirst =
@@ -90,18 +94,15 @@ let
   # appearing on an upstream bump, would otherwise silently fail to build.
   lockedNames = map (package: package.name) uvLock.package;
 
-  checkElf = pkgs.callPackage ./check-elf/package.nix { };
-
   # A wheel tagged for any platform carries no host code, but may still ship
   # device code as ELF, such as the thousands of cubins in `flashinfer-cubin`.
   # Each ELF fixup visits every one of them without anything to patch.
-  # `checkElf` below fails on host code in any of them not in `hostWheels`.
+  # `check-elf` below fails on host code in any of them not in `hostWheels`.
   isPureWheel =
     name: attrs: !lib.elem name hostWheels && lib.hasSuffix "-any.whl" (attrs.src.name or "");
 
   hostElfFixups = old: {
-    nativeBuildInputs =
-      (old.nativeBuildInputs or [ ]) ++ [ pkgs.autoAddDriverRunpath ] ++ nativeBuildInputs;
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ autoAddDriverRunpath ] ++ nativeBuildInputs;
     buildInputs = (old.buildInputs or [ ]) ++ buildInputs;
     appendRunpaths = (old.appendRunpaths or [ ]) ++ runtimePaths;
     # Wheels reach their sibling libraries through `$ORIGIN`, and dispatch
@@ -109,7 +110,7 @@ let
     # names them nowhere in the ELF. auto-patchelf rewrites the runpath to
     # absolute store paths and drops those entries unless asked to keep them.
     autoPatchelfFlags = (old.autoPatchelfFlags or [ ]) ++ [ "--preserve-origin" ];
-    # Deferred unconditionally. `checkElf` below judges the assembled
+    # Deferred unconditionally. `check-elf` below judges the assembled
     # environment instead, and fails on every entry left unresolved there.
     autoPatchelfIgnoreMissingDeps = [ "*" ];
   };
@@ -134,18 +135,16 @@ let
       )
     );
 
-  pythonSet =
-    (pkgs.callPackage pyproject-nix.build.packages { python = interpreter; }).overrideScope
-      (
-        lib.composeManyExtensions (
-          [
-            pyproject-build-systems.overlays.wheel
-            projectOverlay
-          ]
-          ++ lib.optional pkgs.stdenv.hostPlatform.isElf wheelOverlay
-          ++ overlays
-        )
-      );
+  pythonSet = (callPackage pyproject-nix.build.packages { python = interpreter; }).overrideScope (
+    lib.composeManyExtensions (
+      [
+        pyproject-build-systems.overlays.wheel
+        projectOverlay
+      ]
+      ++ lib.optional stdenv.hostPlatform.isElf wheelOverlay
+      ++ overlays
+    )
+  );
 
   cudaRuntime = pythonSet."nvidia-cuda-runtime".version or null;
 
@@ -172,7 +171,7 @@ let
       (old: {
         inherit venvIgnoreCollisions;
         postFixup = (old.postFixup or "") + ''
-          ${checkElf} "$out" \
+          ${lib.getExe check-elf} "$out" \
             --drivers ${lib.escapeShellArgs venvDriverLibs} \
             --optional ${lib.escapeShellArgs venvOptionalLibs} \
             --host-wheels ${lib.escapeShellArgs hostWheels}

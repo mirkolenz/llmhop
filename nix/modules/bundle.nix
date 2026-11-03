@@ -148,8 +148,9 @@ let
             cp -r ${asset} $out${cfg.assetDirectory}/
           '') (lib.unique (lib.concatMap (file: file.assets) files))}
 
-          # Every asset must be self-contained.
-          if grep -rlF ${storeDir}/ $out; then
+          # Every asset must be self-contained. Nix base32 lacks `e`, so the
+          # `eeee…` placeholders of `nuke-refs` pass.
+          if grep -rlE '${storeDir}/[0-9a-df-np-sv-z]{32}-' $out; then
             echo "these bundle files still reference the Nix store" >&2
             exit 1
           fi

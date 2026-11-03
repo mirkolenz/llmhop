@@ -1,4 +1,8 @@
-{ buildGoModule, lib }:
+{
+  buildGoModule,
+  lib,
+  nukeReferences,
+}:
 buildGoModule {
   pname = "llmhop";
   version = "dev";
@@ -11,6 +15,13 @@ buildGoModule {
     ];
   };
   vendorHash = null;
+  # Static, so a bundle runs it on any host.
+  env.CGO_ENABLED = 0;
+  # Nixpkgs' Go embeds store paths of optional data files such as tzdata,
+  # which llmhop never reads, so a static binary may reference nothing.
+  nativeBuildInputs = [ nukeReferences ];
+  postFixup = "nuke-refs $out/bin/llmhop";
+  allowedReferences = [ ];
   # The router tests bind loopback listeners.
   __darwinAllowLocalNetworking = true;
   meta = {

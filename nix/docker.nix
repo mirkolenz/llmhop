@@ -2,7 +2,6 @@
 # archive that the llmhop-quadlet gateway loads.
 {
   dockerTools,
-  cacert,
   tzdata,
   lib,
   llmhop,
@@ -11,11 +10,18 @@
 (if stream then dockerTools.streamLayeredImage else dockerTools.buildLayeredImage) {
   name = "llmhop";
   contents = [
-    cacert
+    dockerTools.caCertificates
+    dockerTools.fakeNss
+    llmhop
     tzdata
   ];
   extraCommands = ''
     mkdir -m 1777 tmp
   '';
-  config.Entrypoint = [ (lib.getExe llmhop) ];
+  config = {
+    Entrypoint = [ (lib.getExe llmhop) ];
+    User = "nobody:nobody";
+    # The default port of the config.
+    ExposedPorts."8080/tcp" = { };
+  };
 }

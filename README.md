@@ -242,7 +242,7 @@ packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.
 ```
 
 A NixOS system importing `nixosModules.quadlet` exposes the same as `services.llmhop.bundle.package`.
-The bundle holds the Quadlet files, update timers and tmpfiles rules below `etc/`, the scripts and generated configs below `bundle.assetDirectory`, `/usr/local/lib/llmhop` by default, and an `install.sh` that copies them into place and starts the servers.
+The bundle holds the Quadlet files, update timers and tmpfiles rules below `etc/`, the scripts and generated configs below `bundle.assetDirectory`, `/usr/local/lib/llmhop` by default, and an `install.sh` that copies them into place, starts the servers and restarts every running unit it changed.
 Native backends and gateways cannot be bundled, and firewall and user options have no effect there.
 
 ### Native vLLM and SGLang from prebuilt wheels

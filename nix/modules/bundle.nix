@@ -24,17 +24,17 @@ let
     "/usr/bin/systemctl"
   ];
 
-  # The file `path` of the bundle holding `text` as the host sees it, beside
-  # the store paths it references, which carry the context of `text`, so the
-  # bundle can copy them.
+  # The file `path` of the bundle holding `text` as the host sees it, which
+  # defines `unit`, beside the store paths it references, which carry the
+  # context of `text`, so the bundle can copy them.
   file =
-    path: text:
+    path: unit: text:
     let
       withHostTools = lib.replaceStrings tools hostTools text;
       matches = builtins.split "(${storeDir}/[0-9a-z]{32}-[-.+_?=0-9a-zA-Z]+)" withHostTools;
     in
     {
-      inherit path;
+      inherit path unit;
       text = builtins.unsafeDiscardStringContext (
         lib.replaceStrings [ "${storeDir}/" ] [ "${cfg.assetDirectory}/" ] withHostTools
       );
@@ -55,7 +55,7 @@ let
   # A Quadlet file, installed into the targets that NixOS makes it wanted by.
   quadletFile =
     unit:
-    file "etc/containers/systemd/${unit.ref}" (
+    file "etc/containers/systemd/${unit.ref}" "${unit.serviceName}.service" (
       unit.text
       + lib.optionalString (unit.wantedBy != [ ]) ''
 
@@ -69,7 +69,7 @@ let
   toUnit = lib.generators.toINI { listsAsDuplicateKeys = true; };
   plainFile =
     name: type: sections:
-    file "etc/systemd/system/${name}.${type}" (toUnit sections);
+    file "etc/systemd/system/${name}.${type}" "${name}.${type}" (toUnit sections);
   quadletServices = map (unit: unit.serviceName) quadletUnits;
   services = lib.filterAttrs (
     name: _: claimed name && !lib.elem name quadletServices
@@ -111,11 +111,17 @@ let
 
   files = map quadletFile quadletUnits ++ plainFiles;
 
+  # Restarts every running unit whose file the installation changes, an image
+  # unit with every container requiring it.
   installScript = ''
     #!/bin/sh
-    # Installs this bundle and starts its units.
+    # Installs this bundle, starts its units and restarts those it changed.
     set -eu
     cd "$(dirname "$0")"
+    changed=
+    ${lib.concatMapStrings (bundled: ''
+      cmp -s ${bundled.path} /${bundled.path} || changed="$changed ${bundled.unit}"
+    '') files}
     cp -r etc/. /etc/
     rm -rf ${cfg.assetDirectory}
     mkdir -p ${cfg.assetDirectory}
@@ -126,6 +132,10 @@ let
     systemctl start --no-block ${
       lib.concatMapStringsSep " " (unit: "${unit.serviceName}.service") wantedUnits
     }
+
+    if [ -n "$changed" ]; then
+      systemctl try-restart --no-block $changed
+    fi
   '';
 
   native = lib.filter (engine: llmhop.${engine}.enable) (lib.attrNames (import ./engines.nix lib));

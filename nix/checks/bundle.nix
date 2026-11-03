@@ -68,6 +68,7 @@ runCommand "llmhop-bundle-tests" { } ''
     exit 1
   fi
   grep -q 'enable --now .*vllm-qwen-refresh.path' install.sh
+  grep -q 'cmp -s etc/containers/systemd/vllm-qwen.container /etc/containers/systemd/vllm-qwen.container || changed="$changed vllm-qwen.service"' install.sh
   sh -n install.sh
   touch $out
 ''

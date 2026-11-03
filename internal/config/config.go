@@ -122,8 +122,8 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 
 // validate checks every invariant and expands auth tokens and per-model
 // header values in place, or with load unset only checks their references.
-// Raw references are valid header values, so the same checks serve `-check`
-// runs and startup.
+// Raw references are valid header values, so the same checks serve
+// `llmhop check` and startup.
 func (cfg *Config) validate(load bool) error {
 	if len(cfg.Models) == 0 {
 		return errors.New("no models configured")

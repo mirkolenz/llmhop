@@ -20,6 +20,11 @@
   '';
   config = {
     Entrypoint = [ (lib.getExe llmhop) ];
+    Cmd = [
+      "serve"
+      "-config"
+      "/config.json"
+    ];
     User = "nobody:nobody";
     # The default port of the config.
     ExposedPorts."8080/tcp" = { };

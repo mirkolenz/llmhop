@@ -42,7 +42,7 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-// Loading without expansion backs `llmhop -check`, which validates configs in
+// Loading without expansion backs `llmhop check`, which validates configs in
 // environments where the referenced secrets do not exist.
 func TestLoadKeepsSecretReferences(t *testing.T) {
 	_ = os.Unsetenv("LLMHOP_CFG_MISSING")

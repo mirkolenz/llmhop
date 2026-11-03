@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,36 +17,73 @@ import (
 	"github.com/mirkolenz/llmhop/internal/systemd"
 )
 
-func main() {
-	configPath := flag.String("config", "config.json", "path to JSON config file")
-	check := flag.Bool("check", false, "validate the config and exit without serving")
-	flag.Parse()
+const usage = `usage:
+  llmhop serve [-config path]         serve the router
+  llmhop check [-config path]         validate the config without serving
+`
 
-	// Checking builds the exact same router as serving, so every startup error
-	// short of binding the port surfaces.
-	cfg, err := config.Load(*configPath, !*check)
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+
+	var err error
+
+	switch name, args := os.Args[1], os.Args[2:]; name {
+	case "serve":
+		err = serve(args)
+	case "check":
+		_, _, err = load(name, args, false)
+	default:
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		log.Fatalf("%s: %v", os.Args[1], err)
+	}
+}
+
+// load builds the router of the config that the `-config` flag in args
+// names, expanding its secrets unless only checking. Checking builds the
+// exact same router as serving, so every startup error short of binding the
+// port surfaces.
+func load(name string, args []string, expand bool) (*config.Config, http.Handler, error) {
+	flags := flag.NewFlagSet(name, flag.ExitOnError)
+	configPath := flags.String("config", "config.json", "path to JSON config file")
+	_ = flags.Parse(args)
+
+	cfg, err := config.Load(*configPath, expand)
+	if err != nil {
+		return nil, nil, fmt.Errorf("config: %w", err)
 	}
 
 	handler, err := router.New(cfg)
 	if err != nil {
-		log.Fatalf("router: %v", err)
+		return nil, nil, fmt.Errorf("router: %w", err)
 	}
 
-	if *check {
-		return
+	return cfg, handler, nil
+}
+
+// serve serves the router on the listeners systemd passes, or else on the
+// address of its config, until SIGTERM or an interrupt.
+func serve(args []string) error {
+	cfg, handler, err := load("serve", args, true)
+	if err != nil {
+		return err
 	}
 
 	listeners, err := systemd.Listeners()
 	if err != nil {
-		log.Fatalf("socket activation: %v", err)
+		return fmt.Errorf("socket activation: %w", err)
 	}
 
 	if len(listeners) == 0 {
 		ln, err := net.Listen("tcp", cfg.Listen())
 		if err != nil {
-			log.Fatalf("listen: %v", err)
+			return fmt.Errorf("listen: %w", err)
 		}
 
 		listeners = []net.Listener{ln}
@@ -67,7 +105,7 @@ func main() {
 	defer stop()
 
 	if err := systemd.Ready(); err != nil {
-		log.Fatalf("sd_notify: %v", err)
+		return fmt.Errorf("sd_notify: %w", err)
 	}
 
 	errs := make(chan error, len(listeners))
@@ -78,7 +116,7 @@ func main() {
 
 	select {
 	case err := <-errs:
-		log.Fatal(err)
+		return err
 	case <-ctx.Done():
 	}
 
@@ -88,6 +126,8 @@ func main() {
 
 	// Unbounded on purpose, systemd's TimeoutStopSec caps the drain.
 	if err := srv.Shutdown(context.Background()); err != nil {
-		log.Fatalf("shutdown: %v", err)
+		return fmt.Errorf("shutdown: %w", err)
 	}
+
+	return nil
 }

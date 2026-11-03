@@ -49,7 +49,7 @@ LLMhop sends `READY=1` to systemd once its listeners are bound, and drains in-fl
 A `url` is an absolute `http(s)` URL or `unix:///<socket path>`.
 With `authTokens` set, every route but `/health` and `/readiness` requires a matching bearer token, which is stripped before forwarding.
 A model's `headers` are applied last, so a configured `Authorization` replaces the client's.
-Unknown keys are rejected, and `llmhop --check --config config.json` validates a config without binding a port or expanding secrets.
+Unknown keys are rejected, and `llmhop check -config config.json` validates a config without binding a port or expanding secrets.
 
 ### Secret references
 
@@ -71,9 +71,9 @@ Strings in `authTokens` and `models.*.headers` are expanded at startup, and an u
 ## Running
 
 ```sh
-llmhop --config config.json
-nix run github:mirkolenz/llmhop -- --config config.json
-docker run --rm -p 8080:8080 -v ./config.json:/config.json ghcr.io/mirkolenz/llmhop --config /config.json
+llmhop serve -config config.json
+nix run github:mirkolenz/llmhop -- serve -config config.json
+docker run --rm -p 8080:8080 -v ./config.json:/config.json ghcr.io/mirkolenz/llmhop
 ```
 
 ## NixOS module
@@ -110,7 +110,7 @@ Routed models must stay on loopback and leave authentication to the gateway, and
 Each gateway listens on `127.0.0.1:8080` by default.
 
 - **llmhop** runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container that loads an image archive of the same build, unless `image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
-  Its generated config is validated at build time with `llmhop -check`.
+  Its generated config is validated at build time with `llmhop check`.
   Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
 - **SMG** reads its workers from a generated discovery file. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
 - **Bifrost** gets every model as a key of its `vllm` provider, or `sgl` for SGLang. `settings` is its `config.json`, with secrets as `env.NAME` references loaded from `environmentFile`. The native `package` comes from Bifrost's own flake.

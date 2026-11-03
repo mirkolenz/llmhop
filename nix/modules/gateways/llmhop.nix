@@ -54,7 +54,7 @@ let
     in
     if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
       pkgs.runCommandLocal "llmhop.json" { } ''
-        ${lib.getExe package} -check -config ${file}
+        ${lib.getExe package} check -config ${file}
         cp ${file} $out
       ''
     else
@@ -251,6 +251,7 @@ in
                     Type = "notify";
                     ExecStart = utils.escapeSystemdExecArgs [
                       (lib.getExe cfg.package)
+                      "serve"
                       "-config"
                       (configFile pkgs cfg.package cfg.settings)
                     ];
@@ -331,6 +332,7 @@ in
             image = if cfg.image == null then "docker-archive:${archive}" else cfg.image;
             imageTag = if cfg.image == null then "localhost/llmhop:${archive.imageTag}" else null;
             arguments = [
+              "serve"
               "-config"
               containerConfigFile
             ];

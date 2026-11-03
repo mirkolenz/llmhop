@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -73,4 +74,23 @@ func Parse(raw string) (*Upstream, error) {
 	}
 
 	return nil, fmt.Errorf("url %q must be an absolute http(s) or unix URL", raw)
+}
+
+// Probe sends req and fails unless the backend answers with a 2xx. Redirects
+// are not followed.
+func (u *Upstream) Probe(req *http.Request) error {
+	resp, err := u.Transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+
+	// Draining lets the transport reuse the connection for the next probe.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	_ = resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	return nil
 }

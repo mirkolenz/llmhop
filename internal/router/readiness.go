@@ -2,8 +2,6 @@ package router
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -94,8 +92,7 @@ func (p *prober) result() (int, []byte) {
 	return p.status, p.body
 }
 
-// probe sends GET to the health path of the backend and fails unless it
-// answers with a 2xx. Redirects are not followed. The round is shared by
+// probe sends GET to the health path of the backend. The round is shared by
 // every waiting caller, so no single caller's context bounds it.
 func (b *backend) probe() error {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
@@ -110,18 +107,5 @@ func (b *backend) probe() error {
 	// Host lets the backend URL host apply unless one is configured.
 	b.rewrite(&httputil.ProxyRequest{In: req, Out: req})
 
-	resp, err := b.up.Transport.RoundTrip(req)
-	if err != nil {
-		return err
-	}
-
-	// Draining lets the transport reuse the connection for the next round.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-	_ = resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-
-	return nil
+	return b.up.Probe(req)
 }

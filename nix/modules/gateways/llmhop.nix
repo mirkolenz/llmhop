@@ -76,6 +76,7 @@ in
       inherit (config.services.llmhop) socketDirectory endpoints;
       baseServiceConfig = util.accountServiceConfig cfg;
       tcpListeners = lib.filterAttrs (_: listener: listener.port != null) cfg.listen;
+      socketUnits = lib.mapAttrsToList (listenerName: _: "llmhop-${listenerName}.socket") cfg.listen;
 
       # A `ListenStream=`, which takes IP literals only.
       listenStream =
@@ -228,6 +229,8 @@ in
                 wantedBy = [ "multi-user.target" ];
                 after = [ "network-online.target" ];
                 wants = [ "network-online.target" ];
+                partOf = socketUnits;
+                restartTriggers = [ (lib.toJSON cfg.listen) ];
 
                 unitConfig = util.startLimitConfig;
 
@@ -253,7 +256,7 @@ in
                     ];
                     # The listeners arrive from `llmhop-<name>.socket`, so nothing
                     # is bound here.
-                    Sockets = lib.mapAttrsToList (listenerName: _: "llmhop-${listenerName}.socket") cfg.listen;
+                    Sockets = socketUnits;
                     UMask = "0077";
                     SystemCallFilter = baseServiceConfig.SystemCallFilter ++ [ "~@resources" ];
                   };

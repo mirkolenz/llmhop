@@ -54,6 +54,8 @@ Servers use `Restart = "always"`, since vLLM and SGLang exit 0 after an engine c
 A native server is `Type=exec` with a `postStart` loop that polls `/health` and also watches `$MAINPID`, so a crashed server does not stay `activating` until the timeout.
 Containers use Podman's `Notify=healthy`.
 Startup is chained by `name`, since two workers profiling GPU memory on one device both see it free and run out of memory.
+The native llmhop gateway is `PartOf=` its listeners, so restarting a socket also restarts the gateway that holds it.
+Listener configuration changes also trigger a gateway restart on NixOS.
 
 ## Fetching
 

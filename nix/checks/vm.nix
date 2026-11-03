@@ -246,6 +246,11 @@ testers.nixosTest {
         machine.fail(curl())
         machine.fail(curl("nope"))
 
+    with subtest("restarting a listener reconnects the gateway to its sockets"):
+        machine.succeed("systemctl restart llmhop-default.socket")
+        machine.succeed("curl --max-time 5 -fsS http://127.0.0.1:8080/health")
+        machine.succeed("curl --max-time 5 -fsS --unix-socket /run/llmhop/local.sock http://localhost/health")
+
     with subtest("a loading model holds its unit in activating after its fetch"):
         machine.succeed("systemctl start --no-block llama-cpp-fake-model")
         machine.wait_until_succeeds("systemctl show -P ActiveState llama-cpp-fake-model | grep -qx activating")

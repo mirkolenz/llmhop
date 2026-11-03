@@ -27,8 +27,50 @@ rec {
   # documentation.
   fetches = workload: workload.repositories != [ ];
   fetchUnit = unit: "${unit}-fetch";
-  # The fetcher a server `Wants=` and starts after.
+  refreshUnit = unit: "${unit}-refresh";
+  # The fetcher a server `Wants=`.
   fetcherUnits = workload: lib.optional (fetches workload) "${fetchUnit workload.unit}.service";
+  # The units a server starts after: its fetcher, and the refresh that a
+  # changed download triggers, which thereby finds the server still waiting
+  # rather than restarting it.
+  fetchOrder =
+    workload:
+    fetcherUnits workload ++ lib.optional (fetches workload) "${refreshUnit workload.unit}.service";
+
+  # The hub cache of `workload` and the cache `name` and `revision` of each of
+  # its repositories. huggingface_hub records the default branch as `main`,
+  # while llama.cpp names it after the branch but pins no revision, so null
+  # keeps every ref.
+  hubSpecification = engine: cfg: workload: {
+    hub = hubDirectory cfg workload;
+    repositories = map (repository: {
+      name = "models--${
+        lib.replaceStrings [ "/" ] [ "--" ] (lib.head (lib.splitString ":" repository.repo))
+      }";
+      revision = if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
+    }) workload.repositories;
+  };
+
+  # The argv of `hub-cache.py` with `arguments`.
+  hubCache =
+    pkgs: arguments:
+    [
+      pkgs.python3Minimal.interpreter
+      "${pkgs.callPackage ../../pkgs/hub-cache/package.nix { }}"
+    ]
+    ++ arguments;
+
+  # The sandbox of a unit running as `owner` on the hub cache `hub`, which the
+  # fetcher controls, so it writes nothing else and opens no socket, since
+  # an `owner` that is root could reach systemd or Podman through one.
+  hubSandbox =
+    owner: hub:
+    util.accountServiceConfig owner
+    // {
+      PrivateNetwork = true;
+      SystemCallFilter = util.hardenedServiceConfig.SystemCallFilter ++ [ "~@network-io" ];
+      ReadWritePaths = [ hub ];
+    };
 
   # Enabled workloads of `collection` sorted by ascending `name`, the order
   # servers are emitted and chained in.
@@ -51,82 +93,21 @@ rec {
 
   # The fetcher of `workload`, downloading its repositories with the engine's
   # `fetcher` into its hub cache, with the fetch credentials in
-  # `credentialDirectory`, before the unit `server` starts. See "Fetching" in
-  # the module internals documentation.
-  #
-  # After a complete download, `hub-cache.py` prunes the hub cache
-  # unprivileged and records it with full privileges, since a native fetcher's
-  # user may not manage units, restarting the server on a change. Whenever the
-  # fetcher stops, it points the refs back to the recorded download, which
-  # only an interrupted one changed, and the server starts only from a cache
-  # matching that record.
+  # `credentialDirectory`, before its server starts. See "Fetching" in the
+  # module internals documentation.
   fetcher =
     {
-      pkgs,
       engine,
       cfg,
       workload,
-      server,
       fetcher,
       credentialDirectory,
     }:
-    let
-      # The fingerprint covers it, so a changed one invalidates the cache.
-      # huggingface_hub records the default branch as `main`, while llama.cpp
-      # names it after the branch but pins no revision, so null keeps every ref.
-      specification = lib.toJSON {
-        hub = hubDirectory cfg workload;
-        repositories = map (
-          repository:
-          repository
-          // {
-            name = "models--${
-              lib.replaceStrings [ "/" ] [ "--" ] (lib.head (lib.splitString ":" repository.repo))
-            }";
-            revision = if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
-          }
-        ) workload.repositories;
-      };
-      state = "${engine.name}/${fetchUnit workload.name}";
-      completed = "/var/lib/${state}/completed";
-      # `+` runs a command with full privileges.
-      run =
-        prefix: arguments:
-        prefix
-        + lib.escapeShellArgs (
-          [
-            pkgs.python3Minimal.interpreter
-            "${pkgs.callPackage ../../pkgs/hub-cache/package.nix { }}"
-          ]
-          ++ arguments
-          ++ [ specification ]
-        );
-    in
     {
       serviceConfig = util.credentialServiceConfig cfg.fetch.credentials // {
         Type = "oneshot";
         RemainAfterExit = true;
         TimeoutStartSec = "infinity";
-        StateDirectory = state;
-        StateDirectoryMode = "0700";
-        ExecStartPost = [
-          (run "" [ "prune" ])
-          (run "+" [
-            "apply"
-            server
-            completed
-          ])
-        ];
-        ExecStopPost = run "" [
-          "restore"
-          completed
-        ];
-      };
-      serverServiceConfig = lib.optionalAttrs (fetches workload) {
-        ExecStartPre = run "+" [
-          "load"
-          completed
-        ];
       };
       environment = {
         HF_HOME = cacheDirectory cfg workload;
@@ -227,6 +208,12 @@ rec {
   # their firewall ports, their cache directories owned by `cacheOwner`, the
   # update unit and the claims of all of them.
   #
+  # `<unit>-refresh.path` of a fetching workload starts `<unit>-refresh`
+  # whenever a snapshot of its repositories appears or disappears, which is
+  # how a download changes the hub cache. Once the fetcher succeeded, it
+  # prunes the hub cache as the cache owner and restarts the server, the one
+  # step running as root, with `systemctl` alone.
+  #
   # The update unit `<engine>-update` is the counterpart of
   # `podman auto-update` for models: it restarts the fetcher of every
   # workload, each of which restarts its server if the model changed. It
@@ -236,6 +223,8 @@ rec {
   backendConfig =
     {
       pkgs,
+      utils,
+      systemd,
       engine,
       backend,
       cfg,
@@ -243,6 +232,7 @@ rec {
       workloads,
     }:
     let
+      fetching = lib.filter fetches workloads;
       fetchers = lib.concatMap fetcherUnits workloads;
       update = fetchers != [ ];
       directories = lib.concatMap (w: [ (cacheDirectory cfg w) ] ++ hubDirectories cfg w) workloads;
@@ -254,10 +244,54 @@ rec {
           unit = {
             ${workload.unit} = [ workload.owner ];
           }
-          // lib.optionalAttrs (fetches workload) { ${fetchUnit workload.unit} = [ workload.owner ]; };
+          // lib.optionalAttrs (fetches workload) {
+            ${fetchUnit workload.unit} = [ workload.owner ];
+            ${refreshUnit workload.unit} = [ workload.owner ];
+          };
         }
         // lib.optionalAttrs (workload.port != null) {
           port.${toString workload.port} = [ workload.owner ];
+        };
+      # The refresh unit of a fetching workload and the path unit starting it.
+      refreshUnits =
+        workload:
+        let
+          name = refreshUnit workload.unit;
+          specification = hubSpecification engine cfg workload;
+          fetcher = fetcherUnits workload;
+        in
+        {
+          paths.${name} = {
+            description = "Watch the snapshots of ${workload.unit}";
+            wantedBy = [ "paths.target" ];
+            pathConfig.PathChanged = lib.unique (
+              map (repository: "${specification.hub}/${repository.name}/snapshots") specification.repositories
+            );
+          };
+          services.${name} = {
+            description = "Refresh ${workload.unit} from a changed download";
+            # Only after a complete download.
+            requires = fetcher;
+            after = fetcher;
+            serviceConfig = hubSandbox cacheOwner specification.hub // {
+              Type = "oneshot";
+              ExecStartPre = utils.escapeSystemdExecArgs (
+                hubCache pkgs [
+                  "prune"
+                  (lib.toJSON specification)
+                ]
+              );
+              # `+` runs it as root outside the sandbox, which `systemctl` needs.
+              ExecStart =
+                "+"
+                + utils.escapeSystemdExecArgs (
+                  hubCache pkgs [
+                    "restart"
+                    workload.unit
+                  ]
+                );
+            };
+          };
         };
     in
     {
@@ -292,19 +326,27 @@ rec {
       networking.firewall.allowedTCPPorts = map (w: w.port) (
         lib.filter (w: w.socket == null && w.openFirewall) workloads
       );
-      # A native backend and its Quadlet twin may share the root, since every
-      # workload owns its own directory. Every rule of llmhop shares one file.
-      systemd.tmpfiles.settings."10-llmhop" = lib.mkMerge (
-        [ (util.rootDirectoryRule cfg.cache.directory) ]
-        ++ map (util.directoryRule cacheOwner "0700") directories
+      systemd = lib.mkMerge (
+        map refreshUnits fetching
+        ++ [
+          {
+            # A native backend and its Quadlet twin may share the root, since
+            # every workload owns its own directory. Every rule of llmhop
+            # shares one file.
+            tmpfiles.settings."10-llmhop" = lib.mkMerge (
+              [ (util.rootDirectoryRule cfg.cache.directory) ]
+              ++ map (util.directoryRule cacheOwner "0700") directories
+            );
+            services."${engine.name}-update" = lib.mkIf update {
+              description = "Fetch the models of ${engine.name}";
+              startAt = lib.optional (cfg.fetch.interval != null) cfg.fetch.interval;
+              serviceConfig = {
+                Type = "oneshot";
+                ExecStart = map (fetcher: "-${lib.getExe' systemd "systemctl"} restart ${fetcher}") fetchers;
+              };
+            };
+          }
+        ]
       );
-      systemd.services."${engine.name}-update" = lib.mkIf update {
-        description = "Fetch the models of ${engine.name}";
-        startAt = lib.optional (cfg.fetch.interval != null) cfg.fetch.interval;
-        serviceConfig = {
-          Type = "oneshot";
-          ExecStart = map (fetcher: "-${lib.getExe' pkgs.systemd "systemctl"} restart ${fetcher}") fetchers;
-        };
-      };
     };
 }

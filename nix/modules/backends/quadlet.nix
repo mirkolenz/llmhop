@@ -3,7 +3,12 @@
 # `container`, an `entrypoint` with `arguments` followed by its settings and
 # further `mounts`, in the backend's image beside its fetcher.
 lib: name:
-{ config, pkgs, ... }:
+{
+  config,
+  pkgs,
+  utils,
+  ...
+}:
 let
   inherit (lib) mkOption types;
   util = import ../lib.nix lib;
@@ -31,7 +36,6 @@ let
     workload: after:
     let
       inherit (workload) unit;
-      fetcherUnits = shared.fetcherUnits workload;
       # A host directory mounted at the same path.
       cacheMount =
         directory: options:
@@ -40,14 +44,12 @@ let
       credentialDirectory = util.containerCredentialDirectory;
       fetch = shared.fetcher {
         inherit
-          pkgs
           engine
           cfg
           workload
           credentialDirectory
           ;
         inherit (engine.quadlet) fetcher;
-        server = unit;
       };
       credentials = util.credentialMount cfg.mountOptions.credentials;
       # A socket in a mounted directory and, offline, no network, or else
@@ -69,10 +71,10 @@ let
     {
       ${unit} = {
         # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
-        serviceConfig = shared.serverServiceConfig cfg workload // fetch.serverServiceConfig;
+        serviceConfig = shared.serverServiceConfig cfg workload;
         unitConfig = util.startLimitConfig // {
-          Wants = fetcherUnits;
-          After = fetcherUnits ++ after;
+          Wants = shared.fetcherUnits workload;
+          After = shared.fetchOrder workload ++ after;
         };
         containerConfig =
           util.baseContainerConfig
@@ -294,7 +296,8 @@ in
           cfg
           workloads
           ;
-        inherit pkgs;
+        inherit pkgs utils;
+        systemd = config.systemd.package;
         cacheOwner = cfg.cache;
       })
     ]

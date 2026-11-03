@@ -98,6 +98,7 @@ let
   quadletWorker = quadlet.virtualisation.quadlet.containers.vllm-test;
   quadletMarked = quadlet.virtualisation.quadlet.containers.vllm-marked;
   quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-watermark;
+  quadletFetcher = quadlet.virtualisation.quadlet.containers.vllm-test-fetch;
 
   # The VM test covers the native llama.cpp path end to end.
   native = mkSystem {
@@ -139,6 +140,7 @@ let
   };
   nativeWorker = native.systemd.services.vllm-test;
   nativeFetcher = native.systemd.services.vllm-test-fetch;
+  nativeRefresh = native.systemd.services.vllm-test-refresh;
   nativeDetector = native.systemd.services.vllm-watermark;
 
   # Without a `port`, workers bind a unix socket below a custom root. `b`
@@ -369,9 +371,6 @@ let
         script = containsAll [
           "/bin/hf download example/test --revision v1"
         ] nativeFetcher.serviceConfig.ExecStart.text;
-        guarded = containsAll [
-          "hub-cache.py load /var/lib/vllm/test-fetch"
-        ] nativeWorker.serviceConfig.ExecStartPre;
         token = containsAll [
           ''HF_TOKEN=$(cat "$token")''
         ] nativeFetcher.serviceConfig.ExecStart.text;
@@ -384,7 +383,6 @@ let
       };
       expected = {
         script = true;
-        guarded = true;
         token = true;
         ImportCredential = [ "llmhop.hf-token" ];
         HF_HUB_OFFLINE = "1";
@@ -392,6 +390,47 @@ let
         ReadOnlyPaths = [ "/var/cache/vllm/test/hub" ];
         local = false;
         Wants = [ "vllm-test-fetch.service" ];
+      };
+    };
+
+    # Only the refresh unit touches a hub cache once fetched, as its owner,
+    # and runs nothing but `systemctl` as root.
+    testRefresh = {
+      expr = {
+        hooks =
+          lib.any (unit: unit.serviceConfig ? ExecStartPost || unit.serviceConfig ? ExecStopPost) [
+            nativeFetcher
+            quadletFetcher
+          ]
+          || lib.any (unit: unit.serviceConfig ? ExecStartPre) [
+            nativeWorker
+            quadletWorker
+          ];
+        native = {
+          inherit (nativeRefresh.serviceConfig) User ReadWritePaths SystemCallFilter;
+          inherit (nativeRefresh) requires;
+          prune = containsAll [ "\"prune\"" ] nativeRefresh.serviceConfig.ExecStartPre;
+          restart = containsAll [ "+\"" "\"restart\" \"vllm-test\"" ] nativeRefresh.serviceConfig.ExecStart;
+        };
+        quadlet = quadlet.systemd.services.vllm-test-refresh.serviceConfig.User;
+        watched = native.systemd.paths.vllm-test-refresh.pathConfig.PathChanged;
+      };
+      expected = {
+        hooks = false;
+        native = {
+          User = "vllm";
+          ReadWritePaths = [ "/var/cache/vllm/test/hub" ];
+          SystemCallFilter = [
+            "@system-service"
+            "~@privileged"
+            "~@network-io"
+          ];
+          requires = [ "vllm-test-fetch.service" ];
+          prune = true;
+          restart = true;
+        };
+        quadlet = "root";
+        watched = [ "/var/cache/vllm/test/hub/models--example--test/snapshots" ];
       };
     };
 
@@ -426,6 +465,7 @@ let
         mount = true;
         after = [
           "llama-cpp-b-fetch.service"
+          "llama-cpp-b-refresh.service"
           "llama-cpp-a.service"
         ];
       };

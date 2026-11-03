@@ -9,6 +9,30 @@
   ...
 }:
 let
+  shared = import ../modules/backends/shared.nix lib;
+
+  # Exits 0 only if it can write `/srv/writable`, but neither `/etc` nor the
+  # private socket of systemd, through which root could escape.
+  jailProbe = pkgs.writeScript "jail-probe" ''
+    #!${lib.getExe pkgs.python3Minimal}
+    import pathlib
+    import socket
+
+    pathlib.Path("/srv/writable/probe").write_text("ok")
+
+    try:
+        pathlib.Path("/etc/probe").write_text("escaped")
+        raise SystemExit("wrote /etc")
+    except OSError:
+        pass
+
+    try:
+        socket.socket(socket.AF_UNIX).connect("/run/systemd/private")
+        raise SystemExit("reached systemd")
+    except OSError:
+        pass
+  '';
+
   # Root-only copies outside the Nix store, as credentials are deployed:
   # llmhop imports its own from the system credential store by name, the
   # worker loads its key from a path.
@@ -86,8 +110,19 @@ testers.nixosTest {
       "llmhop/worker-key" = secretFile "worker-secret";
     };
 
+    systemd.tmpfiles.rules = [ "d /srv/writable 0700 root root" ];
+
     # Started by hand, so the test controls when they load.
     systemd.services = {
+      jail-probe.serviceConfig =
+        shared.hubSandbox {
+          user = "root";
+          group = "root";
+        } "/srv/writable"
+        // {
+          Type = "oneshot";
+          ExecStart = jailProbe;
+        };
       llama-cpp-fake-model.wantedBy = lib.mkForce [ ];
       llama-cpp-dying = {
         wantedBy = lib.mkForce [ ];
@@ -151,6 +186,10 @@ testers.nixosTest {
         machine.wait_until_succeeds("systemctl show -P ActiveState llama-cpp-fake-model | grep -qx activating")
         assert machine.get_unit_property("llama-cpp-fake-model-fetch", "Result") == "success"
 
+    with subtest("a new snapshot refreshes the model once its fetch succeeded"):
+        machine.wait_until_succeeds("test $(systemctl show -P ExecMainExitTimestampMonotonic llama-cpp-fake-model-refresh) != 0")
+        assert machine.get_unit_property("llama-cpp-fake-model-refresh", "Result") == "success"
+
     with subtest("the unit goes active once the model answers 200"):
         machine.succeed("touch /var/lib/fake-loaded")
         machine.wait_for_unit("llama-cpp-fake-model.service")
@@ -160,6 +199,11 @@ testers.nixosTest {
 
     with subtest("readiness probes every worker"):
         machine.fail("curl -fsS http://127.0.0.1:8080/readiness")
+
+    with subtest("the hub sandbox lets even root write only the hub and reach no socket"):
+        machine.succeed("systemctl start jail-probe")
+        machine.succeed("test -f /srv/writable/probe")
+        machine.fail("test -e /etc/probe")
 
     with subtest("a model that dies while loading fails its unit at once"):
         machine.fail("timeout 60 systemctl start llama-cpp-dying")

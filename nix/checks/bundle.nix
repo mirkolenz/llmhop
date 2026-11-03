@@ -55,7 +55,9 @@ runCommand "llmhop-bundle-tests" { } ''
   done
 
   grep -qx 'WantedBy=multi-user.target' etc/containers/systemd/vllm-qwen.container
-  grep -qE '/usr/bin/python3 /usr/local/lib/llmhop/[^ ]+-hub-cache.py load' etc/containers/systemd/vllm-qwen.container
+  grep -qE '^ExecStart=\+"/usr/bin/python3" "/usr/local/lib/llmhop/[^ ]+-hub-cache.py" "restart" "vllm-qwen"$' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qx 'PathChanged=/var/cache/vllm/qwen/hub/models--Qwen--Qwen3-8B/snapshots' etc/systemd/system/vllm-qwen-refresh.path
   grep -qE 'Volume=/usr/local/lib/llmhop/[^ ]+-fetch.sh:' etc/containers/systemd/vllm-qwen-fetch.container
   grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-update.timer
   grep -q '/usr/bin/systemctl restart vllm-qwen-fetch.service' etc/systemd/system/vllm-update.service
@@ -65,6 +67,7 @@ runCommand "llmhop-bundle-tests" { } ''
   if grep -q AutoUpdate etc/containers/systemd/llmhop.container; then
     exit 1
   fi
+  grep -q 'enable --now .*vllm-qwen-refresh.path' install.sh
   sh -n install.sh
   touch $out
 ''

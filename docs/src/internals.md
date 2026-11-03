@@ -60,9 +60,16 @@ Startup is chained by `name`, since two workers profiling GPU memory on one devi
 A fetcher is a oneshot with `RemainAfterExit=`, which its server `Wants=` and is ordered after, but does not `Requires=`, so restarting the fetcher does not restart the server.
 It shares its server's identity, so both see the cache under one owner, and every workload has its own cache, so no fetch changes what another server loaded.
 
-After a complete download, the fetcher prunes the cache to the workload's repositories and revisions, as its own user so a planted symlink cannot redirect a privileged deletion.
-It then records the refs and a fingerprint of their snapshots in `/var/lib/<engine>/<name>-fetch`, and with full privileges restarts the server if the fingerprint changed or starts it if it failed.
-`huggingface_hub` updates a ref before downloading its snapshot, so whenever the fetcher stops, it points the refs back to the recorded download, and the server refuses to start from a cache that does not match the record.
+A download changes the hub cache by adding a snapshot, and pruning changes it by removing the previous one, so `<unit>-refresh.path` watches the `snapshots` directory of every repository and keeps no state of its own.
+It starts `<unit>-refresh`, which `Requires=` and follows the fetcher, so it only acts on a complete download.
+It prunes the cache to the workload's repositories and revisions, then restarts the server, or starts it if it failed.
+The server starts after it, so a first download finds the server still waiting rather than restarting it.
+
+The fetcher controls everything in the cache, so no command touching it runs with more privileges than the cache owner, or a planted symlink could redirect a privileged write or deletion.
+The refresh unit prunes as `user`, or `cache.user` for Quadlet, writing only the hub cache and opening no socket, since a root owner could otherwise reach systemd or Podman.
+Only its `systemctl` step runs as root, and it reads no file.
+
+`huggingface_hub` moves a ref before downloading its snapshot, so an interrupted download leaves the ref on an incomplete snapshot, which an offline server fails to load until the next complete download.
 
 `<engine>-update` restarts every fetcher one at a time in startup order, so the server restarts keep to the startup chain.
 
@@ -101,7 +108,7 @@ Native builds check the script against the vLLM environment, while containers ru
 
 A bundle renders the same units as NixOS and only rewrites their paths: the store paths of Python and `systemctl` become the host's own, and every other store path they reference is copied below `bundle.assetDirectory` under its store name.
 The build fails if a copied file still references the store, so only self-contained files such as scripts, configs and the llmhop image archive can be bundled.
-The bundle adds the `[Install]` section that quadlet-nix leaves to NixOS, and renders the update units itself, since the NixOS ones set a store `PATH=`.
+The bundle adds the `[Install]` section that quadlet-nix leaves to NixOS, and renders the update and refresh units and their timers and paths itself, since the NixOS ones set a store `PATH=`.
 
 ## Containers
 

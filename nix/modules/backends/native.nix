@@ -57,16 +57,13 @@ let
     let
       inherit (workload) unit;
       cache = shared.cacheDirectory cfg workload;
-      fetcherUnits = shared.fetcherUnits workload;
       fetch = shared.fetcher {
         inherit
-          pkgs
           engine
           cfg
           workload
           ;
         inherit (util) credentialDirectory;
-        server = unit;
         fetcher = engine.native.fetcher workload.package;
       };
       offline = lib.optionalAttrs workload.offline;
@@ -101,8 +98,8 @@ let
           ]
         );
         wantedBy = [ "multi-user.target" ];
-        wants = fetcherUnits;
-        after = fetcherUnits ++ after;
+        wants = shared.fetcherUnits workload;
+        after = shared.fetchOrder workload ++ after;
         environment = shared.serverEnvironment {
           inherit engine cfg workload;
           inherit (util) credentialDirectory;
@@ -130,7 +127,6 @@ let
         unitConfig = util.startLimitConfig;
         serviceConfig =
           shared.serverServiceConfig cfg workload
-          // fetch.serverServiceConfig
           # Its group owns the worker socket, which every client joins.
           // util.accountServiceConfig cfg
           // {
@@ -266,8 +262,10 @@ in
         );
       }
       (shared.backendConfig {
+        systemd = config.systemd.package;
         inherit
           pkgs
+          utils
           engine
           cfg
           workloads

@@ -1,15 +1,14 @@
-"""Prune, record, restore and validate the hub cache of one worker.
+"""Prune the hub cache of one worker, or restart its server.
 
-Usage: hub-cache.py prune | restore <completed> | load <completed>
-| apply <server> <completed>, followed by the specification.
+Usage: hub-cache.py prune <specification> | restart <server>
 
 The specification is a JSON object with the `hub` and its `repositories`,
 each with its cache `name` and the `revision` it caches, or null for every
-ref. The last complete download is recorded in the `completed` file in the
-state directory of the fetcher.
+ref. Neither command keeps any state. `prune` runs as the owner of the hub
+cache, never with more privileges, since the fetcher controls everything in
+it, while `restart` reads no file.
 """
 
-import hashlib
 import json
 import subprocess
 import sys
@@ -34,30 +33,13 @@ class Specification(TypedDict):
     repositories: list[Repository]
 
 
-class Download(TypedDict):
-    """The record of a complete download."""
-
-    specification: Specification
-    fingerprint: str
-    refs: dict[str, str]
-
-
-def resolve(repo: Path, revision: str | None) -> tuple[dict[Path, str], set[str]]:
-    """Return the refs naming `revision` in `repo`, or every ref without one,
-    with their commits, and the commits of `revision`, which names a commit
-    if no ref does."""
-    if revision is None:
-        paths = sorted(ref for ref in (repo / "refs").rglob("*") if ref.is_file())
-    else:
-        ref = repo / "refs" / revision
-        paths = [ref] if ref.is_file() else []
-
-    refs = {ref: ref.read_text().strip() for ref in paths}
-
-    if revision is not None and not refs:
-        return refs, {revision}
-
-    return refs, set(refs.values())
+def refs(repo: Path) -> dict[Path, str]:
+    """Return every ref of `repo` with its commit."""
+    return {
+        ref: ref.read_text().strip()
+        for ref in (repo / "refs").rglob("*")
+        if ref.is_file()
+    }
 
 
 def prune(specification: Specification) -> None:
@@ -74,16 +56,16 @@ def prune(specification: Specification) -> None:
             rmtree(hub / ".locks" / repo.name, ignore_errors=True)
             continue
 
-        kept: set[Path] = set()
-        commits: set[str] = set()
+        wanted = revisions[repo.name]
+        # A revision without a ref names a commit.
+        commits = {revision for revision in wanted if revision is not None}
 
-        for revision in revisions[repo.name]:
-            refs, revision_commits = resolve(repo, revision)
-            kept |= refs.keys()
-            commits |= revision_commits
+        for ref, commit in refs(repo).items():
+            name = str(ref.relative_to(repo / "refs"))
 
-        for ref in resolve(repo, None)[0]:
-            if ref not in kept:
+            if None in wanted or name in wanted:
+                commits.add(commit)
+            else:
                 ref.unlink()
 
         for snapshot in repo.glob("snapshots/*"):
@@ -102,102 +84,14 @@ def prune(specification: Specification) -> None:
             blob.unlink()
 
 
-def record(specification: Specification) -> Download:
-    """Record the refs of the specification and fingerprint the files they name."""
-    hub = Path(specification["hub"])
-    refs: dict[str, str] = {}
-    files: list[tuple[str, str, int]] = []
-
-    for repository in specification["repositories"]:
-        repo = hub / repository["name"]
-        resolved, commits = resolve(repo, repository["revision"])
-
-        if repository["revision"] is None and not resolved:
-            raise FileNotFoundError(f"no cached refs in {repo}")
-
-        refs |= {str(ref): commit for ref, commit in resolved.items()}
-
-        for commit in sorted(commits):
-            snapshot = repo / "snapshots" / commit
-            paths = sorted(path for path in snapshot.rglob("*") if not path.is_dir())
-
-            if not paths:
-                raise FileNotFoundError(f"no cached files in {snapshot}")
-
-            files.extend(
-                (
-                    str(path),
-                    str(path.readlink()) if path.is_symlink() else "",
-                    path.stat().st_size,
-                )
-                for path in paths
-            )
-
-    content = json.dumps((specification, refs, files), sort_keys=True)
-    return {
-        "specification": specification,
-        "fingerprint": hashlib.sha256(content.encode()).hexdigest(),
-        "refs": refs,
-    }
-
-
-def read(completed: Path) -> Download | None:
-    """Return the recorded download, if any."""
-    return json.loads(completed.read_text()) if completed.exists() else None
-
-
-def restore(specification: Specification, completed: Path) -> None:
-    """Point the refs back to the last complete download of the specification."""
-    recorded = read(completed)
-
-    if recorded is None or recorded["specification"] != specification:
-        return
-
-    hub = Path(specification["hub"])
-
-    for repository in specification["repositories"]:
-        for ref in resolve(hub / repository["name"], repository["revision"])[0]:
-            if str(ref) not in recorded["refs"]:
-                ref.unlink()
-
-    for ref, commit in recorded["refs"].items():
-        Path(ref).write_text(commit)
-
-
-def load(specification: Specification, completed: Path) -> None:
-    """Fail unless the cache matches the last complete download."""
-    recorded = read(completed)
-
-    try:
-        current = record(specification)
-    except FileNotFoundError as error:
-        sys.exit(f"cache does not match a completed download: {error}")
-
-    if recorded is None or recorded["fingerprint"] != current["fingerprint"]:
-        sys.exit("cache does not match a completed download")
-
-
-def apply(specification: Specification, server: str, completed: Path) -> None:
-    """Record a complete download and restart or start the server."""
-    previous = read(completed)
-    current = record(specification)
-    temporary = completed.with_suffix(".tmp")
-    temporary.write_text(json.dumps(current))
-    # Readable by the fetcher's own `restore`, but writable by root only.
-    temporary.chmod(0o644)
-    temporary.replace(completed)
+def restart(server: str) -> None:
+    """Restart the server after its download changed, or start it if it failed."""
 
     def systemctl(*args: str) -> int:
         return subprocess.run(["systemctl", *args, server], check=False).returncode
 
-    if systemctl("is-failed", "--quiet") == 0:
-        action = "start"
-    elif previous is None or previous["fingerprint"] != current["fingerprint"]:
-        # Leaves a stopped server alone.
-        action = "try-restart"
-    else:
-        return
-
+    # Leaves a stopped server alone.
+    action = "start" if systemctl("is-failed", "--quiet") == 0 else "try-restart"
     # A planned restart does not count towards the start limit.
     systemctl("reset-failed")
 
@@ -210,12 +104,8 @@ def main() -> None:
     match sys.argv[1:]:
         case ["prune", specification]:
             prune(json.loads(specification))
-        case ["restore", completed, specification]:
-            restore(json.loads(specification), Path(completed))
-        case ["load", completed, specification]:
-            load(json.loads(specification), Path(completed))
-        case ["apply", server, completed, specification]:
-            apply(json.loads(specification), server, Path(completed))
+        case ["restart", server]:
+            restart(server)
         case _:
             sys.exit(__doc__)
 

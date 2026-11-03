@@ -14,11 +14,10 @@ let
   llmhop = config.services.llmhop;
   inherit (config.virtualisation) quadlet;
   inherit (builtins) storeDir;
-  engines = lib.attrNames (import ./engines.nix lib);
 
   tools = [
     pkgs.python3Minimal.interpreter
-    (lib.getExe' pkgs.systemd "systemctl")
+    (lib.getExe' config.systemd.package "systemctl")
   ];
   hostTools = [
     "/usr/bin/python3"
@@ -47,7 +46,8 @@ let
     };
 
   # Every unit llmhop defines claims its name.
-  quadletUnits = lib.filter (unit: llmhop.claims.unit ? ${unit.serviceName}) (
+  claimed = name: llmhop.claims.unit ? ${name};
+  quadletUnits = lib.filter (unit: claimed unit.serviceName) (
     lib.attrValues quadlet.containers ++ lib.attrValues quadlet.images
   );
   # The servers and gateway, which start at boot.
@@ -64,36 +64,52 @@ let
       ''
     );
 
-  # The update units, rendered here, since those of NixOS set a store `PATH=`.
+  # The plain units beside them, rendered here, since those of NixOS set a
+  # store `PATH=`, and the timers and paths triggering them.
   toUnit = lib.generators.toINI { listsAsDuplicateKeys = true; };
-  updates = lib.filter (name: config.systemd.services ? ${name}) (
-    map (engine: "${engine}-update") engines
-  );
-  timers = lib.filter (name: config.systemd.services.${name}.startAt != [ ]) updates;
-  updateFiles = lib.concatMap (
-    name:
-    let
-      service = config.systemd.services.${name};
-    in
-    [
-      (file "etc/systemd/system/${name}.service" (toUnit {
-        Unit.Description = service.description;
+  plainFile =
+    name: type: sections:
+    file "etc/systemd/system/${name}.${type}" (toUnit sections);
+  quadletServices = map (unit: unit.serviceName) quadletUnits;
+  services = lib.filterAttrs (
+    name: _: claimed name && !lib.elem name quadletServices
+  ) config.systemd.services;
+  timers = lib.filterAttrs (_: service: service.startAt != [ ]) services;
+  paths = lib.filterAttrs (name: _: claimed name) config.systemd.paths;
+  triggers =
+    lib.mapAttrsToList (name: _: "${name}.timer") timers
+    ++ lib.mapAttrsToList (name: _: "${name}.path") paths;
+  plainFiles =
+    lib.mapAttrsToList (
+      name: service:
+      plainFile name "service" {
+        Unit = service.unitConfig;
         Service = service.serviceConfig;
-      }))
-    ]
-    ++ lib.optional (lib.elem name timers) (
-      file "etc/systemd/system/${name}.timer" (toUnit {
+      }
+    ) services
+    ++ lib.mapAttrsToList (
+      name: service:
+      plainFile name "timer" {
         Unit.Description = service.description;
         Timer.OnCalendar = service.startAt;
         Install.WantedBy = "timers.target";
-      })
-    )
-  ) updates;
+      }
+    ) timers
+    ++ lib.mapAttrsToList (
+      name: path:
+      plainFile name "path" {
+        Unit = path.unitConfig;
+        Path = path.pathConfig;
+        Install.WantedBy = path.wantedBy;
+      }
+    ) paths;
 
   # The rules of every llmhop setting, as NixOS renders them.
   tmpfiles = lib.findFirst (
     package: package.name == "10-llmhop.conf"
   ) null config.systemd.tmpfiles.packages;
+
+  files = map quadletFile quadletUnits ++ plainFiles;
 
   installScript = ''
     #!/bin/sh
@@ -106,17 +122,13 @@ let
     cp -r .${cfg.assetDirectory}/. ${cfg.assetDirectory}/
     systemctl daemon-reload
     ${lib.optionalString (tmpfiles != null) "systemd-tmpfiles --create /etc/tmpfiles.d/10-llmhop.conf"}
-    ${lib.optionalString (timers != [ ])
-      "systemctl enable --now ${lib.concatMapStringsSep " " (name: "${name}.timer") timers}"
-    }
+    ${lib.optionalString (triggers != [ ]) "systemctl enable --now ${toString triggers}"}
     systemctl start --no-block ${
       lib.concatMapStringsSep " " (unit: "${unit.serviceName}.service") wantedUnits
     }
   '';
 
-  files = map quadletFile quadletUnits ++ updateFiles;
-
-  native = lib.filter (engine: llmhop.${engine}.enable) engines;
+  native = lib.filter (engine: llmhop.${engine}.enable) (lib.attrNames (import ./engines.nix lib));
   gateway = llmhop.gateway.type;
   errors =
     map (a: a.message) (lib.filter (a: !a.assertion) config.assertions)

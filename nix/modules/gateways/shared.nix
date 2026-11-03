@@ -155,7 +155,7 @@ rec {
       virtualisation.quadlet = {
         inherit (imageUnit) images;
         containers.${unit} = {
-          unitConfig = util.startLimitConfig;
+          unitConfig = util.startLimitConfig // imageUnit.unitConfig;
           serviceConfig = util.credentialServiceConfig credentials // serviceConfig;
           containerConfig =
             util.baseContainerConfig

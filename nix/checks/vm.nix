@@ -293,6 +293,22 @@ testers.nixosTest {
             node.succeed(f"systemctl start {backend}-update; systemctl start {worker}-refresh")
             assert node.get_unit_property(worker, "ActiveState") == "inactive"
 
+    containers.succeed("systemctl start llama-cpp-fake-model")
+
+    for unit, image in [("llama-cpp-fake-model", "llama-cpp-image"), ("llmhop", "llmhop-image")]:
+        with subtest(f"restarting {image} restarts the running {unit}"):
+            pid = containers.get_unit_property(unit, "MainPID")
+            containers.succeed(f"systemctl restart {image}")
+            wait_restarted(containers, unit, pid)
+            assert containers.succeed(curl()) == "socket ok"
+
+    with subtest("restarting images leaves explicitly stopped workers and gateways stopped"):
+        containers.succeed("systemctl stop llama-cpp-fake-model llmhop")
+        containers.succeed("systemctl restart llama-cpp-image llmhop-image")
+        containers.succeed("systemctl start llama-cpp-fake-model-refresh")
+        assert containers.get_unit_property("llama-cpp-fake-model", "ActiveState") == "inactive"
+        assert containers.get_unit_property("llmhop", "ActiveState") == "inactive"
+
     with subtest("readiness probes every worker"):
         machine.fail("curl -fsS http://127.0.0.1:8080/readiness")
 

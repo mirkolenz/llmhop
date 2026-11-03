@@ -224,6 +224,25 @@ let
   };
 
   tests = {
+    testImageDependencies = {
+      expr = with quadlet.virtualisation.quadlet.containers; {
+        worker = vllm-test.unitConfig.PartOf;
+        fetcher = vllm-test-fetch.unitConfig.PartOf;
+        detector = vllm-watermark.unitConfig.PartOf;
+        detectorFetcher = vllm-watermark-fetch.unitConfig.PartOf;
+        smg = smgQuadlet.unitConfig.PartOf;
+        bifrost = bifrost.virtualisation.quadlet.containers.bifrost.unitConfig.PartOf;
+      };
+      expected = {
+        worker = [ "vllm-image.service" ];
+        fetcher = [ "vllm-image.service" ];
+        detector = [ "vllm-image.service" ];
+        detectorFetcher = [ "vllm-image.service" ];
+        smg = [ "smg-image.service" ];
+        bifrost = [ "bifrost-image.service" ];
+      };
+    };
+
     # Every container of a backend or gateway runs in the configured user
     # namespace, the gateway still as its root.
     testUserNamespace = {

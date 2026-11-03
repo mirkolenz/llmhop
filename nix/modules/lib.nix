@@ -383,6 +383,7 @@ rec {
       }
       // lib.optionalAttrs (tag != null) { ImageTag = tag; };
       claims.unit.${images.${name}.serviceName} = [ owner ];
+      unitConfig.PartOf = [ "${images.${name}.serviceName}.service" ];
       containerConfig = {
         Image = images.${name}.ref;
         Pull = "never";

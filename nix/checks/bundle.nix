@@ -55,6 +55,11 @@ runCommand "llmhop-bundle-tests" { } ''
   done
 
   grep -qx 'WantedBy=multi-user.target' etc/containers/systemd/vllm-qwen.container
+  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-qwen.container
+  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-qwen-fetch.container
+  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-detector.container
+  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-detector-fetch.container
+  grep -qx 'PartOf=llmhop-image.service' etc/containers/systemd/llmhop.container
   grep -qE '^ExecStartPre="/usr/local/lib/llmhop/[^ ]+-hub-prune-[^/]+/bin/hub-prune" ' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'ExecStart=+-/usr/bin/systemctl reset-failed vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service

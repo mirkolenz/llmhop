@@ -120,3 +120,4 @@ The llmhop container loads an archive of the image built with the binary that va
 
 The container rootfs stays writable, since ML runtimes scatter caches across `HOME`, and `/tmp` is a tmpfs.
 Every container of a backend runs the backend's image unit, which quadlet-nix starts only when a dependent starts.
+Backend containers, fetchers and gateways are `PartOf=` their image unit, so an image restart also restarts its running dependents.

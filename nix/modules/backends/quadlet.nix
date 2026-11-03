@@ -72,10 +72,13 @@ let
       ${unit} = {
         # `Restart = "always"` overrides quadlet-nix's `on-failure` default.
         serviceConfig = shared.serverServiceConfig cfg workload;
-        unitConfig = util.startLimitConfig // {
-          Wants = shared.fetchServices workload;
-          After = shared.fetchOrder workload ++ after;
-        };
+        unitConfig =
+          util.startLimitConfig
+          // image.unitConfig
+          // {
+            Wants = shared.fetchServices workload;
+            After = shared.fetchOrder workload ++ after;
+          };
         containerConfig =
           util.baseContainerConfig
           // image.containerConfig
@@ -130,7 +133,7 @@ let
     // lib.optionalAttrs (shared.fetches workload) {
       ${shared.fetchUnit unit} = {
         inherit (fetch) serviceConfig;
-        unitConfig = fetch.unitConfig;
+        unitConfig = image.unitConfig // fetch.unitConfig;
         containerConfig =
           util.baseContainerConfig
           // image.containerConfig

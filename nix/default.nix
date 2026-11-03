@@ -42,9 +42,8 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        inherit (config.legacyPackages) check-elf;
+        inherit (config.legacyPackages) check-elf hub-cache;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
-        hub-cache = pkgs.callPackage ./checks/hub-cache.nix { inherit (config.legacyPackages) hub-cache; };
       }
       // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;

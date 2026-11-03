@@ -106,7 +106,7 @@ Native builds check the script against the vLLM environment, while containers ru
 
 ## Bundles
 
-A bundle renders the same units as NixOS and only rewrites their paths: the store paths of Python and `systemctl` become the host's own, and every other store path they reference is copied below `bundle.assetDirectory` under its store name.
+A bundle renders the same units as NixOS and only rewrites their paths: the store path of `systemctl` becomes the host's own, `hub-cache` runs with the `python3` on `PATH`, and every other store path they reference is copied below `bundle.assetDirectory` under its store name.
 The build fails if a copied file still references the store, so only self-contained files such as scripts, configs and the llmhop image archive can be bundled.
 The bundle adds the `[Install]` section that quadlet-nix leaves to NixOS, and renders the update and refresh units and their timers and paths itself, since the NixOS ones set a store `PATH=`.
 `install.sh` restarts every running unit whose file it changes, so a reinstalled bundle replaces the running deployment, and a changed image unit restarts the containers requiring it.

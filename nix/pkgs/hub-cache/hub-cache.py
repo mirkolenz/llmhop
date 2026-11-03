@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 """Prune the hub cache of one worker, or restart its server.
 
-Usage: hub-cache.py prune <specification> | restart <server>
+Usage: hub-cache prune <specification> | restart <server>
 
 The specification is a JSON object with the `hub` and its `repositories`,
 each with its cache `name` and the `revision` it caches, or null for every

@@ -55,7 +55,8 @@ runCommand "llmhop-bundle-tests" { } ''
   done
 
   grep -qx 'WantedBy=multi-user.target' etc/containers/systemd/vllm-qwen.container
-  grep -qE '^ExecStart=\+"/usr/bin/python3" "/usr/local/lib/llmhop/[^ ]+-hub-cache.py" "restart" "vllm-qwen"$' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qE '^ExecStart=\+"/usr/local/lib/llmhop/[^ ]+-hub-cache-[^/]+/bin/hub-cache" "restart" "vllm-qwen"$' etc/systemd/system/vllm-qwen-refresh.service
+  ! grep -q PATH= etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'PathChanged=/var/cache/vllm/qwen/hub/models--Qwen--Qwen3-8B/snapshots' etc/systemd/system/vllm-qwen-refresh.path
   grep -qE 'Volume=/usr/local/lib/llmhop/[^ ]+-fetch.sh:' etc/containers/systemd/vllm-qwen-fetch.container

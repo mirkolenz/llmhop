@@ -1,7 +1,7 @@
 # Renders the Quadlet backends and gateway of a system into files for a host
 # without Nix, which needs podman 5, systemd and python3. Every store path the
-# units reference moves below `assetDirectory`, except the host tools, which
-# map to the host's own.
+# units reference moves below `assetDirectory`, except `systemctl`, which maps
+# to the host's own.
 {
   config,
   lib,
@@ -15,14 +15,7 @@ let
   inherit (config.virtualisation) quadlet;
   inherit (builtins) storeDir;
 
-  tools = [
-    pkgs.python3Minimal.interpreter
-    (lib.getExe' config.systemd.package "systemctl")
-  ];
-  hostTools = [
-    "/usr/bin/python3"
-    "/usr/bin/systemctl"
-  ];
+  systemctl = lib.getExe' config.systemd.package "systemctl";
 
   # The file `path` of the bundle holding `text` as the host sees it, which
   # defines `unit`, beside the store paths it references, which carry the
@@ -30,7 +23,7 @@ let
   file =
     path: unit: text:
     let
-      withHostTools = lib.replaceStrings tools hostTools text;
+      withHostTools = lib.replaceStrings [ systemctl ] [ "/usr/bin/systemctl" ] text;
       matches = builtins.split "(${storeDir}/[0-9a-z]{32}-[-.+_?=0-9a-zA-Z]+)" withHostTools;
     in
     {

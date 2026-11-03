@@ -51,14 +51,10 @@ rec {
     }) workload.repositories;
   };
 
-  # The argv of `hub-cache.py` with `arguments`.
+  # The argv of `hub-cache` with `arguments`.
   hubCache =
     pkgs: arguments:
-    [
-      pkgs.python3Minimal.interpreter
-      "${pkgs.callPackage ../../pkgs/hub-cache/package.nix { }}"
-    ]
-    ++ arguments;
+    [ (lib.getExe (pkgs.callPackage ../../pkgs/hub-cache/package.nix { })) ] ++ arguments;
 
   # The sandbox of a unit running as `owner` on the hub cache `hub`, which the
   # fetcher controls, so it writes nothing else and opens no socket, since
@@ -273,6 +269,8 @@ rec {
             # Only after a complete download.
             requires = fetcher;
             after = fetcher;
+            # A bundle drops this `PATH=` for the host's.
+            path = [ pkgs.python3Minimal ];
             serviceConfig = hubSandbox cacheOwner specification.hub // {
               Type = "oneshot";
               ExecStartPre = utils.escapeSystemdExecArgs (

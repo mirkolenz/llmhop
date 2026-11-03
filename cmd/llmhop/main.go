@@ -21,6 +21,7 @@ const usage = `usage:
   llmhop serve [-config path]         serve the router
   llmhop check [-config path]         validate the config without serving
   llmhop hub-prune <specification>    prune the hub cache of a worker
+  llmhop wait-healthy <url>           wait until the server $MAINPID is healthy
 `
 
 func main() {
@@ -38,6 +39,8 @@ func main() {
 		_, _, err = load(name, args, false)
 	case "hub-prune":
 		err = hubPrune(args)
+	case "wait-healthy":
+		err = waitHealthy(args)
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)

@@ -23,31 +23,34 @@ rec {
   # The llmhop package, whose binary also runs the worker commands.
   package = pkgs: pkgs.callPackage ../package.nix { };
 
-  # The curl target of the `/health` of a server listening on `socket`, or else
-  # on its bind address, using loopback for wildcard listeners.
-  healthTarget =
+  # The address probing a listener bound to `host`, loopback for a wildcard.
+  probeHost =
+    host:
+    if host == "0.0.0.0" then
+      "127.0.0.1"
+    else if host == "::" then
+      "::1"
+    else
+      host;
+
+  # The address of a server listening on `socket`, or else on its bind
+  # address, as `llmhop wait-healthy` takes it.
+  probeUrl =
     {
       socket,
       host,
       port,
       ...
     }:
-    let
-      probeHost =
-        if host == "0.0.0.0" then
-          "127.0.0.1"
-        else if host == "::" then
-          "::1"
-        else
-          host;
-    in
-    (
-      if socket != null then
-        "--unix-socket ${lib.escapeShellArg socket} http://localhost"
-      else
-        "http://${hostPort probeHost port}"
-    )
-    + "/health";
+    if socket != null then "unix://${socket}" else "http://${hostPort (probeHost host) port}";
+
+  # The curl target of the `/health` of the same server.
+  healthTarget =
+    listener:
+    if listener.socket != null then
+      "--unix-socket ${lib.escapeShellArg listener.socket} http://localhost/health"
+    else
+      "${probeUrl listener}/health";
 
   # Render `settings` into the argv of a parser with the given `negateBools`
   # and `listStyle`, flag and value as separate entries. Strings, paths and

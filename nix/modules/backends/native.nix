@@ -111,19 +111,6 @@ let
             TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
           };
         };
-        # Holds the unit in `activating` until the server answers `/health`
-        # with 200, and fails it once the server exits before that.
-        postStart = ''
-          while kill -0 "$MAINPID" 2>/dev/null; do
-            status=$(${lib.getExe pkgs.curl} --silent --output /dev/null --write-out '%{http_code}' --max-time 10 ${util.healthTarget workload} || true)
-            if [[ $status == 200 ]]; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "the server exited before it answered /health" >&2
-          exit 1
-        '';
         unitConfig = util.startLimitConfig;
         serviceConfig =
           shared.serverServiceConfig cfg workload
@@ -147,6 +134,13 @@ let
             ExecStart = util.execStart utils workload.credentials (
               workload.command ++ util.renderCliArgs engine workload.settings
             );
+            # Holds the unit in `activating` until the server answers
+            # `/health`, and fails it once the server exits before that.
+            ExecStartPost = utils.escapeSystemdExecArgs [
+              (lib.getExe (util.package pkgs))
+              "wait-healthy"
+              (util.probeUrl workload)
+            ];
           };
       };
     }

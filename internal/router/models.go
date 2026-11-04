@@ -79,13 +79,17 @@ func registerModels(mux *http.ServeMux, names []string) {
 		writeJSON(w, http.StatusOK, list)
 	})
 
-	mux.HandleFunc("GET /v1/models/{model}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/models/{model...}", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("model")
 		m, ok := byName[name]
 		if !ok {
-			http.Error(w, fmt.Sprintf("unknown model %q", name), http.StatusNotFound)
+			unknownModel(w, name)
 			return
 		}
 		writeJSON(w, http.StatusOK, m)
 	})
+}
+
+func unknownModel(w http.ResponseWriter, name string) {
+	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model %q", name))
 }

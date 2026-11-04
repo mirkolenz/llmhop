@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -53,7 +54,6 @@ func New(cfg *config.Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	registerModels(mux, listed)
 	proxy := proxyHandler(backends, cfg.MaxBodyBytes, newBudget(cfg.MaxBufferedBytes))
-	mux.Handle(routePrefix+"{model}/{path...}", proxy)
 	mux.Handle("/", proxy)
 
 	// Health and readiness sit outside the auth middleware: probes and
@@ -177,25 +177,25 @@ func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *budget
 			req.Body = http.MaxBytesReader(w, req.Body, maxBytes)
 		}
 
-		name := req.PathValue("model")
-		if name == "" {
+		var name string
+		var b *backend
+		var ok bool
+
+		if strings.HasPrefix(req.URL.Path, routePrefix) {
+			name, b, ok = routeModel(backends, req.URL)
+		} else {
 			var release func()
-			var ok bool
 			if req, name, release, ok = bodyModel(w, req, buffered); !ok {
 				return
 			}
 
 			defer release()
-		} else {
-			// Cut the escaped path, so escapes such as %2F in the remainder survive.
-			_, rest, _ := strings.Cut(strings.TrimPrefix(req.URL.EscapedPath(), routePrefix), "/")
-			req.URL.RawPath = "/" + rest
-			req.URL.Path = "/" + req.PathValue("path")
+
+			b, ok = backends[name]
 		}
 
-		b, ok := backends[name]
 		if !ok {
-			http.Error(w, fmt.Sprintf("unknown model %q", name), http.StatusNotFound)
+			unknownModel(w, name)
 			return
 		}
 
@@ -208,6 +208,28 @@ func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *budget
 
 		b.proxy.ServeHTTP(w, req)
 	}
+}
+
+// routeModel resolves the backend of a /route/<model>/<path> URL and strips
+// the prefix and model from it. The longest model name wins, and a name with
+// `/` may be written raw or with `%2F`. The remainder keeps its escapes. An
+// unknown model is reported as its first segment.
+func routeModel(backends map[string]*backend, u *url.URL) (string, *backend, bool) {
+	segments := strings.Split(strings.TrimPrefix(u.EscapedPath(), routePrefix), "/")
+
+	for n := len(segments); n > 0; n-- {
+		name, err := url.PathUnescape(strings.Join(segments[:n], "/"))
+		if b, ok := backends[name]; ok && err == nil {
+			u.RawPath = "/" + strings.Join(segments[n:], "/")
+			u.Path, _ = url.PathUnescape(u.RawPath)
+
+			return name, b, true
+		}
+	}
+
+	name, _ := url.PathUnescape(segments[0])
+
+	return name, nil, false
 }
 
 // bodyModel buffers the body, charged to buffered, to read its JSON "model"

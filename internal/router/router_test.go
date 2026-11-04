@@ -276,6 +276,36 @@ func TestPathRouting(t *testing.T) {
 	}
 }
 
+func TestSlashModelNames(t *testing.T) {
+	backend, captured := startBackend(t)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{
+		"org/name": {URL: backend.URL},
+		"org":      {URL: backend.URL + "/short"},
+	}})
+
+	if rec := send(t, h, http.MethodGet, "/v1/models/org/name", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("retrieve got status %d", rec.Code)
+	}
+
+	for _, path := range []string{"/route/org/name/a%2Fb?x=1", "/route/org%2Fname/a%2Fb?x=1"} {
+		if rec := send(t, h, http.MethodPost, path, "{}", ""); rec.Code != http.StatusOK {
+			t.Fatalf("%s got status %d", path, rec.Code)
+		}
+
+		if captured.path != "/a/b" || captured.query != "x=1" {
+			t.Fatalf("%s: backend saw %+v", path, captured)
+		}
+	}
+
+	if rec := send(t, h, http.MethodPost, "/route/org/other", "{}", ""); rec.Code != http.StatusOK || captured.path != "/short/other" {
+		t.Fatalf("shorter name got status %d, backend saw %+v", rec.Code, captured)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"org/name"}`, ""); rec.Code != http.StatusOK {
+		t.Fatalf("body routing got status %d", rec.Code)
+	}
+}
+
 func TestBodyLimit(t *testing.T) {
 	cases := []struct {
 		name          string

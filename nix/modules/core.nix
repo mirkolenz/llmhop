@@ -119,6 +119,8 @@ in
       type = with lib.types; attrsOf (submodule endpointModule);
       default = { };
       internal = true;
+      # Unlike `internal`, also hides the options of the submodule.
+      visible = false;
       description = "Every workload by its `owner`, which gateways route by its `name`.";
     };
 

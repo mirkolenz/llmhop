@@ -107,13 +107,10 @@
             };
           mkQuadletBundle =
             args: (config.legacyPackages.mkQuadletSystem args).config.services.llmhop.bundle.package;
+          # Reads `VERSION` and `GITHUB_TOKEN` when it runs.
           docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
-            github = {
-              enable = true;
-              token = "$GH_TOKEN";
-            };
-            version = builtins.getEnv "VERSION";
-            imageStreams = with self.packages; [
+            github.enable = true;
+            images = with self.packages; [
               x86_64-linux.docker
               aarch64-linux.docker
             ];

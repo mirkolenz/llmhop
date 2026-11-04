@@ -1,4 +1,4 @@
-{ lib, ... }:
+{ inputs, lib, ... }:
 {
   perSystem =
     { pkgs, ... }:
@@ -6,7 +6,7 @@
       moduleOptions =
         (lib.evalModules {
           modules = [
-            ../modules/quadlet.nix
+            (import ../modules/quadlet.nix inputs.quadlet-nix.lib.sectionType)
             {
               _module.args = {
                 inherit pkgs;

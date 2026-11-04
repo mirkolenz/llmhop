@@ -1,8 +1,8 @@
 # The Quadlet backend of the engine `name` under
 # `services.llmhop.<name>-quadlet`. Every workload runs its internal
-# `container`, an `entrypoint` with `arguments` followed by its settings and
+# `invocation`, an `entrypoint` with `arguments` followed by its settings and
 # further `mounts`, in the backend's image beside its fetcher.
-lib: name:
+lib: sectionType: name:
 {
   config,
   pkgs,
@@ -19,13 +19,13 @@ let
   cfg = config.services.llmhop.${backend};
   inherit (config.virtualisation) quadlet;
 
-  # The curl target of the `/health` of a server listening on `listener`.
+  # The curl target of the health path of a server listening on `listener`.
   healthTarget =
     listener:
     if listener.socket != null then
-      "--unix-socket ${lib.escapeShellArg listener.socket} http://localhost/health"
+      "--unix-socket ${lib.escapeShellArg listener.socket} http://localhost${util.healthPath}"
     else
-      "${util.probeUrl listener}/health";
+      "${util.probeUrl listener}${util.healthPath}";
 
   fetchScriptPath = "${util.containerRuntimeDirectory}/fetch.sh";
 
@@ -33,7 +33,7 @@ let
   image = util.imageUnit {
     inherit (quadlet) images;
     inherit name;
-    inherit (cfg) image;
+    inherit (cfg.container) image;
     owner = "services.llmhop.${backend}";
   };
 
@@ -47,7 +47,7 @@ let
       # A host directory mounted at the same path.
       cacheMount =
         directory: options:
-        "${directory}:${directory}${util.mountSuffix (options ++ cfg.mountOptions.cache)}";
+        "${directory}:${directory}${util.mountSuffix (options ++ cfg.container.mountOptions.cache)}";
       cache = cacheMount (shared.cacheDirectory cfg workload) [ ];
       credentialDirectory = util.containerCredentialDirectory;
       fetch = shared.fetchUnitConfig {
@@ -59,7 +59,7 @@ let
           ;
         inherit (engine.quadlet) fetcher;
       };
-      credentials = util.credentialMount cfg.mountOptions.credentials;
+      credentials = util.credentialMount cfg.container.mountOptions.credentials;
       # A socket in a mounted directory and, offline, no network, or else
       # the published port.
       network =
@@ -91,7 +91,7 @@ let
           util.baseContainerConfig
           // image.containerConfig
           // {
-            Entrypoint = lib.toJSON workload.container.entrypoint;
+            Entrypoint = lib.toJSON workload.invocation.entrypoint;
             Notify = "healthy";
             HealthCmd = "curl --fail --silent --show-error ${healthTarget (opts.quadletListener engine workload)}";
             HealthStartPeriod = "30m";
@@ -102,7 +102,7 @@ let
             ]
             # The server only reads the hub cache.
             ++ map (directory: cacheMount directory [ "ro" ]) (shared.hubDirectories cfg workload)
-            ++ workload.container.mounts
+            ++ workload.invocation.mounts
             # `U` hands the directory to whatever host UID the container
             # user maps to, so the socket works under any `User=` and
             # `UserNS=`.
@@ -123,7 +123,7 @@ let
               }
               // util.credentialEnvironment workload.credentials;
             Exec = lib.escapeShellArgs (
-              workload.container.arguments
+              workload.invocation.arguments
               ++ util.renderCliArgs engine (
                 util.resolveCredentialRefs credentialDirectory workload.credentials workload.settings
               )
@@ -131,11 +131,11 @@ let
           }
           // network
           // lib.optionalAttrs (!workload.unlisted) {
-            AddDevice = workload.devices;
-            ShmSize = workload.shmSize;
+            AddDevice = workload.container.devices;
+            ShmSize = workload.container.shmSize;
             Ulimit = "host";
           }
-          // cfg.containerConfig;
+          // cfg.container.config;
       };
     }
     // lib.optionalAttrs (shared.fetches workload) {
@@ -159,7 +159,7 @@ let
             EnvironmentFile = fetch.environmentFile;
             Environment = fetch.environment // util.credentialEnvironment cfg.fetch.credentials;
           }
-          // cfg.containerConfig;
+          // cfg.container.config;
       };
     };
 
@@ -169,9 +169,6 @@ let
 in
 {
   options.services.llmhop.${backend} = baseOptions // {
-    image = util.imageOption // {
-      example = engine.quadlet.imageExample;
-    };
     cache = baseOptions.cache // {
       user = mkOption {
         type = types.str;
@@ -188,35 +185,40 @@ in
         description = "Host group of the cache directories.";
       };
     };
-    containerConfig = util.containerConfigOption "this backend, servers, fetchers and detectors alike";
-    mountOptions = {
-      cache = mkOption {
+    container = {
+      image = util.imageOption // {
+        example = engine.quadlet.imageExample;
+      };
+      config = util.containerConfigOption sectionType "this backend, servers, fetchers and detectors alike";
+      devices = mkOption {
         type = with types; listOf str;
-        default = [ ];
-        example = [ "idmap" ];
+        default =
+          if config.hardware.nvidia-container-toolkit.enable or false then [ "nvidia.com/gpu=all" ] else [ ];
+        defaultText = lib.literalExpression ''
+          if config.hardware.nvidia-container-toolkit.enable then [ "nvidia.com/gpu=all" ] else [ ]
+        '';
+        example = [ "amd.com/gpu=all" ];
         description = ''
-          Podman volume options of the cache mounts below `cache.directory`,
-          such as `idmap` so a user namespace owns them, or SELinux
-          relabeling.
+          Devices exposed to every model container as Quadlet `AddDevice=`
+          lines, CDI references such as `nvidia.com/gpu=all` or host device
+          paths. Per-model `container.devices` replaces it.
         '';
       };
-      credentials = util.credentialMountOptionsOption "this backend";
+      mountOptions = {
+        cache = mkOption {
+          type = with types; listOf str;
+          default = [ ];
+          example = [ "idmap" ];
+          description = ''
+            Podman volume options of the cache mounts below `cache.directory`,
+            such as `idmap` so a user namespace owns them, or SELinux
+            relabeling.
+          '';
+        };
+        credentials = util.credentialMountOptionsOption "this backend";
+      };
     };
-    startupOrdering = opts.startupOrderingOption "via its own `devices`";
-    devices = mkOption {
-      type = with types; listOf str;
-      default =
-        if config.hardware.nvidia-container-toolkit.enable or false then [ "nvidia.com/gpu=all" ] else [ ];
-      defaultText = lib.literalExpression ''
-        if config.hardware.nvidia-container-toolkit.enable then [ "nvidia.com/gpu=all" ] else [ ]
-      '';
-      example = [ "amd.com/gpu=all" ];
-      description = ''
-        Devices exposed to every model container as Quadlet `AddDevice=`
-        lines, CDI references such as `nvidia.com/gpu=all` or host device
-        paths. Per-model `devices` replaces it.
-      '';
-    };
+    startupOrdering = opts.startupOrderingOption "via its own `container.devices`";
     models =
       opts.modelsOption
         {
@@ -238,29 +240,31 @@ in
           })
           (opts.modelModule {
             inherit engine;
-            extraRepositories = [ ];
+            requiredRepositories = [ ];
           })
           (
             { config, ... }:
             {
               options = {
-                devices = mkOption {
-                  type = with types; listOf str;
-                  default = cfg.devices;
-                  defaultText = lib.literalExpression "config.services.llmhop.${backend}.devices";
-                  example = [ "nvidia.com/gpu=0" ];
-                  description = "Devices exposed to this model's container, replacing the backend's `devices`.";
+                container = {
+                  devices = mkOption {
+                    type = with types; listOf str;
+                    default = cfg.container.devices;
+                    defaultText = lib.literalExpression "config.services.llmhop.${backend}.container.devices";
+                    example = [ "nvidia.com/gpu=0" ];
+                    description = "Devices exposed to this model's container, replacing the backend's `container.devices`.";
+                  };
+                  shmSize = mkOption {
+                    type = types.str;
+                    default = "32g";
+                    example = "64g";
+                    description = ''
+                      Size of the container's private `/dev/shm` tmpfs, which
+                      PyTorch uses for tensor-parallel inference.
+                    '';
+                  };
                 };
-                shmSize = mkOption {
-                  type = types.str;
-                  default = "32g";
-                  example = "64g";
-                  description = ''
-                    Size of the container's private `/dev/shm` tmpfs, which
-                    PyTorch uses for tensor-parallel inference.
-                  '';
-                };
-                container = mkOption {
+                invocation = mkOption {
                   type = types.attrs;
                   internal = true;
                   default = {
@@ -271,6 +275,8 @@ in
                   description = "The `entrypoint`, `arguments` and `mounts` of this model's container.";
                 };
               };
+              # `Network=none` rules out a published port.
+              config.offline = lib.mkDefault (config.socket != null);
             }
           )
         ];
@@ -280,25 +286,36 @@ in
     let
       backendConfig = shared.backendConfig {
         inherit
+          config
+          pkgs
+          utils
           engine
           backend
           cfg
           workloads
           ;
-        inherit pkgs utils;
-        systemd = config.systemd.package;
         cacheOwner = cfg.cache;
       };
     in
     lib.mkIf cfg.enable (
       lib.mkMerge [
         {
-          assertions = [ (util.requireQuadlet config "services.llmhop.${backend}") ];
+          assertions = [
+            (util.requireQuadlet config "services.llmhop.${backend}")
+          ]
+          ++ map (workload: {
+            assertion = workload.offline -> workload.socket != null;
+            message = "services.llmhop: `${workload.owner}` is a Quadlet workload with `offline = true`, which can only run without network while it binds its socket, so drop `port` or set `offline = false`.";
+          }) workloads;
           virtualisation.quadlet = lib.mkIf (workloads != [ ]) {
             inherit (image) images;
             containers = lib.mkMerge (
-              lib.zipListsWith containers models (shared.predecessors cfg.startupOrdering models)
-              ++ map (workload: containers workload [ ]) cfg.extraWorkloads
+              shared.mapWorkloads {
+                chained = cfg.startupOrdering;
+                inherit models;
+                inherit (cfg) extraWorkloads;
+                perWorkload = containers;
+              }
             );
           };
           services.llmhop.claims = lib.mkIf (workloads != [ ]) image.claims;

@@ -128,9 +128,10 @@ See the [options reference](https://mirkolenz.github.io/llmhop/) for every optio
 | `"bifrost"`, `"bifrost-quadlet"` | [Bifrost](https://github.com/maximhq/bifrost)                    | no           | no        |
 
 Routed models must stay on loopback and leave authentication to the gateway, and gateways without socket support need every model to set a `port`.
-Each gateway listens on `127.0.0.1:8080` by default.
+SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`, `port` and `openFirewall`.
 
-- **llmhop** runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container that loads an image archive of the same build, unless `image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
+- **llmhop** runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
+  The `default` listener serves `127.0.0.1:8080` and `environment` and `environmentFile` are forwarded to the service.
   Its generated config is validated at build time with `llmhop check`.
   Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
 - **SMG** reads its workers from a generated discovery file. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
@@ -150,7 +151,7 @@ services.llmhop = {
   };
   vllm = {
     enable = true;
-    package = inputs.llmhop.legacyPackages.${pkgs.system}.mkUvEnv { workspaceRoot = ./vllm-env; };
+    package = inputs.llmhop.legacyPackages.${pkgs.stdenv.hostPlatform.system}.mkUvEnv { workspaceRoot = ./vllm-env; };
     models."qwen3-8b" = {
       model = "Qwen/Qwen3-8B";
       port = 19001;
@@ -159,7 +160,7 @@ services.llmhop = {
   };
   sglang-quadlet = {
     enable = true;
-    image = "docker.io/lmsysorg/sglang:latest";
+    container.image = "docker.io/lmsysorg/sglang:latest";
     models."llama-3-8b" = {
       model = "meta-llama/Meta-Llama-3-8B-Instruct";
       port = 19002;
@@ -169,8 +170,8 @@ services.llmhop = {
 ```
 
 Each model runs as the unit `<engine>-<name>`.
-Native workers are hardened services running as the backend's `user`, while container workers run rootful through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) with the backend's `image`, managed with `quadletctl`.
-A worker stays `activating` until it answers `/health`, and `startupOrdering` starts workers one at a time by `name`, so two never profile GPU memory at once.
+Native workers are hardened services running as the backend's `user`, while container workers run rootful through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) with the backend's `container.image`, managed with `quadletctl`.
+A worker stays `activating` until it answers its health endpoint, and `startupOrdering`, enabled by default for every backend, starts workers one at a time by `name`, so two never profile or size their GPU memory at once.
 Evaluation rejects any port, unit or model name claimed twice.
 Customize the generated units directly, as in `systemd.services.vllm-qwen3-8b.serviceConfig.MemoryHigh = "64G"` or `virtualisation.quadlet.containers.vllm-qwen3-8b.containerConfig`.
 
@@ -181,13 +182,13 @@ Set `port` to bind `<host>:<port>` instead, which SGLang always needs.
 
 Each model has a fetcher `<engine>-<name>-fetch` that downloads everything into the model's own cache `cache.directory/<name>`, after which the server runs offline from it.
 A `model` that is an absolute path has no fetcher.
-`extraModels` lists further repositories that `settings` reference, such as a draft model or LoRA adapter, and `revision` pins a branch, tag or commit:
+`extraRepositories` lists further repositories that `settings` reference, such as a draft model or LoRA adapter, and `revision` pins a branch, tag or commit:
 
 ```nix
 services.llmhop.vllm.models."qwen3-8b" = {
   model = "Qwen/Qwen3-8B";
   revision = "main";
-  extraModels = [ "Qwen/Qwen3-0.6B" ];
+  extraRepositories = [ "Qwen/Qwen3-0.6B" ];
   settings.speculative-config = {
     model = "Qwen/Qwen3-0.6B";
     num_speculative_tokens = 4;
@@ -195,12 +196,13 @@ services.llmhop.vllm.models."qwen3-8b" = {
 };
 ```
 
-Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the Hugging Face token of gated repositories, which `fetch.tokenCredential = "llmhop.hf-token"` imports for every engine.
-`<backend>-update`, such as `vllm-update` or `vllm-quadlet-update`, reruns every fetcher on `fetch.interval`, weekly by default, prunes what the model no longer references, and restarts each running server after a successful fetch, even if its model did not change.
+Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the Hugging Face token of gated repositories, which `fetch.hfTokenCredential = "llmhop.hf-token"` imports for every engine.
+`<backend>-update`, such as `vllm-update` or `vllm-quadlet-update`, reruns every fetcher on the `fetch.schedule` (`OnCalendar=`), weekly by default, prunes what the model no longer references, and restarts each running server after a successful fetch, even if its model did not change.
 An interrupted download leaves a running server alone, and a successful retry refreshes it.
 An explicitly stopped server stays stopped.
 
-Servers never download: they get `HF_HUB_OFFLINE`, no DNS, and on a socket no network at all, on a native `port` only loopback.
+Servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
+A native server on a socket gets no network at all and on a `port` only loopback, while a Quadlet container gets `Network=none`, which needs a socket, so a Quadlet workload with a `port` defaults to `offline = false` and rejects `offline = true`.
 `offline = false` lifts the network restrictions for features like media URLs in requests.
 Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`.
 
@@ -216,19 +218,21 @@ Strings and paths are passed verbatim and everything else as JSON, so attribute 
 #### Containers and user namespaces
 
 Every Quadlet backend and gateway runs its containers as root by default, which a user namespace maps to an unprivileged host range.
-`containerConfig` adds `[Container]` keys to every container of a backend, servers, fetchers and detectors alike, or of a gateway, and idmapped mounts let the namespace own the cache and read the credentials:
+`container.config` adds `[Container]` keys to every container of a backend, servers, fetchers and detectors alike, or of a gateway, and `container.mountOptions` adds idmapped mounts let the namespace own the cache and read the credentials:
 
 ```nix
 services.llmhop = {
   vllm-quadlet = {
-    containerConfig.UserNS = "auto:size=65536";
-    mountOptions = {
-      cache = [ "idmap" ];
-      credentials = [ "idmap" ];
+    container = {
+      config.UserNS = "auto:size=65536";
+      mountOptions = {
+        cache = [ "idmap" ];
+        credentials = [ "idmap" ];
+      };
     };
   };
-  gateway.llmhop-quadlet = {
-    containerConfig.UserNS = "auto";
+  gateway.llmhop-quadlet.container = {
+    config.UserNS = "auto";
     mountOptions.credentials = [ "idmap" ];
   };
 };
@@ -251,7 +255,7 @@ packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.
         gateway.type = "llmhop-quadlet";
         vllm-quadlet = {
           enable = true;
-          image = "docker.io/vllm/vllm-openai:latest";
+          container.image = "docker.io/vllm/vllm-openai:latest";
           models."qwen3-8b" = {
             model = "Qwen/Qwen3-8B";
             port = 8001;
@@ -264,7 +268,7 @@ packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.
 ```
 
 It is the [bundle of quadlet-nix](https://github.com/mirkolenz/quadlet-nix#bundles-for-hosts-without-nix) named `llmhop`, which a NixOS system importing `nixosModules.quadlet` exposes as `virtualisation.quadlet.bundle.package`, with every rootful Quadlet unit of that system.
-The bundle holds the Quadlet files, update and refresh units, timers and tmpfiles rules below `etc/`, the scripts and generated configs below `/usr/local/lib/llmhop`, and an `install.sh` that copies them into place, starts the servers, restarts every running unit it changed and retires those a previous bundle had but this one lacks.
+The bundle holds the Quadlet files, update and refresh units, timers, the llmhop gateway's socket units and tmpfiles rules below `etc/`, the scripts and generated configs below `/usr/local/lib/llmhop`, and an `install.sh` that copies them into place, starts the servers, restarts every running unit it changed and retires those a previous bundle had but this one lacks.
 The `uninstall.sh` installed beside the assets removes the bundle again, keeping the model caches.
 Native backends and gateways cannot be bundled, and firewall and user options have no effect there.
 
@@ -310,12 +314,12 @@ systemd-ask-password -n | systemd-creds encrypt --name=llmhop.hf-token - /etc/cr
 ```
 
 vLLM and SGLang read a YAML file with `api-key` through `settings.config`, as in `credentials."config.yaml"` with `settings.config = "\${cred:config.yaml}"`, while llama.cpp uses `api-key-file`.
-Containers see their credentials at `/run/llmhop/credentials`, named by `$CREDENTIALS_DIRECTORY` as natively, and readable through a user namespace with the backend's or gateway's `mountOptions.credentials`, see [user namespaces](#containers-and-user-namespaces).
+Containers see their credentials at `/run/llmhop/credentials`, named by `$CREDENTIALS_DIRECTORY` as natively, and readable through a user namespace with the backend's or gateway's `container.mountOptions.credentials`, see [user namespaces](#containers-and-user-namespaces).
 
 ### vLLM watermarking
 
 Both vLLM backends can watermark a model's output and run detectors serving `POST /detect` beside the workers.
-A `watermark` is vLLM's `WatermarkConfig` without the key, plus the `credential` holding the key, and a detector tests every one of its `profiles`:
+A `watermark` holds vLLM's `WatermarkConfig` without the key as `settings`, plus the `credential` holding the key, and a detector tests every one of its `profiles`:
 
 ```nix
 services.llmhop.vllm = {
@@ -323,8 +327,8 @@ services.llmhop.vllm = {
     model = "Qwen/Qwen3-8B";
     revision = "main";
     watermark = {
-      algorithm = "dual_key_gumbel";
       credential = "vllm.watermark-key.2026-10";
+      settings.algorithm = "dual_key_gumbel";
     };
   };
   detectors.production = {

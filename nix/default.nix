@@ -4,6 +4,14 @@
   lib,
   ...
 }:
+let
+  version = self.shortRev or self.dirtyShortRev or "dev";
+  # Keyed, so importing both modules sets the version once.
+  versionModule = {
+    key = "llmhop-version";
+    services.llmhop.version = version;
+  };
+in
 {
   systems = lib.remove "x86_64-darwin" (import inputs.systems);
   imports = [
@@ -12,10 +20,14 @@
   ];
   flake = {
     nixosModules = {
-      default = ./modules/core.nix;
+      default.imports = [
+        ./modules/core.nix
+        versionModule
+      ];
       quadlet.imports = [
         inputs.quadlet-nix.nixosModules.default
-        ./modules/quadlet.nix
+        (import ./modules/quadlet.nix inputs.quadlet-nix.lib.sectionType)
+        versionModule
       ];
     };
   };
@@ -29,6 +41,18 @@
     let
       mkEvalCheck = pkgs.callPackage ./checks/lib.nix { };
       inherit (pkgs.stdenv.hostPlatform) isLinux;
+      # Every file of ./pkgs, a builder or a package, which may take the others
+      # as arguments. Only the builders meant for downstream are published.
+      scope = lib.makeScope pkgs.newScope (
+        self:
+        {
+          inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
+        }
+        // lib.packagesFromDirectoryRecursive {
+          inherit (self) callPackage;
+          directory = ./pkgs;
+        }
+      );
     in
     {
       treefmt = {
@@ -42,7 +66,7 @@
       };
       checks = {
         inherit (config.packages) llmhop;
-        inherit (config.legacyPackages) check-elf;
+        inherit (scope) check-elf;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs isLinux {
@@ -56,7 +80,7 @@
       };
       packages = {
         default = config.packages.llmhop;
-        llmhop = pkgs.callPackage ./package.nix { };
+        llmhop = pkgs.callPackage ./package.nix { inherit version; };
         release-env = pkgs.buildEnv {
           name = "release-env";
           paths = with pkgs; [
@@ -69,42 +93,30 @@
         docker = pkgs.callPackage ./docker.nix {
           inherit (config.packages) llmhop;
         };
+        # Reads `VERSION` and `GITHUB_TOKEN` when it runs.
+        docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
+          github.enable = true;
+          images = with self.packages; [
+            x86_64-linux.docker
+            aarch64-linux.docker
+          ];
+        };
       };
-      # Auto-discovered from ./pkgs so new builders drop in as files. The
-      # builders are functions rather than packages: downstream calls them with
-      # their own args, e.g.
+      # The builders are functions rather than packages: downstream calls them
+      # with their own args, e.g.
       #   services.llmhop.vllm.package =
       #     inputs.llmhop.legacyPackages.${system}.mkUvEnv { workspaceRoot = ./vllm-env; };
-      # A scope, so every builder may take the others as arguments.
-      legacyPackages =
-        lib.makeScope pkgs.newScope (
-          self:
-          {
-            inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
-          }
-          // lib.packagesFromDirectoryRecursive {
-            inherit (self) callPackage;
-            directory = ./pkgs;
-          }
-        )
-        // {
-          # The Quadlet units of a minimal system with llmhop's modules,
-          # configured by `modules`, as files for a host without Nix,
-          # see `virtualisation.quadlet.bundle` of quadlet-nix.
-          mkQuadletBundle =
-            { modules }:
-            inputs.quadlet-nix.legacyPackages.${system}.mkBundle {
-              modules = [ self.nixosModules.quadlet ] ++ modules;
-            };
-          # Reads `VERSION` and `GITHUB_TOKEN` when it runs.
-          docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
-            github.enable = true;
-            images = with self.packages; [
-              x86_64-linux.docker
-              aarch64-linux.docker
-            ];
+      legacyPackages = {
+        inherit (scope) mkUvEnv mkCudaHome;
+        # The Quadlet units of a minimal system with llmhop's modules,
+        # configured by `modules`, as files for a host without Nix,
+        # see `virtualisation.quadlet.bundle` of quadlet-nix.
+        mkQuadletBundle =
+          { modules }:
+          inputs.quadlet-nix.legacyPackages.${system}.mkBundle {
+            modules = [ self.nixosModules.quadlet ] ++ modules;
           };
-        };
+      };
       devShells.default = pkgs.mkShell {
         packages = with pkgs; [
           go

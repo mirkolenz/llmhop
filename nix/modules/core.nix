@@ -1,6 +1,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
@@ -73,6 +74,22 @@ in
   };
 
   options.services.llmhop = {
+    version = lib.mkOption {
+      type = lib.types.str;
+      internal = true;
+      default = "dev";
+      description = "Version of `package`, which the flake's modules set to its revision.";
+    };
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      internal = true;
+      readOnly = true;
+      default = pkgs.callPackage ../package.nix { inherit (cfg) version; };
+      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
+      description = "The llmhop package, whose binary also runs the worker commands.";
+    };
+
     socketDirectory = lib.mkOption {
       type = lib.types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
       default = "/run/llmhop";

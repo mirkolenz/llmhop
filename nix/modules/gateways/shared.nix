@@ -25,24 +25,9 @@ rec {
       (lib.sortOn (e: e.name))
     ];
 
-  # Options of every external gateway listening on TCP.
-  options = displayName: {
-    host = mkOption {
-      type = types.str;
-      default = "127.0.0.1";
-      example = "0.0.0.0";
-      description = "IP address ${displayName} listens on.";
-    };
-    port = mkOption {
-      type = types.port;
-      default = 8080;
-      description = "TCP port ${displayName} listens on.";
-    };
-    openFirewall = mkOption {
-      type = types.bool;
-      default = false;
-      description = "Whether to open `port` in the host firewall, which requires a `host` other than loopback.";
-    };
+  # Options of every gateway, native or Quadlet, without `credentials`, which
+  # each gateway declares itself.
+  commonOptions = displayName: {
     environment = mkOption {
       type = with types; attrsOf str;
       default = { };
@@ -61,29 +46,74 @@ rec {
     };
   };
 
-  # Configuration of the selected gateway `name`, which reaches `endpoints` on
-  # TCP only and binds `port` and the further `ports`.
+  # Assertions that the gateway `name`, reaching `endpoints` on TCP only, binds
+  # none of them by its unix socket.
+  tcpEndpointAssertions =
+    name:
+    map (e: {
+      assertion = e.socket == null;
+      message = "services.llmhop: `${e.owner}` is routed by the gateway `${name}`, but binds a unix socket, which the gateway cannot reach, so set its `port`.";
+    });
+
+  openFirewallOption = mkOption {
+    type = types.bool;
+    default = false;
+    description = "Whether to open `port` in the host firewall, which requires a `host` other than loopback.";
+  };
+
+  # Options of every external gateway listening on TCP.
+  options =
+    displayName:
+    commonOptions displayName
+    // {
+      host = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        example = "0.0.0.0";
+        description = "IP address ${displayName} listens on.";
+      };
+      port = mkOption {
+        type = types.port;
+        default = 8080;
+        description = "TCP port ${displayName} listens on.";
+      };
+      openFirewall = openFirewallOption;
+    };
+
+  # The `container` options of a Quadlet gateway, running `image`.
+  containerOptions =
+    {
+      sectionType,
+      displayName,
+      image,
+    }:
+    {
+      container = {
+        inherit image;
+        config = util.containerConfigOption sectionType displayName;
+        mountOptions.credentials = util.credentialMountOptionsOption displayName;
+      };
+    };
+
+  # Configuration of the selected TCP gateway `name`, which reaches `endpoints`
+  # on TCP only and binds `port`.
   config =
     {
       name,
       unit,
       cfg,
       endpoints,
-      ports ? [ ],
     }:
     {
       assertions = [
         (util.firewallAssertion (owner name) cfg)
       ]
-      ++ map (e: {
-        assertion = e.socket == null;
-        message = "services.llmhop: `${e.owner}` is routed by the gateway `${name}`, but binds a unix socket, which the gateway cannot reach, so set its `port`.";
-      }) endpoints;
+      ++ tcpEndpointAssertions name endpoints;
       services.llmhop = {
         gateway.routes = map (e: e.owner) endpoints;
         claims = {
           unit.${unit} = [ (owner name) ];
-          port = lib.genAttrs (map toString ([ cfg.port ] ++ ports)) (_: [ (owner name) ]);
+          port.${toString cfg.port} = [ (owner name) ];
         };
       };
       networking.firewall.allowedTCPPorts = lib.optional cfg.openFirewall cfg.port;
@@ -97,7 +127,6 @@ rec {
       unit,
       description,
       command,
-      credentials ? { },
       serviceConfig ? { },
     }:
     {
@@ -108,43 +137,41 @@ rec {
         # waits for the network.
         wants = lib.optional (!util.isLoopback cfg.host) "network-online.target";
         after = [ "network.target" ] ++ lib.optional (!util.isLoopback cfg.host) "network-online.target";
-        environment = util.resolveCredentialRefs util.credentialDirectory credentials cfg.environment;
+        environment = util.resolveCredentialRefs util.credentialDirectory cfg.credentials cfg.environment;
         unitConfig = util.startLimitConfig;
         serviceConfig =
           util.hardenedServiceConfig
-          // util.credentialServiceConfig credentials
+          // util.credentialServiceConfig cfg.credentials
           // restartConfig
           // {
             DynamicUser = true;
             EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-            ExecStart = util.execStart utils credentials command;
+            ExecStart = util.execStart utils cfg.credentials command;
             UMask = "0077";
           }
           // serviceConfig;
       };
     };
 
-  # The Quadlet image and container `unit` of the gateway `name` on the host
-  # network, which reaches every endpoint on loopback and binds its listener
-  # there directly. It runs the `image` of `cfg` unless `image` and `imageTag`
-  # replace it, with its entrypoint unless `entrypoint` replaces it, followed
-  # by `arguments`.
+  # The Quadlet image and container `unit` of the gateway `name`, running the
+  # `image` of `cfg` unless `image` and `imageTag` replace it, with its
+  # entrypoint unless `entrypoint` replaces it, followed by `arguments`.
+  # It runs on the host network, which reaches every endpoint on loopback and
+  # binds its listener there directly. With `credentials`, it runs as root to
+  # read their mount. `container.config` is merged last and wins.
   quadletContainer =
     {
       config,
       name,
       cfg,
       unit,
-      image ? cfg.image,
+      image ? cfg.container.image,
       imageTag ? null,
       entrypoint ? null,
       arguments ? [ ],
-      credentials ? { },
-      credentialMountOptions ? [ ],
       environment ? { },
       volumes ? [ ],
       serviceConfig ? { },
-      containerConfig ? { },
     }:
     let
       imageUnit = util.imageUnit {
@@ -162,31 +189,30 @@ rec {
         inherit (imageUnit) images;
         containers.${unit} = {
           unitConfig = util.startLimitConfig // imageUnit.unitConfig;
-          serviceConfig = util.credentialServiceConfig credentials // serviceConfig;
+          serviceConfig = util.credentialServiceConfig cfg.credentials // serviceConfig;
           containerConfig =
             util.baseContainerConfig
             // imageUnit.containerConfig
             // {
               Network = "host";
               Environment =
-                util.resolveCredentialRefs util.containerCredentialDirectory credentials cfg.environment
-                // util.credentialEnvironment credentials
+                util.resolveCredentialRefs util.containerCredentialDirectory cfg.credentials cfg.environment
+                // util.credentialEnvironment cfg.credentials
                 // environment;
               EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-              Volume = volumes ++ util.credentialMount credentialMountOptions credentials;
+              Volume = volumes ++ util.credentialMount cfg.container.mountOptions.credentials cfg.credentials;
             }
             // lib.optionalAttrs (entrypoint != null) { Entrypoint = lib.toJSON [ entrypoint ]; }
             // lib.optionalAttrs (arguments != [ ]) {
               Exec = lib.escapeShellArgs (
-                util.resolveCredentialRefs util.containerCredentialDirectory credentials arguments
+                util.resolveCredentialRefs util.containerCredentialDirectory cfg.credentials arguments
               );
             }
             # The credential mount belongs to host root, so the container runs
             # as root to read it, without any capability like every backend,
-            # unless `containerConfig` maps another identity.
-            // lib.optionalAttrs (credentials != { }) { User = "0:0"; }
-            // containerConfig
-            // cfg.containerConfig;
+            # unless `container.config` maps another identity.
+            // lib.optionalAttrs (cfg.credentials != { }) { User = "0:0"; }
+            // cfg.container.config;
         };
       };
     };

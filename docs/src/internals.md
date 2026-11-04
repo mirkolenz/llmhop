@@ -51,11 +51,11 @@ They cannot use `DynamicUser`, whose ID-mapped state and cache mounts are noexec
 ## Lifecycle
 
 Servers use `Restart = "always"`, since vLLM and SGLang exit 0 after an engine crash, with a start limit of 3 per hour against crash loops.
-A native server is `Type=exec` with an `ExecStartPost=` of `llmhop wait-healthy` that polls `/health` and also watches `$MAINPID`, so a crashed server does not stay `activating` until the timeout.
+A native server is `Type=exec` with an `ExecStartPost=` of `llmhop internal wait-healthy` that polls `/health` and also watches `$MAINPID`, so a crashed server does not stay `activating` until the timeout.
 Containers use Podman's `Notify=healthy`.
 Startup is chained by `name`, since two workers profiling GPU memory on one device both see it free and run out of memory.
-The native llmhop gateway is `PartOf=` its listeners, so restarting a socket also restarts the gateway that holds it.
-Listener configuration changes also trigger a gateway restart on NixOS.
+The llmhop gateway is `PartOf=` its listeners, so restarting a socket also restarts the gateway that holds it.
+Listener configuration changes also trigger a native gateway restart on NixOS.
 
 ## Fetching
 
@@ -66,7 +66,7 @@ Fetchers keep systemd's default start limit, since they do not restart automatic
 Every start or restart of a fetcher also starts `<unit>-refresh`, which it `Wants=`.
 The refresh unit `Requires=` and follows the fetcher, so it only acts on a complete download.
 It prunes the cache to the workload's repositories and revisions, then restarts the server.
-Telling a changed model from an unchanged one would need state, since a moved ref can leave its previous commit pinned by another revision, so every successful fetch restarts a running server, which the weekly default of `fetch.interval` keeps rare.
+Telling a changed model from an unchanged one would need state, since a moved ref can leave its previous commit pinned by another revision, so every successful fetch restarts a running server, which the weekly default of `fetch.schedule` keeps rare.
 It resets the server's start limit first, so planned restarts do not use it up, and `try-restart` leaves a stopped or failed server down, so a server that hit its start limit waits for a manual start.
 The server starts after it, so a first download finds the server still waiting rather than restarting it.
 
@@ -103,6 +103,8 @@ Each gateway module adds its name to the `gateway.type` enum.
 Only llmhop routes detectors, which neither SMG's discovery nor Bifrost's providers can describe.
 SMG gets a discovery file, since it gives up on `--worker-urls` after a startup timeout shorter than model loading.
 External gateways run as dynamic users or on the host network in a container, reaching models on loopback.
+Both llmhop variants share their `listen` options, socket units, claims, firewall rules and tmpfiles in `gateways/llmhop.nix`, and never bind themselves, since their config must not set `listen`.
+Podman passes the sockets of the units listed in the container's `Sockets=` into the container, which stays on the host network.
 
 ## Watermarking
 
@@ -111,9 +113,10 @@ Native builds check the script against the vLLM environment, while containers ru
 
 ## Bundles
 
-Bundles come from quadlet-nix, which renders every rootful Quadlet unit of the system, the NixOS services named by `bundle.services` with their timers, and its `bundle.tmpfiles`, and copies the store paths they reference below `bundle.assetDirectory`.
+Bundles come from quadlet-nix, which renders every rootful Quadlet unit of the system, the NixOS services named by `bundle.services` with their timers, the sockets named by `bundle.sockets`, and its `bundle.tmpfiles`, and copies the store paths they reference below `bundle.assetDirectory`.
 Every Quadlet backend names its update and refresh units there, which the bundle renders without the store `PATH=` of NixOS, so they run `systemctl` and llmhop by their absolute paths.
 llmhop names the bundle, adds its `10-llmhop` tmpfiles rules and rejects native backends and gateways through `bundle.assertions`, which only the bundle checks.
+The Quadlet llmhop gateway names its `llmhop-<name>` listeners in `bundle.sockets`, so the bundle carries their socket units.
 The build fails if a copied file still references the store, so only self-contained files such as scripts, configs, the static llmhop binary and its image archive can be bundled.
 
 ## Containers

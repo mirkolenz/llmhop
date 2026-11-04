@@ -37,8 +37,13 @@ let
     };
   containerDiscoveryFile = "${util.containerRuntimeDirectory}/workers.json";
 
+  options = gateway.options displayName // {
+    credentials = util.credentialsOption;
+    settings = settingsOption;
+  };
+
   settingsOption = mkOption {
-    type = with types; attrsOf anything;
+    type = with types; attrsOf json;
     default = { };
     example = {
       api-key-file = "\${cred:smg.api-key}";
@@ -70,9 +75,12 @@ let
       disable-tokenizer-autoload = true;
     };
 
-  # The metrics port beside `port`.
-  metricsPorts =
-    cfg: lib.optional (cfg.settings.prometheus-port or null != null) cfg.settings.prometheus-port;
+  # The claim of the metrics port beside `port`.
+  metricsClaim = name: cfg: {
+    services.llmhop.claims.port = lib.optionalAttrs (cfg.settings.prometheus-port or null != null) {
+      ${toString cfg.settings.prometheus-port} = [ (gateway.owner name) ];
+    };
+  };
 in
 {
   native =
@@ -90,7 +98,7 @@ in
     {
       options.services.llmhop.gateway = {
         type = mkOption { type = types.nullOr (types.enum [ name ]); };
-        ${name} = gateway.options displayName // {
+        ${name} = options // {
           package = mkOption {
             type = types.package;
             description = ''
@@ -98,8 +106,6 @@ in
               flake's `mkUvEnv`, since nixpkgs lacks SMG.
             '';
           };
-          credentials = util.credentialsOption;
-          settings = settingsOption;
         };
       };
       config = lib.mkIf (config.services.llmhop.gateway.type == name) (
@@ -111,12 +117,11 @@ in
               cfg
               endpoints
               ;
-            ports = metricsPorts cfg;
           })
+          (metricsClaim name cfg)
           { services.llmhop.gateway.${name}.settings = defaultSettings cfg (discoveryFile pkgs endpoints); }
           (gateway.nativeService {
             inherit utils cfg unit;
-            inherit (cfg) credentials;
             description = "SMG model gateway";
             command = [ (lib.getExe' cfg.package "python") ] ++ argv cfg;
           })
@@ -125,6 +130,7 @@ in
     };
 
   quadlet =
+    sectionType:
     { config, pkgs, ... }:
     let
       name = "smg-quadlet";
@@ -134,15 +140,15 @@ in
     {
       options.services.llmhop.gateway = {
         type = mkOption { type = types.nullOr (types.enum [ name ]); };
-        ${name} = gateway.options displayName // {
-          image = util.imageOption // {
-            example = "ghcr.io/smg-project/smg:nightly";
+        ${name} =
+          options
+          // gateway.containerOptions {
+            inherit sectionType;
+            inherit displayName;
+            image = util.imageOption // {
+              example = "ghcr.io/smg-project/smg:nightly";
+            };
           };
-          credentials = util.credentialsOption;
-          settings = settingsOption;
-          containerConfig = util.containerConfigOption "SMG";
-          mountOptions.credentials = util.credentialMountOptionsOption "SMG";
-        };
       };
       config = lib.mkIf (config.services.llmhop.gateway.type == name) (
         lib.mkMerge [
@@ -153,8 +159,8 @@ in
               cfg
               endpoints
               ;
-            ports = metricsPorts cfg;
           })
+          (metricsClaim name cfg)
           { services.llmhop.gateway.${name}.settings = defaultSettings cfg containerDiscoveryFile; }
           (gateway.quadletContainer {
             inherit
@@ -163,8 +169,6 @@ in
               cfg
               unit
               ;
-            inherit (cfg) credentials;
-            credentialMountOptions = cfg.mountOptions.credentials;
             entrypoint = "python3";
             arguments = argv cfg;
             volumes = [

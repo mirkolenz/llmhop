@@ -27,21 +27,12 @@ rec {
   # Whether `model` names a repository to fetch rather than a local path.
   isRepository = model: !lib.hasPrefix "/" model;
 
-  # The llmhop package, whose binary also runs the worker commands.
-  package = pkgs: pkgs.callPackage ../package.nix { };
-
-  # The address probing a listener bound to `host`, loopback for a wildcard.
-  probeHost =
-    host:
-    if host == "0.0.0.0" then
-      "127.0.0.1"
-    else if host == "::" then
-      "::1"
-    else
-      host;
+  # The path every server answers with success once it is ready.
+  healthPath = "/health";
 
   # The address of a server listening on `socket`, or else on its bind
-  # address, as `llmhop wait-healthy` takes it.
+  # address, loopback for a wildcard, as `llmhop internal wait-healthy` takes
+  # it.
   probeUrl =
     {
       socket,
@@ -49,7 +40,16 @@ rec {
       port,
       ...
     }:
-    if socket != null then "unix://${socket}" else "http://${hostPort (probeHost host) port}";
+    let
+      probeHost =
+        if host == "0.0.0.0" then
+          "127.0.0.1"
+        else if host == "::" then
+          "::1"
+        else
+          host;
+    in
+    if socket != null then "unix://${socket}" else "http://${hostPort probeHost port}";
 
   # Render `settings` into the argv of a parser with the given `negateBools`
   # and `listStyle`, flag and value as separate entries. Strings, paths and
@@ -340,11 +340,12 @@ rec {
     description = "Container image reference, including a tag or digest.";
   };
 
-  # `[Container]` keys of every container of `noun`, over the generated ones.
+  # `[Container]` keys of every container of `noun`, over the generated ones,
+  # typed by quadlet-nix's `sectionType`.
   containerConfigOption =
-    noun:
+    sectionType: noun:
     mkOption {
-      type = with types; attrsOf anything;
+      type = sectionType;
       default = { };
       example = {
         UserNS = "auto";
@@ -400,6 +401,6 @@ rec {
   # Assertion that the module of `owner` has Quadlet enabled.
   requireQuadlet = config: owner: {
     assertion = config.virtualisation.quadlet.enable;
-    message = "${owner} requires virtualisation.quadlet.enable.";
+    message = "services.llmhop: ${owner} requires virtualisation.quadlet.enable.";
   };
 }

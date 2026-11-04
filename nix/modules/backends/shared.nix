@@ -37,19 +37,23 @@ rec {
     workload:
     fetchServices workload ++ lib.optional (fetches workload) "${refreshUnit workload.unit}.service";
 
-  # The hub cache of `workload` and the cache `name` and `revision` of each of
-  # its repositories. huggingface_hub records the default branch as `main`,
-  # while llama.cpp names it after the branch but pins no revision, so null
-  # keeps every ref.
-  hubSpecification = engine: cfg: workload: {
-    hub = hubDirectory cfg workload;
-    repositories = map (repository: {
-      name = "models--${
-        lib.replaceStrings [ "/" ] [ "--" ] (lib.head (lib.splitString ":" repository.repo))
-      }";
-      revision = if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
-    }) workload.repositories;
-  };
+  # The file of the hub cache of `workload` and the cache `name` and
+  # `revision` of each of its repositories. huggingface_hub records the
+  # default branch as `main`, while llama.cpp names it after the branch but
+  # pins no revision, so null keeps every ref.
+  hubSpecification =
+    pkgs: engine: cfg: workload:
+    pkgs.writeText "${workload.unit}-hub.json" (
+      lib.toJSON {
+        hub = hubDirectory cfg workload;
+        repositories = map (repository: {
+          name = "models--${
+            lib.replaceStrings [ "/" ] [ "--" ] (lib.head (lib.splitString ":" repository.repo))
+          }";
+          revision = if engine.revisions then lib.defaultTo "main" (repository.revision or null) else null;
+        }) workload.repositories;
+      }
+    );
 
   # The sandbox of a unit running as `owner` on the hub cache `hub`, which the
   # fetcher controls, so it writes nothing else and opens no socket, since
@@ -73,14 +77,24 @@ rec {
       (lib.sortOn (w: w.name))
     ];
 
-  # The units the sorted `models` start after, each its predecessor while
-  # `chained`, so GPU memory profiling never overlaps. See "Lifecycle" in the
-  # module internals documentation.
-  predecessors =
-    chained: models:
+  # `perWorkload` applied to each of the sorted `models` with the units it
+  # starts after, its predecessor while `chained` so GPU memory profiling
+  # never overlaps, and to each of the `extraWorkloads` with none. See
+  # "Lifecycle" in the module internals documentation.
+  mapWorkloads =
+    {
+      chained,
+      models,
+      extraWorkloads,
+      perWorkload,
+    }:
     lib.imap0 (
-      index: _: lib.optional (chained && index > 0) "${(lib.elemAt models (index - 1)).unit}.service"
-    ) models;
+      index: model:
+      perWorkload model (
+        lib.optional (chained && index > 0) "${(lib.elemAt models (index - 1)).unit}.service"
+      )
+    ) models
+    ++ map (workload: perWorkload workload [ ]) extraWorkloads;
 
   # The fetcher of `workload`, downloading its repositories with the engine's
   # `fetcher` into its hub cache, with the fetch credentials in
@@ -111,8 +125,8 @@ rec {
       # The token's value, since llama.cpp reads no token file.
       script =
         "set -e\n"
-        + lib.optionalString (cfg.fetch.tokenCredential != null) ''
-          token="$CREDENTIALS_DIRECTORY"/${lib.escapeShellArg cfg.fetch.tokenCredential}
+        + lib.optionalString (cfg.fetch.hfTokenCredential != null) ''
+          token="$CREDENTIALS_DIRECTORY"/${lib.escapeShellArg cfg.fetch.hfTokenCredential}
           if [ -r "$token" ]; then
             HF_TOKEN=$(cat "$token")
             export HF_TOKEN
@@ -141,21 +155,14 @@ rec {
       RuntimeDirectoryMode = "0710";
     };
 
-  # Keep the transports of tensor parallelism on loopback and off any
-  # InfiniBand fabric. Gloo would otherwise bind the address the hostname
-  # resolves to, such as `127.0.0.2`, which the IP address filter of an
-  # offline server drops. Applied as environment defaults of every model, so
-  # a deployer can still override them.
-  distributedEnvironment = {
-    GLOO_SOCKET_IFNAME = "lo";
-    NCCL_SOCKET_IFNAME = "lo";
-    NCCL_IB_DISABLE = "1";
-  };
-
-  # The environment of the server of `workload`, layered under `environment`,
-  # the backend's and the workload's own. It reads its hub cache and keeps
-  # its runtime caches beside it rather than in the read-only or ephemeral
-  # `$HOME`.
+  # The environment of the server of `workload`. It reads its hub cache and
+  # keeps its runtime caches beside it rather than in the read-only or
+  # ephemeral `$HOME`. Later layers override earlier ones: these defaults,
+  # `engine.environment`, `environment`, then for a listed model the
+  # transports of tensor parallelism, kept on loopback and off any InfiniBand
+  # fabric since Gloo would otherwise bind the address the hostname resolves
+  # to, such as `127.0.0.2`, which the IP address filter of an offline server
+  # drops, and finally the backend's and the workload's own environment.
   serverEnvironment =
     {
       engine,
@@ -186,7 +193,11 @@ rec {
     }
     // engine.environment
     // environment
-    // lib.optionalAttrs (!workload.unlisted) distributedEnvironment
+    // lib.optionalAttrs (!workload.unlisted) {
+      GLOO_SOCKET_IFNAME = "lo";
+      NCCL_SOCKET_IFNAME = "lo";
+      NCCL_IB_DISABLE = "1";
+    }
     // util.resolveCredentialRefs credentialDirectory workload.credentials (
       cfg.environment // workload.environment
     );
@@ -214,9 +225,9 @@ rec {
   # the startup chain, and a failed one leaves the others alone.
   backendConfig =
     {
+      config,
       pkgs,
       utils,
-      systemd,
       engine,
       backend,
       cfg,
@@ -224,7 +235,8 @@ rec {
       workloads,
     }:
     let
-      systemctl = lib.getExe' systemd "systemctl";
+      llmhop = config.services.llmhop.package;
+      systemctl = lib.getExe' config.systemd.package "systemctl";
       fetching = lib.filter fetches workloads;
       fetchers = lib.concatMap fetchServices workloads;
       update = fetchers != [ ];
@@ -248,20 +260,18 @@ rec {
       # The refresh unit that every fetch starts.
       refreshUnitConfig =
         workload:
-        let
-          specification = hubSpecification engine cfg workload;
-        in
         lib.nameValuePair (refreshUnit workload.unit) {
           description = "Refresh ${workload.unit} after a successful fetch";
           # Only after a complete download.
           requires = fetchServices workload;
           after = fetchServices workload;
-          serviceConfig = hubSandbox cacheOwner specification.hub // {
+          serviceConfig = hubSandbox cacheOwner (hubDirectory cfg workload) // {
             Type = "oneshot";
             ExecStartPre = utils.escapeSystemdExecArgs [
-              (lib.getExe (util.package pkgs))
+              (lib.getExe llmhop)
+              "internal"
               "hub-prune"
-              (lib.toJSON specification)
+              (hubSpecification pkgs engine cfg workload)
             ];
             # `+` runs them as root outside the sandbox, which `systemctl` needs.
             # A planned restart does not count towards the start limit, and a
@@ -279,8 +289,8 @@ rec {
         lib.optional update { unit."${backend}-update" = [ "services.llmhop.${backend}" ]; }
         ++ map workloadClaims workloads
       );
-      services.llmhop.${backend}.fetch.credentials = lib.mkIf (cfg.fetch.tokenCredential != null) {
-        ${cfg.fetch.tokenCredential} = lib.mkDefault null;
+      services.llmhop.${backend}.fetch.credentials = lib.mkIf (cfg.fetch.hfTokenCredential != null) {
+        ${cfg.fetch.hfTokenCredential} = lib.mkDefault null;
       };
       # Keyed by the unique owner, so a clash of names reaches the claims
       # assertion rather than failing the merge.
@@ -320,7 +330,7 @@ rec {
           // lib.optionalAttrs update {
             "${backend}-update" = {
               description = "Fetch the models of ${backend}";
-              startAt = lib.optional (cfg.fetch.interval != null) cfg.fetch.interval;
+              startAt = lib.optional (cfg.fetch.schedule != null) cfg.fetch.schedule;
               serviceConfig = {
                 Type = "oneshot";
                 ExecStart = map (fetcher: "-${systemctl} restart ${fetcher}") fetchers;

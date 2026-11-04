@@ -23,7 +23,7 @@ rec {
   backendOptions = engine: {
     enable = lib.mkEnableOption "${engine.displayName} model serving";
     fetch = {
-      interval = mkOption {
+      schedule = mkOption {
         type = with types; nullOr str;
         default = "weekly";
         example = "daily";
@@ -46,14 +46,14 @@ rec {
         '';
       };
       environmentFile = mkOption {
-        type = with types; nullOr path;
+        type = with types; nullOr externalPath;
         default = null;
         description = ''
           File in `KEY=VALUE` format forwarded to every fetcher, for
           variables that only exist as values.
         '';
       };
-      tokenCredential = mkOption {
+      hfTokenCredential = mkOption {
         type = with types; nullOr str;
         default = null;
         example = "llmhop.hf-token";
@@ -73,13 +73,14 @@ rec {
       };
     };
     cache.directory = mkOption {
-      type = types.path;
+      type = types.externalPath;
       default = "/var/cache/${engine.name}";
       description = ''
-        Root of the cache directories of this backend's workloads, each
-        `<name>` the `HF_HOME` of one fetcher and its server, created with
-        mode `0700`. The fetcher writes its `hub/`, which the server only
-        reads. Point it at a data disk for large models.
+        Root of the cache directories of this backend's workloads, created
+        with mode `0711`, each `<name>` the `HF_HOME` of one fetcher and its
+        server, created with mode `0700`. The fetcher writes its `hub/`,
+        which the server only reads. Point it at a data disk for large
+        models.
       '';
     };
     environment = mkOption {
@@ -92,7 +93,7 @@ rec {
       '';
     };
     environmentFile = mkOption {
-      type = with types; nullOr path;
+      type = with types; nullOr externalPath;
       default = null;
       example = "/etc/${engine.name}/.env";
       description = ''
@@ -102,7 +103,7 @@ rec {
       '';
     };
     modelSettings = mkOption {
-      type = with types; attrsOf anything;
+      type = with types; attrsOf json;
       default = { };
       description = ''
         CLI flags forwarded to the server of every model, under the
@@ -286,7 +287,7 @@ rec {
           '';
         };
         environmentFile = mkOption {
-          type = with types; nullOr path;
+          type = with types; nullOr externalPath;
           default = null;
           description = ''
             File in `KEY=VALUE` format forwarded to this ${noun}'s server,
@@ -299,14 +300,18 @@ rec {
           type = types.bool;
           default = true;
           description = ''
-            Whether this ${noun}'s server runs without network access. Disable
-            it for features that download at runtime, such as media URLs in
-            requests. The server serves only what its fetcher downloaded either
-            way.
+            Whether this ${noun}'s server runs without network access. Natively,
+            a socket gets a network namespace of its own and a `port` on
+            loopback an IP address filter, while one beyond loopback stays
+            online. A Quadlet container runs with `Network=none`, which
+            requires its socket, so there it defaults to whether `port` is null.
+            Disable it for features that download at runtime, such as media URLs
+            in requests.
+            The server serves only what its fetcher downloaded either way.
           '';
         };
         settings = mkOption {
-          type = with types; attrsOf anything;
+          type = with types; attrsOf json;
           default = { };
           description = ''
             CLI flags of this ${noun}'s server, over the backend's
@@ -330,11 +335,11 @@ rec {
       ];
     };
 
-  # Submodule of a model, a workload whose `model` and `extraModels` the
-  # fetcher downloads beside the `extraRepositories` every model of the
+  # Submodule of a model, a workload whose `model` and `extraRepositories` the
+  # fetcher downloads beside the `requiredRepositories` every model of the
   # backend needs.
   modelModule =
-    { engine, extraRepositories }:
+    { engine, requiredRepositories }:
     { config, ... }:
     {
       options = {
@@ -347,7 +352,7 @@ rec {
             in a container one inside it, is served as is.
           '';
         };
-        extraModels = mkOption {
+        extraRepositories = mkOption {
           type = with types; listOf str;
           default = [ ];
           example = [ "Qwen/Qwen3-0.6B" ];
@@ -365,7 +370,7 @@ rec {
           example = "main";
           description = ''
             Branch, tag or commit of `model` that the fetcher downloads and the
-            server loads. `null` follows the default branch, so `fetch.interval`
+            server loads. `null` follows the default branch, so `fetch.schedule`
             picks up upstream changes, while a commit pins the model.
           '';
         };
@@ -375,8 +380,8 @@ rec {
           repo = config.model;
           revision = config.revision or null;
         }
-        ++ map (repo: { inherit repo; }) config.extraModels
-        ++ extraRepositories;
+        ++ map (repo: { inherit repo; }) config.extraRepositories
+        ++ requiredRepositories;
     };
 
   # The models of a backend, each a submodule of `modules`.

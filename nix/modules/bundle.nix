@@ -13,11 +13,11 @@ in
     assertions = [
       {
         assertion = native == [ ];
-        message = "only Quadlet backends can be bundled, but `${lib.concatStringsSep "`, `" native}` is enabled.";
+        message = "services.llmhop: only Quadlet backends can be bundled, but `${lib.concatStringsSep "`, `" native}` is enabled.";
       }
       {
         assertion = gateway == null || lib.hasSuffix "-quadlet" gateway;
-        message = "only Quadlet gateways can be bundled, but the gateway is `${toString gateway}`.";
+        message = "services.llmhop: only Quadlet gateways can be bundled, but the gateway is `${toString gateway}`.";
       }
     ];
   };

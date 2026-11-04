@@ -194,7 +194,7 @@ testers.nixosTest {
           # Two sockets, so llmhop serves every descriptor systemd hands over.
           listen.local = { };
           credentials."llmhop.client-token" = null;
-          settings.authTokens = [ "\${cred:llmhop.client-token}" ];
+          settings.authTokens.client = "\${cred:llmhop.client-token}";
         };
       };
     };
@@ -212,12 +212,13 @@ testers.nixosTest {
     services.llmhop = {
       llama-cpp-quadlet = {
         enable = true;
-        image = "docker-archive:${fakeImage}";
-        containerConfig.AutoUpdate = "disabled";
+        container.image = "docker-archive:${fakeImage}";
+        container.config.AutoUpdate = "disabled";
         environment.FAKE_LOADED = "1";
         models.fake-model = {
           model = "example/fake:Q4_K_M";
           port = 18081;
+          offline = false;
         };
       };
       gateway.type = "llmhop-quadlet";

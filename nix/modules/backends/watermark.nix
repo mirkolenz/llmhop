@@ -22,10 +22,15 @@ let
     mounts = [ "${script}:${containerScript}:ro" ];
   };
 
-  # vLLM's `WatermarkConfig` without `key`, beside the `credential` holding
-  # it, so a model's watermark can be copied into a detector profile.
+  # vLLM's `WatermarkConfig` without `key` as `settings`, beside the
+  # `credential` holding it, so a model's watermark can be copied into a
+  # detector profile.
   watermarkType = types.submodule {
-    freeformType = with types; attrsOf anything;
+    options.settings = mkOption {
+      type = with types; attrsOf json;
+      default = { };
+      description = "vLLM's `WatermarkConfig` without `key`.";
+    };
     options.credential = mkOption {
       type = types.str;
       default = "vllm.watermark-key";
@@ -39,12 +44,11 @@ let
     };
   };
   watermarkExample = {
-    algorithm = "dual_key_gumbel";
     credential = "vllm.watermark-key.2026-10";
+    settings.algorithm = "dual_key_gumbel";
   };
 
-  # The `WatermarkConfig` of `watermark` and the reference to its key.
-  watermarkConfig = watermark: removeAttrs watermark [ "credential" ];
+  # The reference to the key of `watermark`.
   keyReference = watermark: "\${cred:${watermark.credential}}";
 
   # Imports the key of every one of `watermarks` unless `credentials` names a
@@ -65,15 +69,15 @@ let
         default = null;
         example = watermarkExample;
         description = ''
-          vLLM's `WatermarkConfig` without `key`, which a detector profile must
-          repeat, and the `credential` holding the key.
+          The `settings` of vLLM's `WatermarkConfig` without `key`, which a
+          detector profile must repeat, and the `credential` holding the key.
         '';
       };
       config = lib.mkIf (config.watermark != null) {
         credentials = keyCredentials [ config.watermark ];
         # Flags `mkVllmWatermark`'s script reads, which win like derived ones.
         settings = lib.mapAttrs (_: lib.mkForce) {
-          watermark-config = watermarkConfig config.watermark;
+          watermark-config = config.watermark.settings;
           watermark-key-file = keyReference config.watermark;
         };
       };
@@ -124,7 +128,7 @@ let
             profiles = lib.mapAttrs (_: profile: {
               inherit (profile) tokenizer revision;
               key_file = keyReference profile.watermark;
-              config = watermarkConfig profile.watermark;
+              config = profile.watermark.settings;
             }) detector.profiles;
           };
         })
@@ -219,13 +223,13 @@ let
 
   # Serves the detectors of `backend` beside its models, and rejects an inline
   # key, which would enter the Nix store and the command line.
-  backendConfig =
+  detectorConfig =
     backend: cfg:
     let
       inlineKey =
         workload: watermarks:
         lib.any (config: lib.isAttrs config && config ? key) (
-          watermarks ++ [ (workload.settings.watermark-config or null) ]
+          map (watermark: watermark.settings) watermarks ++ [ (workload.settings.watermark-config or null) ]
         )
         || lib.any (lib.hasPrefix "watermark-config.") (lib.attrNames workload.settings);
       inlineKeyAssertion = path: workload: watermarks: {
@@ -296,7 +300,7 @@ in
             config.script = lib.mkDefault (mkScript config.package);
           };
       };
-      config = backendConfig "vllm" cfg;
+      config = detectorConfig "vllm" cfg;
     };
 
   # The Quadlet backend. The script is mounted into the image and run
@@ -310,7 +314,7 @@ in
         model =
           { config, ... }:
           {
-            config.container = lib.mkIf (config.watermark != null) (
+            config.invocation = lib.mkIf (config.watermark != null) (
               scriptContainer source [
                 "serve"
                 config.model
@@ -321,16 +325,20 @@ in
           { config, ... }:
           {
             options = {
-              container = mkOption {
+              invocation = mkOption {
                 type = types.attrs;
                 internal = true;
                 default = scriptContainer config.script [ "detect" ];
                 description = "The `entrypoint`, `arguments` and `mounts` of this detector's container.";
               };
             };
-            config.script = lib.mkDefault source;
+            config = {
+              script = lib.mkDefault source;
+              # `Network=none` rules out a published port.
+              offline = lib.mkDefault (config.socket != null);
+            };
           };
       };
-      config = backendConfig "vllm-quadlet" config.services.llmhop.vllm-quadlet;
+      config = detectorConfig "vllm-quadlet" config.services.llmhop.vllm-quadlet;
     };
 }

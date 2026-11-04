@@ -11,7 +11,7 @@ let
   apiKeys = "/run/secrets/api-keys";
   serverConfig = "/run/secrets/server.yaml";
   watermarkKey = "/run/secrets/watermark-key";
-  watermark.algorithm = "dual_key_gumbel";
+  watermark.settings.algorithm = "dual_key_gumbel";
   fakeVllm = pkgs.writeShellScriptBin "vllm" "exit 0";
 
   # Not `lib.hasInfix`: it compiles the needle into a regex, and `lib.match`
@@ -56,17 +56,20 @@ let
     mkSystem {
       vllm-quadlet = lib.recursiveUpdate {
         enable = true;
-        image = "docker.io/vllm/vllm-openai:latest";
+        container.image = "docker.io/vllm/vllm-openai:latest";
         models.test = {
           model = "example/test";
           port = 18001;
+          offline = false;
         };
       } overrides;
     };
 
   quadlet = mkQuadlet {
-    containerConfig.UserNS = "auto";
-    mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+    container = {
+      config.UserNS = "auto";
+      mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
+    };
     models.test = {
       credentials = {
         api-keys = apiKeys;
@@ -82,10 +85,12 @@ let
     models.marked = {
       model = "example/marked";
       port = 18003;
+      offline = false;
       inherit watermark;
     };
     detectors.watermark = {
       port = 18002;
+      offline = false;
       # Two keys of the same tokenizer, the retired one rotated out.
       profiles = rec {
         current = {
@@ -112,7 +117,7 @@ let
     vllm = {
       enable = true;
       package = fakeVllm;
-      fetch.tokenCredential = "llmhop.hf-token";
+      fetch.hfTokenCredential = "llmhop.hf-token";
       models = {
         local = {
           model = "/srv/models/local";
@@ -167,7 +172,7 @@ let
     };
     llama-cpp-quadlet = {
       enable = true;
-      image = "ghcr.io/ggml-org/llama.cpp:server";
+      container.image = "ghcr.io/ggml-org/llama.cpp:server";
       models = {
         b.model = "example/b";
         a.model = "example/a";
@@ -209,10 +214,11 @@ let
         };
         sglang-quadlet = {
           enable = true;
-          image = "docker.io/lmsysorg/sglang:latest";
+          container.image = "docker.io/lmsysorg/sglang:latest";
           models.llama = {
             model = "example/llama";
             port = 24002;
+            offline = false;
           };
         };
       } overrides
@@ -233,18 +239,20 @@ let
       gateway = {
         type = "smg-quadlet";
         smg-quadlet = {
-          image = "ghcr.io/smg-project/smg:nightly";
+          container = {
+            image = "ghcr.io/smg-project/smg:nightly";
+            config.UserNS = "auto";
+            mountOptions.credentials = [ "idmap" ];
+          };
           credentials."smg.api-key" = apiKeys;
           settings.api-key-file = "\${cred:smg.api-key}";
-          containerConfig.UserNS = "auto";
-          mountOptions.credentials = [ "idmap" ];
         };
       };
     }).virtualisation.quadlet.containers.smg;
   bifrost = mkRoutable {
     gateway = {
       type = "bifrost-quadlet";
-      bifrost-quadlet.image = "docker.io/maximhq/bifrost:v2.3.2";
+      bifrost-quadlet.container.image = "docker.io/maximhq/bifrost:v2.3.2";
     };
   };
 
@@ -349,10 +357,11 @@ let
         ] native.systemd.services.vllm-marked.serviceConfig.ExecStart;
         # Each inline key fails its own assertion.
         inline = failing "watermark key inline" (mkQuadlet {
-          models.test.watermark.key = 42;
+          models.test.watermark.settings.key = 42;
           models.inline = {
             model = "example/inline";
             port = 18004;
+            offline = false;
             settings.watermark-config = {
               algorithm = "gumbel";
               key = 42;
@@ -444,7 +453,9 @@ let
         native = {
           inherit (nativeRefresh.serviceConfig) User ReadWritePaths SystemCallFilter;
           inherit (nativeRefresh) requires;
-          prune = containsAll [ "/bin/llmhop\" \"hub-prune\" " ] nativeRefresh.serviceConfig.ExecStartPre;
+          prune = containsAll [
+            "/bin/llmhop\" \"internal\" \"hub-prune\" "
+          ] nativeRefresh.serviceConfig.ExecStartPre;
           restart = nativeRefresh.serviceConfig.ExecStart;
         };
         quadlet = quadlet.systemd.services.vllm-test-refresh.serviceConfig.User;
@@ -552,6 +563,52 @@ let
       };
     };
 
+    # Both llmhop gateways receive their listeners as sockets, which is why
+    # `settings` cannot bind any.
+    testLlmhopSockets = {
+      expr =
+        let
+          llmhopQuadlet = mkRoutable {
+            gateway = {
+              type = "llmhop-quadlet";
+              llmhop-quadlet.listen.proxy.socketGroup = "caddy";
+            };
+          };
+        in
+        {
+          native = {
+            inherit (native.systemd.sockets.llmhop-default) listenStreams;
+            sockets = native.systemd.services.llmhop.serviceConfig.Sockets;
+          };
+          quadlet = {
+            inherit (llmhopQuadlet.systemd.sockets.llmhop-default) listenStreams;
+            sockets = llmhopQuadlet.virtualisation.quadlet.containers.llmhop.serviceConfig.Sockets;
+            group = llmhopQuadlet.systemd.sockets.llmhop-proxy.socketConfig.SocketGroup;
+          };
+          listen = failing "sets `listen`" (mkRoutable {
+            gateway = {
+              type = "llmhop-quadlet";
+              llmhop-quadlet.settings.listen = [ ":8080" ];
+            };
+          });
+        };
+      expected = {
+        native = {
+          listenStreams = [ "127.0.0.1:8080" ];
+          sockets = [ "llmhop-default.socket" ];
+        };
+        quadlet = {
+          listenStreams = [ "127.0.0.1:8080" ];
+          sockets = [
+            "llmhop-default.socket"
+            "llmhop-proxy.socket"
+          ];
+          group = "caddy";
+        };
+        listen = 1;
+      };
+    };
+
     # Clashing ports, units and names fail one assertion each, even when the
     # gateway reads the clashing endpoints.
     testClaims = {
@@ -567,10 +624,11 @@ let
           };
           vllm-quadlet = {
             enable = true;
-            image = "docker.io/vllm/vllm-openai:latest";
+            container.image = "docker.io/vllm/vllm-openai:latest";
             models.container = {
               model = "example/test";
               port = 22001;
+              offline = false;
             };
           };
         });
@@ -583,10 +641,11 @@ let
           };
           llama-cpp-quadlet = {
             enable = true;
-            image = "ghcr.io/ggml-org/llama.cpp:server";
+            container.image = "ghcr.io/ggml-org/llama.cpp:server";
             models.test = {
               model = "example/test";
               port = 22002;
+              offline = false;
             };
           };
         });
@@ -601,6 +660,22 @@ let
     # The listener and the derived flags win over `settings`, so gateways and
     # the health probe reach the server where it listens, by the name it
     # serves.
+    # A published port cannot run without network.
+    testOfflinePort = {
+      expr = {
+        port = failing "with `offline = true`" (mkQuadlet {
+          models.test.offline = true;
+        });
+        socket = failing "with `offline = true`" (mkQuadlet {
+          models.test.port = null;
+        });
+      };
+      expected = {
+        port = 1;
+        socket = 0;
+      };
+    };
+
     testManagedSettings = {
       expr = containsAll [
         ''"--host" "127.0.0.1"''

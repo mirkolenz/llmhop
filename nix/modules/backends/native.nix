@@ -137,13 +137,21 @@ let
             ExecStart = util.execStart utils workload.credentials (
               workload.command ++ util.renderCliArgs engine workload.settings
             );
-            # Holds the unit in `activating` until the server answers
-            # `/health`, and fails it once the server exits before that.
-            ExecStartPost = utils.escapeSystemdExecArgs [
-              (lib.getExe (util.package pkgs))
-              "wait-healthy"
-              (util.probeUrl workload)
-            ];
+            # Holds the unit in `activating` until the server answers its health
+            # path, and fails it once the server exits before that. systemd
+            # expands `$MAINPID`, which escaping would turn into a literal.
+            ExecStartPost = "${
+              utils.escapeSystemdExecArgs [
+                (lib.getExe config.services.llmhop.package)
+                "internal"
+                "wait-healthy"
+              ]
+            } $MAINPID ${
+              utils.escapeSystemdExecArgs [
+                (util.probeUrl workload)
+                util.healthPath
+              ]
+            }";
           };
       };
     }
@@ -188,7 +196,7 @@ in
             description = ''
               Package providing ${engine.native.packageEntry}, built from
               a uv workspace with the flake's `mkUvEnv`, as in
-              `inputs.llmhop.legacyPackages.''${pkgs.system}.mkUvEnv { workspaceRoot = ./${name}-env; }`.
+              `inputs.llmhop.legacyPackages.''${pkgs.stdenv.hostPlatform.system}.mkUvEnv { workspaceRoot = ./${name}-env; }`.
             '';
           }
         else
@@ -214,7 +222,7 @@ in
             })
             (opts.modelModule {
               inherit engine;
-              extraRepositories = engine.native.repositories;
+              requiredRepositories = engine.native.repositories;
             })
             (
               { config, ... }:
@@ -240,8 +248,6 @@ in
               }
             )
           ];
-    }
-    // lib.optionalAttrs uv {
       startupOrdering = opts.startupOrderingOption "via `environment`, e.g. `CUDA_VISIBLE_DEVICES`";
     };
 
@@ -249,8 +255,12 @@ in
     lib.mkMerge [
       {
         systemd.services = lib.mkMerge (
-          lib.zipListsWith units models (shared.predecessors (uv && cfg.startupOrdering) models)
-          ++ map (workload: units workload [ ]) cfg.extraWorkloads
+          shared.mapWorkloads {
+            chained = cfg.startupOrdering;
+            inherit models;
+            inherit (cfg) extraWorkloads;
+            perWorkload = units;
+          }
         );
         # Every socket client joins `group`, which owns the worker sockets.
         users.users = lib.mkIf (lib.any (w: w.socket != null) workloads) (
@@ -260,8 +270,8 @@ in
         );
       }
       (shared.backendConfig {
-        systemd = config.systemd.package;
         inherit
+          config
           pkgs
           utils
           engine

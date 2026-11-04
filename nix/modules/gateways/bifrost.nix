@@ -34,31 +34,34 @@ let
         }
     );
 
-  settingsOption =
-    pkgs:
-    mkOption {
-      inherit (pkgs.formats.json { }) type;
-      default = { };
-      example = {
-        encryption_key = "env.BIFROST_ENCRYPTION_KEY";
-        governance.virtual_keys = [
-          {
-            id = "default";
-            name = "default";
-            value = "env.BIFROST_VIRTUAL_KEY";
-            is_active = true;
-          }
-        ];
-      };
-      description = ''
-        Bifrost's `config.json`, with every listed model as a key of its
-        `vllm` or `sgl` provider. Changes from its web UI or API persist
-        until the matching section of this file changes, while
-        `source_of_truth = "config.json"` prunes them and
-        `config_store.enabled = false` disables them. Use upstream `env.`
-        references with `environmentFile` for secrets.
-      '';
+  settingsOption = mkOption {
+    type = with types; attrsOf json;
+    default = { };
+    example = {
+      encryption_key = "env.BIFROST_ENCRYPTION_KEY";
+      governance.virtual_keys = [
+        {
+          id = "default";
+          name = "default";
+          value = "env.BIFROST_VIRTUAL_KEY";
+          is_active = true;
+        }
+      ];
     };
+    description = ''
+      Bifrost's `config.json`, with every listed model as a key of its
+      `vllm` or `sgl` provider. Changes from its web UI or API persist
+      until the matching section of this file changes, while
+      `source_of_truth = "config.json"` prunes them and
+      `config_store.enabled = false` disables them. Use upstream `env.`
+      references with `environmentFile` for secrets.
+    '';
+  };
+
+  options = gateway.options displayName // {
+    credentials = util.credentialsOption;
+    settings = settingsOption;
+  };
 
   defaultSettings = endpoints: {
     "$schema" = lib.mkDefault "https://www.getbifrost.ai/schema";
@@ -85,7 +88,7 @@ in
     {
       options.services.llmhop.gateway = {
         type = mkOption { type = types.nullOr (types.enum [ name ]); };
-        ${name} = gateway.options displayName // {
+        ${name} = options // {
           package = mkOption {
             type = types.package;
             description = ''
@@ -93,7 +96,6 @@ in
               Bifrost's own flake, since nixpkgs lacks it.
             '';
           };
-          settings = settingsOption pkgs;
         };
       };
       config = lib.mkIf (config.services.llmhop.gateway.type == name) (
@@ -136,6 +138,7 @@ in
     };
 
   quadlet =
+    sectionType:
     { config, pkgs, ... }:
     let
       name = "bifrost-quadlet";
@@ -145,13 +148,15 @@ in
     {
       options.services.llmhop.gateway = {
         type = mkOption { type = types.nullOr (types.enum [ name ]); };
-        ${name} = gateway.options displayName // {
-          containerConfig = util.containerConfigOption "Bifrost";
-          image = util.imageOption // {
-            example = "docker.io/maximhq/bifrost:v2.3.2";
+        ${name} =
+          options
+          // gateway.containerOptions {
+            inherit sectionType;
+            inherit displayName;
+            image = util.imageOption // {
+              example = "docker.io/maximhq/bifrost:v2.3.2";
+            };
           };
-          settings = settingsOption pkgs;
-        };
       };
       config = lib.mkIf (config.services.llmhop.gateway.type == name) (
         lib.mkMerge [

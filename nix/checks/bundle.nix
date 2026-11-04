@@ -11,20 +11,22 @@ let
       type = "llmhop-quadlet";
       llmhop-quadlet = {
         credentials."llmhop.client-token" = null;
-        settings.authTokens = [ "\${cred:llmhop.client-token}" ];
+        settings.authTokens.client = "\${cred:llmhop.client-token}";
       };
     };
     vllm-quadlet = {
       enable = true;
-      image = "docker.io/vllm/vllm-openai:latest";
-      fetch.interval = "weekly";
+      container.image = "docker.io/vllm/vllm-openai:latest";
+      fetch.schedule = "weekly";
       models.qwen = {
         model = "Qwen/Qwen3-8B";
         port = 8001;
-        watermark.algorithm = "gumbel";
+        offline = false;
+        watermark.settings.algorithm = "gumbel";
       };
       detectors.detector = {
         port = 8002;
+        offline = false;
         profiles.qwen.tokenizer = "Qwen/Qwen3-8B";
       };
     };
@@ -56,7 +58,10 @@ runCommand "llmhop-bundle-tests" { } ''
 
   grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-qwen.container
   grep -qx 'PartOf=llmhop-image.service' etc/containers/systemd/llmhop.container
-  grep -qE '^ExecStartPre="/usr/local/lib/llmhop/[^ ]+-llmhop-[^/]+/bin/llmhop" "hub-prune" ' etc/systemd/system/vllm-qwen-refresh.service
+  grep -qx 'Sockets=llmhop-default.socket' etc/containers/systemd/llmhop.container
+  grep -qx 'ListenStream=127.0.0.1:8080' etc/systemd/system/llmhop-default.socket
+  grep -qx 'Wants=llmhop-default.socket' etc/systemd/system/sockets.target.d/llmhop.conf
+  grep -qE '^ExecStartPre="/usr/local/lib/llmhop/[^ ]+-llmhop-[^/]+/bin/llmhop" "internal" "hub-prune" ' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-quadlet-update.timer

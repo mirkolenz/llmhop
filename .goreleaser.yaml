@@ -1,6 +1,12 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 release:
   prerelease: auto
 builds:
   - main: ./cmd/llmhop
     binary: llmhop
-# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+    env:
+      - CGO_ENABLED=0
+    # The hub cache and process checks rely on Unix APIs.
+    goos:
+      - linux
+      - darwin

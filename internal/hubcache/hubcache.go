@@ -35,7 +35,7 @@ func Prune(spec Specification) error {
 		return err
 	}
 
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	wanted := map[string]map[string]bool{}
 

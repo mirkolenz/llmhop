@@ -90,23 +90,17 @@
         // {
           # A minimal system with Quadlet and llmhop's modules, configured by
           # `modules`, and its Quadlet units as files for a host without Nix,
-          # see `services.llmhop.bundle`.
+          # see `virtualisation.quadlet.bundle` of quadlet-nix.
           mkQuadletSystem =
             { modules }:
-            inputs.nixpkgs.lib.nixosSystem {
-              modules = [
-                self.nixosModules.quadlet
-                {
-                  nixpkgs.pkgs = pkgs;
-                  system.stateVersion = lib.trivial.release;
-                  boot.isContainer = true;
-                  virtualisation.quadlet.enable = true;
-                }
-              ]
-              ++ modules;
+            inputs.quadlet-nix.legacyPackages.${system}.mkBundleSystem {
+              modules = [ self.nixosModules.quadlet ] ++ modules;
             };
           mkQuadletBundle =
-            args: (config.legacyPackages.mkQuadletSystem args).config.services.llmhop.bundle.package;
+            { modules }:
+            inputs.quadlet-nix.legacyPackages.${system}.mkBundle {
+              modules = [ self.nixosModules.quadlet ] ++ modules;
+            };
           # Reads `VERSION` and `GITHUB_TOKEN` when it runs.
           docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
             github.enable = true;

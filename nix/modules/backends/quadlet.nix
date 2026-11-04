@@ -145,7 +145,7 @@ let
             ];
             Volume = [
               cache
-              "${builtins.toFile "fetch.sh" fetch.script}:${fetchScriptPath}:ro"
+              "${lib.toFile "fetch.sh" fetch.script}:${fetchScriptPath}:ro"
             ]
             ++ credentials cfg.fetch.credentials;
             EnvironmentFile = fetch.environmentFile;
@@ -268,31 +268,9 @@ in
         ];
   };
 
-  config = lib.mkIf cfg.enable (
-    lib.mkMerge [
-      {
-        assertions = [ (util.requireQuadlet config "services.llmhop.${backend}") ];
-        virtualisation.quadlet = lib.mkIf (workloads != [ ]) {
-          inherit (image) images;
-          containers = lib.mkMerge (
-            lib.zipListsWith containers models (shared.predecessors cfg.startupOrdering models)
-            ++ map (workload: containers workload [ ]) cfg.extraWorkloads
-          );
-        };
-        services.llmhop.claims = lib.mkIf (workloads != [ ]) image.claims;
-
-        # A container maps to no host group known in advance, so its socket
-        # is reachable through a default ACL on the root instead. See "Unix
-        # sockets" in the module internals documentation.
-        systemd.tmpfiles.settings."10-llmhop" =
-          lib.mkIf (lib.any (w: w.socket != null) workloads && config.services.llmhop.socketClients != [ ])
-            {
-              ${config.services.llmhop.socketDirectory}.a.argument = lib.concatMapStringsSep "," (
-                user: "default:user:${user}:-wx"
-              ) config.services.llmhop.socketClients;
-            };
-      }
-      (shared.backendConfig {
+  config =
+    let
+      backendConfig = shared.backendConfig {
         inherit
           engine
           backend
@@ -302,7 +280,34 @@ in
         inherit pkgs utils;
         systemd = config.systemd.package;
         cacheOwner = cfg.cache;
-      })
-    ]
-  );
+      };
+    in
+    lib.mkIf cfg.enable (
+      lib.mkMerge [
+        {
+          assertions = [ (util.requireQuadlet config "services.llmhop.${backend}") ];
+          virtualisation.quadlet = lib.mkIf (workloads != [ ]) {
+            inherit (image) images;
+            containers = lib.mkMerge (
+              lib.zipListsWith containers models (shared.predecessors cfg.startupOrdering models)
+              ++ map (workload: containers workload [ ]) cfg.extraWorkloads
+            );
+          };
+          services.llmhop.claims = lib.mkIf (workloads != [ ]) image.claims;
+
+          # A container maps to no host group known in advance, so its socket
+          # is reachable through a default ACL on the root instead. See "Unix
+          # sockets" in the module internals documentation.
+          systemd.tmpfiles.settings."10-llmhop" =
+            lib.mkIf (lib.any (w: w.socket != null) workloads && config.services.llmhop.socketClients != [ ])
+              {
+                ${config.services.llmhop.socketDirectory}.a.argument = lib.concatMapStringsSep "," (
+                  user: "default:user:${user}:-wx"
+                ) config.services.llmhop.socketClients;
+              };
+        }
+        backendConfig
+        { virtualisation.quadlet.bundle.services = lib.attrNames backendConfig.systemd.services; }
+      ]
+    );
 }

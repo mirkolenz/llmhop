@@ -111,13 +111,10 @@ Native builds check the script against the vLLM environment, while containers ru
 
 ## Bundles
 
-A bundle renders the same units as NixOS and only rewrites their paths: the store path of `systemctl` becomes the host's own, and every other store path they reference is copied below `bundle.assetDirectory` under its store name, with symlinks resolved.
+Bundles come from quadlet-nix, which renders every rootful Quadlet unit of the system, the NixOS services named by `bundle.services` with their timers, and its `bundle.tmpfiles`, and copies the store paths they reference below `bundle.assetDirectory`.
+Every Quadlet backend names its update and refresh units there, which the bundle renders without the store `PATH=` of NixOS, so they run `systemctl` and llmhop by their absolute paths.
+llmhop names the bundle, adds its `10-llmhop` tmpfiles rules and rejects native backends and gateways through `bundle.assertions`, which only the bundle checks.
 The build fails if a copied file still references the store, so only self-contained files such as scripts, configs, the static llmhop binary and its image archive can be bundled.
-The bundle adds the `[Install]` section that quadlet-nix leaves to NixOS, and renders the update and refresh units and their timers itself, since the NixOS ones set a store `PATH=`.
-A `timers.target` drop-in wants the timers, so the files alone enable every bundled unit.
-`install.sh` restarts every running unit whose file it changes, so a reinstalled bundle replaces the running deployment, and a changed image unit restarts the containers requiring it.
-It also stops the units that the previous bundle installed but the new one drops, such as removed models or disabled update timers, and deletes their files and a dropped tmpfiles config.
-The `uninstall.sh` it installs into `bundle.assetDirectory` removes the whole bundle the same way, keeping only the state directories its tmpfiles rules created.
 
 ## Containers
 

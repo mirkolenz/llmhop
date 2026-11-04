@@ -242,8 +242,9 @@ packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.
 };
 ```
 
-A NixOS system importing `nixosModules.quadlet` exposes the same as `services.llmhop.bundle.package`.
-The bundle holds the Quadlet files, update timers and tmpfiles rules below `etc/`, the scripts and generated configs below `bundle.assetDirectory`, `/usr/local/lib/llmhop` by default, and an `install.sh` that copies them into place, starts the servers and restarts every running unit it changed.
+It is the [bundle of quadlet-nix](https://github.com/mirkolenz/quadlet-nix#bundles-for-hosts-without-nix) named `llmhop`, which a NixOS system importing `nixosModules.quadlet` exposes as `virtualisation.quadlet.bundle.package`, with every rootful Quadlet unit of that system.
+The bundle holds the Quadlet files, update and refresh units, timers and tmpfiles rules below `etc/`, the scripts and generated configs below `/usr/local/lib/llmhop`, and an `install.sh` that copies them into place, starts the servers, restarts every running unit it changed and retires those a previous bundle had but this one lacks.
+The `uninstall.sh` installed beside the assets removes the bundle again, keeping the model caches.
 Native backends and gateways cannot be bundled, and firewall and user options have no effect there.
 
 ### Native vLLM and SGLang from prebuilt wheels

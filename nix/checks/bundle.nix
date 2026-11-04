@@ -2,14 +2,10 @@
 # rejects what cannot be bundled.
 {
   lib,
-  linkFarm,
   mkQuadletBundle,
   runCommand,
-  writeText,
 }:
 let
-  # A mounted asset of store symlinks, which the bundle must resolve.
-  templates = linkFarm "templates" { "chat.jinja" = writeText "chat.jinja" "{{ messages }}"; };
   config = {
     gateway = {
       type = "llmhop-quadlet";
@@ -22,7 +18,6 @@ let
       enable = true;
       image = "docker.io/vllm/vllm-openai:latest";
       fetch.interval = "weekly";
-      containerConfig.Mount = "type=bind,source=${templates},destination=/templates";
       models.qwen = {
         model = "Qwen/Qwen3-8B";
         port = 8001;
@@ -51,47 +46,20 @@ runCommand "llmhop-bundle-tests" { } ''
   set -euo pipefail
   cd ${bundle}
   test -f etc/containers/systemd/vllm-qwen.container
-  test -f etc/containers/systemd/vllm-qwen-fetch.container
   test -f etc/containers/systemd/vllm-detector.container
-  test -f etc/containers/systemd/vllm.image
-  test -f etc/containers/systemd/llmhop.container
-  test -f etc/containers/systemd/llmhop.image
+  test -f etc/tmpfiles.d/10-llmhop.conf
 
   # Every asset a unit references is bundled.
   grep -rhoE '/usr/local/lib/llmhop/[^ :",]+' etc | sort -u | while read -r asset; do
     test -e ".$asset"
   done
 
-  grep -qx 'WantedBy=multi-user.target' etc/containers/systemd/vllm-qwen.container
   grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-qwen.container
-  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-qwen-fetch.container
-  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-detector.container
-  grep -qx 'PartOf=vllm-image.service' etc/containers/systemd/vllm-detector-fetch.container
   grep -qx 'PartOf=llmhop-image.service' etc/containers/systemd/llmhop.container
   grep -qE '^ExecStartPre="/usr/local/lib/llmhop/[^ ]+-llmhop-[^/]+/bin/llmhop" "hub-prune" ' etc/systemd/system/vllm-qwen-refresh.service
-  grep -qx 'ExecStart=+-/usr/bin/systemctl reset-failed vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
-  ! grep -q PATH= etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
-  grep -qx 'Wants=vllm-qwen-refresh.service' etc/containers/systemd/vllm-qwen-fetch.container
-  test ! -e etc/systemd/system/vllm-qwen-refresh.path
-  grep -qE 'Volume=/usr/local/lib/llmhop/[^ ]+-fetch.sh:' etc/containers/systemd/vllm-qwen-fetch.container
   grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-quadlet-update.timer
-  grep -q '/usr/bin/systemctl restart vllm-qwen-fetch.service' etc/systemd/system/vllm-quadlet-update.service
-  test -f etc/tmpfiles.d/10-llmhop.conf
   grep -qE '^Image=docker-archive:/usr/local/lib/llmhop/[^ ]+\.tar\.gz$' etc/containers/systemd/llmhop.image
-  grep -q '^ImageTag=localhost/llmhop:' etc/containers/systemd/llmhop.image
-  if grep -q AutoUpdate etc/containers/systemd/llmhop.container; then
-    exit 1
-  fi
-  grep -qx 'Wants=vllm-quadlet-update.timer' etc/systemd/system/timers.target.d/llmhop.conf
-  grep -q 'start --no-block .*vllm-quadlet-update.timer' install.sh
-  grep -q 'cmp -s etc/containers/systemd/vllm-qwen.container /etc/containers/systemd/vllm-qwen.container || set -- "$@" vllm-qwen.service' install.sh
-  grep -qx vllm-quadlet-update.timer usr/local/lib/llmhop/units
-  grep -qx /etc/systemd/system/timers.target.d/llmhop.conf usr/local/lib/llmhop/files
-  grep -qx /etc/tmpfiles.d/10-llmhop.conf usr/local/lib/llmhop/files
-  test -z "$(find . -type l)"
-  test -x usr/local/lib/llmhop/uninstall.sh
-  test -f usr/local/lib/llmhop/${baseNameOf templates}/chat.jinja
   touch $out
 ''

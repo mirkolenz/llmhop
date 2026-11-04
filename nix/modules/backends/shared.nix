@@ -314,8 +314,8 @@ rec {
           [ (util.rootDirectoryRule cfg.cache.directory) ]
           ++ map (util.directoryRule cacheOwner "0700") directories
         );
-        services = lib.genAttrs' fetching refreshUnitConfig // {
-          "${backend}-update" = lib.mkIf update {
+        services = lib.genAttrs' fetching refreshUnitConfig // lib.optionalAttrs update {
+          "${backend}-update" = {
             description = "Fetch the models of ${backend}";
             startAt = lib.optional (cfg.fetch.interval != null) cfg.fetch.interval;
             serviceConfig = {

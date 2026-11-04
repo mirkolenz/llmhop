@@ -270,9 +270,10 @@ rec {
           type = types.bool;
           default = false;
           description = ''
-            Whether to open `port` in the host firewall, which only works
-            without a gateway routing this ${noun}. A Quadlet container's
-            published port bypasses the firewall either way.
+            Whether to open `port` in the host firewall, which requires a
+            `host` other than loopback and no gateway routing this ${noun}.
+            A Quadlet container's published port bypasses the firewall either
+            way.
           '';
         };
         environment = mkOption {

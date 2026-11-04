@@ -506,6 +506,9 @@ let
             type = "smg";
             smg.package = fakeVllm;
           };
+          vllm.models.qwen.host = "0.0.0.0";
+        });
+        firewall = failing "is loopback" (mkRoutable {
           vllm.models.qwen.openFirewall = true;
         });
         socket = failing "cannot reach" (mkRoutable {
@@ -523,6 +526,7 @@ let
           sgl = [ "llama" ];
         };
         rejected = 1;
+        firewall = 1;
         socket = 1;
       };
     };

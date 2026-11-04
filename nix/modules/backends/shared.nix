@@ -299,10 +299,11 @@ rec {
               "unix://${workload.socket}"
             else
               "http://${util.hostPort workload.host workload.port}";
-          # Reachable other than through loopback or the socket.
-          exposed = workload.socket == null && (workload.openFirewall || !util.isLoopback workload.host);
+          # Reachable beyond loopback.
+          exposed = workload.socket == null && !util.isLoopback workload.host;
         }
       );
+      assertions = map (w: util.firewallAssertion w.owner w) workloads;
       networking.firewall.allowedTCPPorts = map (w: w.port) (
         lib.filter (w: w.socket == null && w.openFirewall) workloads
       );

@@ -84,7 +84,7 @@ Add the flake input `github:mirkolenz/llmhop` and import `llmhop.nixosModules.de
 services.llmhop = {
   gateway.type = "llmhop";
   gateway.llmhop.listen.default.host = "";
-  gateway.llmhop.openFirewall = true;
+  gateway.llmhop.listen.default.openFirewall = true;
   llama-cpp.enable = true;
   llama-cpp.models."qwen3-8b".model = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
 };

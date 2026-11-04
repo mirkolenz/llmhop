@@ -23,7 +23,7 @@ let
     in
     {
       assertion = !endpoint.exposed;
-      message = "services.llmhop: `${endpoint.owner}` is routed by the gateway `${cfg.gateway.type}`, but sets `host` or `openFirewall`, so clients could bypass the gateway.";
+      message = "services.llmhop: `${endpoint.owner}` is routed by the gateway `${cfg.gateway.type}`, but binds a `host` beyond loopback, so clients could bypass the gateway.";
     };
 
   endpointModule = {

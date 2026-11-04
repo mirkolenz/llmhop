@@ -17,6 +17,13 @@ rec {
       "::1"
     ];
 
+  # Assertion that the listener of `owner`, with its `host` and `openFirewall`,
+  # opens no port that it serves on loopback only.
+  firewallAssertion = owner: listener: {
+    assertion = listener.openFirewall -> !isLoopback listener.host;
+    message = "services.llmhop: `${owner}` sets `openFirewall`, but its `host` ${listener.host} is loopback, so set `host` to an address remote clients reach.";
+  };
+
   # Whether `model` names a repository to fetch rather than a local path.
   isRepository = model: !lib.hasPrefix "/" model;
 

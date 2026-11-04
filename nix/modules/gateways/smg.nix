@@ -46,22 +46,25 @@ let
     };
     description = ''
       CLI flags of SMG, rendered as `--<key> <value>` with `false`
-      dropped. The listener, the discovery file of every listed model,
-      metrics on `127.0.0.1:29000` and disabled tokenizer downloads are
-      defaults here, so a definition replaces them. Credential references
+      dropped. The listener and the discovery file of every listed model
+      always win, while metrics on `127.0.0.1:29000` and disabled
+      tokenizer downloads are defaults. Credential references
       resolve to file paths for upstream options such as `api-key-file`
       and `tenant-api-keys-file`, which require a supporting SMG build.
     '';
   };
 
-  # The `settings` of `cfg` reading the discovery file at `discovery`.
+  # The `settings` of `cfg` reading the discovery file at `discovery`, whose
+  # listener wins, so the port claim and the firewall agree with SMG.
   defaultSettings =
     cfg: discovery:
-    lib.mapAttrs (_: lib.mkOptionDefault) {
+    lib.mapAttrs (_: lib.mkForce) {
       inherit (cfg) host port;
-      enable-igw = true;
       discovery-provider = "file";
       discovery-file = discovery;
+    }
+    // lib.mapAttrs (_: lib.mkOptionDefault) {
+      enable-igw = true;
       prometheus-host = "127.0.0.1";
       prometheus-port = 29000;
       disable-tokenizer-autoload = true;

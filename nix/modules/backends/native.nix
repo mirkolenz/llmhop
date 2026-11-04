@@ -67,6 +67,9 @@ let
         fetcher = engine.native.fetcher workload.package;
       };
       offline = lib.optionalAttrs workload.offline;
+      # Downloading at runtime or binding beyond loopback needs the network,
+      # while an offline server on loopback or its socket starts without it.
+      online = !workload.offline || workload.socket == null && !util.isLoopback workload.host;
       # A socket's own network namespace, or else loopback only, unless
       # the server listens beyond it.
       network =
@@ -98,8 +101,8 @@ let
           ]
         );
         wantedBy = [ "multi-user.target" ];
-        wants = shared.fetchServices workload;
-        after = shared.fetchOrder workload ++ after;
+        wants = shared.fetchServices workload ++ lib.optional online "network-online.target";
+        after = shared.fetchOrder workload ++ after ++ lib.optional online "network-online.target";
         environment = shared.serverEnvironment {
           inherit engine cfg workload;
           inherit (util) credentialDirectory;

@@ -109,6 +109,11 @@ in
             plain (e.g. `::1`).
           '';
         };
+        openFirewall = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Whether to open `port` in the host firewall, which requires a `host` other than loopback.";
+        };
         socket = mkOption {
           type = types.str;
           default = "${socketDirectory}/${listenerName}.sock";
@@ -162,12 +167,6 @@ in
               '';
             };
 
-            openFirewall = mkOption {
-              type = types.bool;
-              default = false;
-              description = "Whether to open the `port` of every TCP listener in the host firewall.";
-            };
-
             credentials = credentialsOption;
             settings = settingsOption pkgs;
           };
@@ -197,9 +196,15 @@ in
               };
             };
 
-            networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
-              lib.mapAttrsToList (_: listener: listener.port) tcpListeners
-            );
+            assertions = lib.mapAttrsToList (
+              listenerName: util.firewallAssertion "${gateway.owner name}.listen.${listenerName}"
+            ) tcpListeners;
+
+            networking.firewall.allowedTCPPorts = lib.pipe tcpListeners [
+              lib.attrValues
+              (lib.filter (listener: listener.openFirewall))
+              (map (listener: listener.port))
+            ];
 
             systemd = {
               # Its socket listeners share the root of the worker sockets.
@@ -315,8 +320,9 @@ in
           })
           {
             services.llmhop.gateway.${name}.settings = {
-              host = lib.mkDefault cfg.host;
-              port = lib.mkDefault cfg.port;
+              # Win, so the port claim and the firewall agree with llmhop.
+              host = lib.mkForce cfg.host;
+              port = lib.mkForce cfg.port;
               models = models endpoints;
             };
           }

@@ -41,7 +41,7 @@ rec {
     openFirewall = mkOption {
       type = types.bool;
       default = false;
-      description = "Whether to open `port` in the host firewall.";
+      description = "Whether to open `port` in the host firewall, which requires a `host` other than loopback.";
     };
     environment = mkOption {
       type = with types; attrsOf str;
@@ -72,7 +72,10 @@ rec {
       ports ? [ ],
     }:
     {
-      assertions = map (e: {
+      assertions = [
+        (util.firewallAssertion (owner name) cfg)
+      ]
+      ++ map (e: {
         assertion = e.socket == null;
         message = "services.llmhop: `${e.owner}` is routed by the gateway `${name}`, but binds a unix socket, which the gateway cannot reach, so set its `port`.";
       }) endpoints;
@@ -101,7 +104,10 @@ rec {
       systemd.services.${unit} = {
         inherit description;
         wantedBy = [ "multi-user.target" ];
-        after = [ "network.target" ];
+        # It reaches every endpoint on loopback, so only a listener beyond it
+        # waits for the network.
+        wants = lib.optional (!util.isLoopback cfg.host) "network-online.target";
+        after = [ "network.target" ] ++ lib.optional (!util.isLoopback cfg.host) "network-online.target";
         environment = util.resolveCredentialRefs util.credentialDirectory credentials cfg.environment;
         unitConfig = util.startLimitConfig;
         serviceConfig =

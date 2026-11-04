@@ -287,7 +287,7 @@ dependencies = [ "vllm==0.16.2" ]
 - **AMD and Intel GPUs** work with vLLM's ROCm or XPU wheels, added as an explicit `[[tool.uv.index]]` per vLLM's [installation docs](https://docs.vllm.ai/en/latest/getting_started/installation/).
 - **sdists without a build system** need their build dependencies under `[tool.uv.extra-build-dependencies]`, as in `antlr4-python3-runtime = ["setuptools"]`.
 - **flashinfer** packages must be pinned to the `flashinfer-python` version vLLM pins, or flashinfer refuses to start.
-- **Native libraries** come from `buildInputs` for linked ones, `runtimePaths` for ones loaded by a bare `dlopen`, such as `libsndfile` or `rdma-core`, `venvDriverLibs` for host driver sonames and `venvOptionalLibs` for libraries that load on demand only. The build fails naming every unresolved library.
+- **Native libraries** come from `buildInputs` for linked ones, `runtimePaths` for ones loaded by a bare `dlopen`, such as `libsndfile` or `rdma-core`, `driverLibs` for host driver sonames and `optionalLibs` for libraries that load on demand only. The build fails naming every unresolved library.
 
 ### Inference server credentials
 

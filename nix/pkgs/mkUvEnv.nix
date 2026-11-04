@@ -34,7 +34,7 @@
   # environment may leave them unresolved. The default covers the userspace
   # driver of each stack vLLM publishes wheels for, none of which any wheel or
   # nixpkgs package can satisfy at build time.
-  venvDriverLibs ? [
+  driverLibs ? [
     # NVIDIA: the driver, plus the NVML and PTX JIT libraries beside it.
     "libcuda.so*"
     "libnvidia-*.so*"
@@ -49,15 +49,15 @@
   # Globs of shared libraries, relative to the environment root, whose
   # dependencies may stay unresolved because they load on demand only, such as
   # one of several backend variants or an optional transport plugin.
-  venvOptionalLibs ? [ ],
+  optionalLibs ? [ ],
   # Globs of paths, relative to the environment root, that more than one package
   # installs with differing contents; the first one encountered wins. Wheels
   # routinely leak their in-tree PEP 517 backend into the distribution, so a set
   # this size collides over files nothing ever imports, and upstream's default
   # is to fail. Narrow it to have a genuine conflict reported again.
-  venvIgnoreCollisions ? [ "*" ],
+  ignoreCollisions ? [ "*" ],
   overlays ? [ ],
-  deps ? { },
+  deps ? null,
   name ? "uv-env",
 }:
 let
@@ -165,13 +165,13 @@ let
   unknownHostWheels = lib.subtractLists lockedNames hostWheels;
 
   venv =
-    (pythonSet.mkVirtualEnv name (if deps == { } then workspace.deps.default else deps)).overrideAttrs
+    (pythonSet.mkVirtualEnv name (if deps == null then workspace.deps.default else deps)).overrideAttrs
       (old: {
-        inherit venvIgnoreCollisions;
+        venvIgnoreCollisions = ignoreCollisions;
         postFixup = (old.postFixup or "") + ''
           ${lib.getExe check-elf} "$out" \
-            --drivers ${lib.escapeShellArgs venvDriverLibs} \
-            --optional ${lib.escapeShellArgs venvOptionalLibs} \
+            --drivers ${lib.escapeShellArgs driverLibs} \
+            --optional ${lib.escapeShellArgs optionalLibs} \
             --host-wheels ${lib.escapeShellArgs hostWheels}
         '';
         passthru = (old.passthru or { }) // {

@@ -142,12 +142,20 @@ def machine(path: Path, types: Container[int] = LOADABLE) -> int | None:
     return int.from_bytes(header[18:20], "little")
 
 
-def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
-    """Yield the name and files of each wheel tagged for any platform.
+def host_code(
+    root: Path, host: int, exempt: Iterable[str]
+) -> list[tuple[str, Path]]:
+    """List the name and `host` code of each wheel tagged for any platform.
 
     Every installed wheel records its tags in `WHEEL` and its files in
     `RECORD`, relative to the directory holding its metadata.
+    Wheels in `exempt` are skipped.
+
+    >>> host_code(Path("/var/empty"), 62, [])
+    []
     """
+    found: list[tuple[str, Path]] = []
+
     for info in sorted(root.glob("lib/python*/site-packages/*.dist-info")):
         wheel, record = info / "WHEEL", info / "RECORD"
 
@@ -160,30 +168,22 @@ def pure_wheels(root: Path) -> Iterator[tuple[str, list[Path]]]:
         if not tags or not all(tag.endswith("-any") for tag in tags):
             continue
 
-        with record.open(newline="") as file:
-            paths = [info.parent / row[0] for row in reader(file) if row]
-
         # PEP 503 normalization, as the lock spells the name.
         name = sub(r"[-_.]+", "-", info.name.split("-")[0]).lower()
 
-        yield name, [path for path in paths if path.is_file()]
+        if name in exempt:
+            continue
 
+        with record.open(newline="") as file:
+            paths = [info.parent / row[0] for row in reader(file) if row]
 
-def host_code(
-    root: Path, host: int, exempt: Iterable[str]
-) -> dict[str, list[Path]]:
-    """Map each pure wheel not in `exempt` to the `host` code it ships.
+        found += [
+            (name, path)
+            for path in paths
+            if path.is_file() and machine(path) == host
+        ]
 
-    >>> host_code(Path("/var/empty"), 62, [])
-    {}
-    """
-    found = {
-        name: [path for path in paths if machine(path) == host]
-        for name, paths in pure_wheels(root)
-        if name not in exempt
-    }
-
-    return {name: paths for name, paths in found.items() if paths}
+    return found
 
 
 def main() -> int:
@@ -202,8 +202,7 @@ def main() -> int:
     if hosted := host_code(args.root, host, args.host_wheels):
         errors += [
             f"mkUvEnv: {name} is tagged for any platform but ships {path}"
-            for name, paths in hosted.items()
-            for path in paths
+            for name, path in hosted
         ]
         errors.append(
             "mkUvEnv: list those wheels in `hostWheels` "

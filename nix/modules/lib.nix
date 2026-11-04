@@ -51,14 +51,6 @@ rec {
     }:
     if socket != null then "unix://${socket}" else "http://${hostPort (probeHost host) port}";
 
-  # The curl target of the `/health` of the same server.
-  healthTarget =
-    listener:
-    if listener.socket != null then
-      "--unix-socket ${lib.escapeShellArg listener.socket} http://localhost/health"
-    else
-      "${probeUrl listener}/health";
-
   # Render `settings` into the argv of a parser with the given `negateBools`
   # and `listStyle`, flag and value as separate entries. Strings, paths and
   # derivations render verbatim, everything else through JSON. See "CLI

@@ -12,7 +12,7 @@ import dataclasses
 import inspect
 import json
 import sys
-from collections.abc import Callable, Container, Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from pathlib import Path
 from typing import Any, get_args
 
@@ -263,19 +263,16 @@ def detect(argv: Sequence[str]) -> None:
     uvicorn.run(app, host=args.host, port=args.port, uds=args.uds)
 
 
-COMMANDS: dict[str, Callable[[Sequence[str]], None]] = {
-    "serve": serve,
-    "detect": detect,
-}
-
-
 def main() -> None:
     command, *argv = sys.argv[1:] or [""]
 
-    if command not in COMMANDS:
-        raise SystemExit(f"usage: {sys.argv[0]} {{{','.join(COMMANDS)}}} ...")
-
-    COMMANDS[command](argv)
+    match command:
+        case "serve":
+            serve(argv)
+        case "detect":
+            detect(argv)
+        case _:
+            raise SystemExit(f"usage: {sys.argv[0]} {{serve,detect}} ...")
 
 
 if __name__ == "__main__":

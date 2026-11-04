@@ -1,8 +1,9 @@
 {
   lib,
   mkEvalCheck,
-  mkQuadletSystem,
+  mkBundleSystem,
   pkgs,
+  self,
 }:
 let
   util = import ../modules/lib.nix lib;
@@ -10,8 +11,6 @@ let
   apiKeys = "/run/secrets/api-keys";
   serverConfig = "/run/secrets/server.yaml";
   watermarkKey = "/run/secrets/watermark-key";
-  # The fake `package` has no interpreter to check the default against.
-  detectorScript = pkgs.writeText "watermark.py" "";
   watermark.algorithm = "dual_key_gumbel";
   fakeVllm = pkgs.writeShellScriptBin "vllm" "exit 0";
 
@@ -42,8 +41,15 @@ let
       ];
     }).config.credentials;
 
+  # A minimal system with Quadlet and llmhop's modules.
   mkSystem =
-    llmhopConfig: (mkQuadletSystem { modules = [ { services.llmhop = llmhopConfig; } ]; }).config;
+    llmhopConfig:
+    (mkBundleSystem {
+      modules = [
+        self.nixosModules.quadlet
+        { services.llmhop = llmhopConfig; }
+      ];
+    }).config;
 
   mkQuadlet =
     overrides:
@@ -130,7 +136,8 @@ let
       };
       detectors.watermark = {
         port = 21002;
-        script = detectorScript;
+        # The fake `package` has no interpreter to check the default against.
+        script = pkgs.writeText "watermark.py" "";
         profiles.test = {
           tokenizer = "example/test";
           inherit watermark;
@@ -168,6 +175,24 @@ let
     };
   };
   socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
+  socketRules = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
+
+  managedWorker =
+    (mkSystem {
+      vllm = {
+        enable = true;
+        package = fakeVllm;
+        modelSettings.host = "0.0.0.0";
+        models.test = {
+          model = "example/test";
+          port = 25001;
+          settings = {
+            port = 25002;
+            served-model-name = "other";
+          };
+        };
+      };
+    }).systemd.services.vllm-test;
 
   # A model of each engine kind on a port, which every gateway reaches.
   mkRoutable =
@@ -455,14 +480,10 @@ let
 
     testSockets = {
       expr = {
-        root =
-          let
-            rules = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
-          in
-          {
-            inherit (rules.d) mode;
-            inherit (rules.a) argument;
-          };
+        root = {
+          inherit (socketRules.d) mode;
+          inherit (socketRules.a) argument;
+        };
         uds = containsAll [
           "--uds"
           "/run/sockets/llmhop/vllm-test/http.sock"
@@ -581,30 +602,11 @@ let
     # the health probe reach the server where it listens, by the name it
     # serves.
     testManagedSettings = {
-      expr =
-        let
-          ExecStart =
-            (mkSystem {
-              vllm = {
-                enable = true;
-                package = fakeVllm;
-                modelSettings.host = "0.0.0.0";
-                models.test = {
-                  model = "example/test";
-                  port = 25001;
-                  settings = {
-                    port = 25002;
-                    served-model-name = "other";
-                  };
-                };
-              };
-            }).systemd.services.vllm-test.serviceConfig.ExecStart;
-        in
-        containsAll [
-          ''"--host" "127.0.0.1"''
-          ''"--port" "25001"''
-          ''"--served-model-name" "test"''
-        ] ExecStart;
+      expr = containsAll [
+        ''"--host" "127.0.0.1"''
+        ''"--port" "25001"''
+        ''"--served-model-name" "test"''
+      ] managedWorker.serviceConfig.ExecStart;
       expected = true;
     };
   };
@@ -618,7 +620,10 @@ let
       ++ bifrost.virtualisation.quadlet.generatedUnits;
   };
 
-  result = pkgs.runCommand "llmhop-eval-tests" { } ''
+in
+mkEvalCheck {
+  description = "Module evaluation tests";
+  output = pkgs.runCommand "llmhop-eval-tests" { } ''
     test -e ${units}/lib/systemd/system/vllm-test.service
     test -e ${units}/lib/systemd/system/vllm-watermark.service
     test -e ${units}/lib/systemd/system/llama-cpp-b.service
@@ -626,9 +631,5 @@ let
     grep -q '^Requires=${quadlet.virtualisation.quadlet.images.vllm.serviceName}.service$' ${units}/lib/systemd/system/vllm-test.service
     touch $out
   '';
-in
-mkEvalCheck {
-  description = "Module evaluation tests";
-  output = result;
   inherit tests;
 }

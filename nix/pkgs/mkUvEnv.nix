@@ -87,8 +87,6 @@ let
 
   workspace = uv2nix.lib.workspace.loadWorkspace { inherit workspaceRoot uvLock; };
 
-  projectOverlay = workspace.mkPyprojectOverlay { inherit sourcePreference; };
-
   # Every package the lock resolves, rather than a hand-curated list of the ones
   # known to ship GPU extensions: a wheel growing one, or a new dependency
   # appearing on an upstream bump, would otherwise silently fail to build.
@@ -99,7 +97,7 @@ let
   # Each ELF fixup visits every one of them without anything to patch.
   # `check-elf` below fails on host code in any of them not in `hostWheels`.
   isPureWheel =
-    name: attrs: !lib.elem name hostWheels && lib.hasSuffix "-any.whl" (attrs.src.name or "");
+    pname: attrs: !lib.elem pname hostWheels && lib.hasSuffix "-any.whl" (attrs.src.name or "");
 
   hostElfFixups = old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ autoAddDriverRunpath ] ++ nativeBuildInputs;
@@ -128,10 +126,10 @@ let
 
   wheelOverlay =
     _final: prev:
-    lib.genAttrs (lib.filter (name: prev ? ${name}) lockedNames) (
-      name:
-      prev.${name}.overrideAttrs (
-        old: if isPureWheel name old then skippedElfFixups else hostElfFixups old
+    lib.genAttrs (lib.filter (pname: prev ? ${pname}) lockedNames) (
+      pname:
+      prev.${pname}.overrideAttrs (
+        old: if isPureWheel pname old then skippedElfFixups else hostElfFixups old
       )
     );
 
@@ -139,7 +137,7 @@ let
     lib.composeManyExtensions (
       [
         pyproject-build-systems.overlays.wheel
-        projectOverlay
+        (workspace.mkPyprojectOverlay { inherit sourcePreference; })
       ]
       ++ lib.optional stdenv.hostPlatform.isElf wheelOverlay
       ++ overlays

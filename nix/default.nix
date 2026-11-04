@@ -50,8 +50,8 @@
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
         bundle = pkgs.callPackage ./checks/bundle.nix { inherit (config.legacyPackages) mkQuadletBundle; };
         eval = pkgs.callPackage ./checks/eval.nix {
-          inherit mkEvalCheck;
-          inherit (config.legacyPackages) mkQuadletSystem;
+          inherit mkEvalCheck self;
+          inherit (inputs.quadlet-nix.legacyPackages.${system}) mkBundleSystem;
         };
       };
       packages = {
@@ -88,14 +88,9 @@
           }
         )
         // {
-          # A minimal system with Quadlet and llmhop's modules, configured by
-          # `modules`, and its Quadlet units as files for a host without Nix,
+          # The Quadlet units of a minimal system with llmhop's modules,
+          # configured by `modules`, as files for a host without Nix,
           # see `virtualisation.quadlet.bundle` of quadlet-nix.
-          mkQuadletSystem =
-            { modules }:
-            inputs.quadlet-nix.legacyPackages.${system}.mkBundleSystem {
-              modules = [ self.nixosModules.quadlet ] ++ modules;
-            };
           mkQuadletBundle =
             { modules }:
             inputs.quadlet-nix.legacyPackages.${system}.mkBundle {

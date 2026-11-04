@@ -19,6 +19,14 @@ let
   cfg = config.services.llmhop.${backend};
   inherit (config.virtualisation) quadlet;
 
+  # The curl target of the `/health` of a server listening on `listener`.
+  healthTarget =
+    listener:
+    if listener.socket != null then
+      "--unix-socket ${lib.escapeShellArg listener.socket} http://localhost/health"
+    else
+      "${util.probeUrl listener}/health";
+
   fetchScriptPath = "${util.containerRuntimeDirectory}/fetch.sh";
 
   # The image unit `<name>-image`, shared by every workload.
@@ -85,7 +93,7 @@ let
           // {
             Entrypoint = lib.toJSON workload.container.entrypoint;
             Notify = "healthy";
-            HealthCmd = "curl --fail --silent --show-error ${util.healthTarget (opts.quadletListener engine workload)}";
+            HealthCmd = "curl --fail --silent --show-error ${healthTarget (opts.quadletListener engine workload)}";
             HealthStartPeriod = "30m";
             HealthInterval = "10s";
             HealthTimeout = "5s";

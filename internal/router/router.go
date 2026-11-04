@@ -43,9 +43,9 @@ func New(cfg *config.Config) (http.Handler, error) {
 		backends[name] = b
 	}
 
-	tokens := make([][]byte, len(cfg.AuthTokens))
-	for i, t := range cfg.AuthTokens {
-		tokens[i] = []byte(t)
+	tokens := make([][]byte, 0, len(cfg.AuthTokens))
+	for _, t := range cfg.AuthTokens {
+		tokens = append(tokens, []byte(t))
 	}
 
 	// Shared, so both endpoints reporting the catalog agree on it.
@@ -94,7 +94,7 @@ func newBackend(m config.Model) (*backend, error) {
 		up:      up,
 		headers: headers,
 		host:    headers.Get("Host"),
-		health:  m.Health,
+		health:  m.HealthPath,
 		slots:   newSlots(m.MaxConcurrentRequests),
 	}
 	headers.Del("Host")

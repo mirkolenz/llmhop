@@ -2,10 +2,11 @@
   buildGoModule,
   lib,
   nukeReferences,
+  version ? "dev",
 }:
-buildGoModule {
+buildGoModule (finalAttrs: {
   pname = "llmhop";
-  version = "dev";
+  inherit version;
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
@@ -15,6 +16,7 @@ buildGoModule {
     ];
   };
   vendorHash = null;
+  ldflags = [ "-X main.version=${finalAttrs.version}" ];
   # Static, so a bundle runs it on any host.
   env.CGO_ENABLED = 0;
   # Nixpkgs' Go embeds store paths of optional data files such as tzdata,
@@ -31,4 +33,4 @@ buildGoModule {
     homepage = "https://github.com/mirkolenz/llmhop";
     mainProgram = "llmhop";
   };
-}
+})

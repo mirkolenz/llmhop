@@ -22,11 +22,16 @@
     Entrypoint = [ (lib.getExe llmhop) ];
     Cmd = [
       "serve"
-      "-config"
       "/config.json"
     ];
     User = "nobody:nobody";
-    # The default port of the config.
+    # The mounted config must set `listen: [":8080"]`.
     ExposedPorts."8080/tcp" = { };
+    Labels = {
+      "org.opencontainers.image.source" = "https://github.com/mirkolenz/llmhop";
+      "org.opencontainers.image.licenses" = "MIT";
+      "org.opencontainers.image.title" = "llmhop";
+      "org.opencontainers.image.description" = llmhop.meta.description;
+    };
   };
 }

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,21 +29,22 @@ type Model struct {
 	// MaxConcurrentRequests bounds the active proxied requests per model,
 	// so one busy backend never starves another. Zero means unlimited.
 	MaxConcurrentRequests uint `json:"maxConcurrentRequests,omitempty"`
-	// Health is the backend path GET /readiness probes. Empty skips the model.
-	Health string `json:"health,omitempty"`
+	// HealthPath is the backend path GET /readiness probes. Empty skips the model.
+	HealthPath string `json:"healthPath,omitempty"`
 }
 
 type Config struct {
-	// Host is the interface to bind to. Empty means every interface.
-	Host         string `json:"host,omitempty"`
-	Port         uint16 `json:"port,omitempty"`
-	MaxBodyBytes int64  `json:"maxBodyBytes,omitempty"`
+	// Listen holds the addresses to serve on, each `host:port` or
+	// `unix:///<socket path>`. Socket activation replaces it, so it may be empty.
+	Listen       []string `json:"listen,omitempty"`
+	MaxBodyBytes int64    `json:"maxBodyBytes,omitempty"`
 	// MaxBufferedBytes bounds the bytes of all bodies held in memory at once to
 	// read their JSON "model" field, until the backend starts its response.
 	// Zero means unlimited.
-	MaxBufferedBytes int64            `json:"maxBufferedBytes,omitempty"`
-	AuthTokens       []string         `json:"authTokens,omitempty"`
-	Models           map[string]Model `json:"models"`
+	MaxBufferedBytes int64 `json:"maxBufferedBytes,omitempty"`
+	// AuthTokens maps a token name to its secret.
+	AuthTokens map[string]string `json:"authTokens,omitempty"`
+	Models     map[string]Model  `json:"models"`
 }
 
 // DefaultMaxBodyBytes bounds the size of a request body the router will buffer
@@ -53,9 +55,6 @@ const DefaultMaxBodyBytes = 100 * 1024 * 1024
 // DefaultMaxBufferedBytes bounds the bytes of request bodies buffered at once,
 // thousands of typical requests or ten at the body size limit.
 const DefaultMaxBufferedBytes = 1024 * 1024 * 1024
-
-// DefaultPort is the port llmhop listens on when the config sets none.
-const DefaultPort = 8080
 
 // Listed returns the sorted names of the models advertised in the catalog.
 // Unlisted backends are omitted, but stay routable by name.
@@ -73,9 +72,55 @@ func (cfg *Config) Listed() []string {
 	return names
 }
 
-// Listen renders the host and port as a net.Listen address.
-func (cfg *Config) Listen() string {
-	return net.JoinHostPort(cfg.Host, strconv.Itoa(int(cfg.Port)))
+// ParseListen splits a `listen` entry into the network and address that
+// net.Listen takes. An empty host means every interface.
+func ParseListen(raw string) (network, address string, err error) {
+	if socket, ok := strings.CutPrefix(raw, "unix://"); ok {
+		if !path.IsAbs(socket) || strings.ContainsAny(socket, "?#") {
+			return "", "", fmt.Errorf("%q must be unix:///<absolute socket path>", raw)
+		}
+
+		return "unix", socket, nil
+	}
+
+	_, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("%q must be host:port or unix:///<socket path>: %w", raw, err)
+	}
+
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return "", "", fmt.Errorf("%q has an invalid port", raw)
+	}
+
+	return "tcp", raw, nil
+}
+
+// DecodeFile decodes the single JSON value of the file at path into v.
+// Unknown keys are an error rather than a silent no-op: a misspelled
+// optional field would otherwise fall back to its default unnoticed.
+func DecodeFile(path string, v any) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 // Load reads, parses and validates the config at path. With expandSecrets it
@@ -83,39 +128,17 @@ func (cfg *Config) Listen() string {
 // headers; without it those are left verbatim, so a config can be validated
 // where the environment variables and credential files it names do not exist.
 func Load(path string, expandSecrets bool) (*Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
 	cfg := &Config{
 		MaxBodyBytes:     DefaultMaxBodyBytes,
 		MaxBufferedBytes: DefaultMaxBufferedBytes,
 	}
-	dec := json.NewDecoder(f)
-	// Unknown keys are an error rather than a silent no-op: a misspelled
-	// optional field would otherwise fall back to its default unnoticed.
-	dec.DisallowUnknownFields()
 
-	if err := dec.Decode(cfg); err != nil {
-		return nil, err
-	}
-
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return nil, errors.New("multiple JSON values in config")
-		}
-
+	if err := DecodeFile(path, cfg); err != nil {
 		return nil, err
 	}
 
 	if err := cfg.validate(expandSecrets); err != nil {
 		return nil, err
-	}
-
-	if cfg.Port == 0 {
-		cfg.Port = DefaultPort
 	}
 
 	return cfg, nil
@@ -138,7 +161,17 @@ func (cfg *Config) validate(load bool) error {
 		return errors.New("maxBufferedBytes must not be negative")
 	}
 
-	for i, token := range cfg.AuthTokens {
+	for _, raw := range cfg.Listen {
+		if _, _, err := ParseListen(raw); err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
+	}
+
+	for name, token := range cfg.AuthTokens {
+		if name == "" {
+			return errors.New("authTokens: name must not be empty")
+		}
+
 		v, err := secrets.Expand(token, load)
 		// An empty token would authenticate `Authorization: Bearer `.
 		if err == nil && (v == "" || !validHeaderValue(v)) {
@@ -146,20 +179,20 @@ func (cfg *Config) validate(load bool) error {
 		}
 
 		if err != nil {
-			return fmt.Errorf("authTokens[%d]: %w", i, err)
+			return fmt.Errorf("authTokens.%s: %w", name, err)
 		}
 
-		cfg.AuthTokens[i] = v
+		cfg.AuthTokens[name] = v
 	}
 
 	for name, model := range cfg.Models {
-		if name == "" {
-			return errors.New("model name must not be empty")
+		if !validModelName(name) {
+			return fmt.Errorf("models.%s: name must be non-empty without leading, trailing or empty path segments", name)
 		}
 
 		// Probes join the path onto the backend URL, so only a path works.
-		if model.Health != "" && !validPath(model.Health) {
-			return fmt.Errorf("models.%s.health: %q must be an absolute path", name, model.Health)
+		if model.HealthPath != "" && !validPath(model.HealthPath) {
+			return fmt.Errorf("models.%s.healthPath: %q must be an absolute path", name, model.HealthPath)
 		}
 
 		seen := make(map[string]bool, len(model.Headers))
@@ -190,6 +223,11 @@ func (cfg *Config) validate(load bool) error {
 	}
 
 	return nil
+}
+
+// validModelName allows `/` for names such as `org/name`, but no empty segment.
+func validModelName(name string) bool {
+	return name != "" && !strings.HasPrefix(name, "/") && !strings.HasSuffix(name, "/") && !strings.Contains(name, "//")
 }
 
 func validPath(p string) bool {

@@ -44,6 +44,7 @@ func Prune(spec Specification) error {
 			wanted[r.Name] = map[string]bool{}
 		}
 
+		// The empty revision stands for every ref.
 		wanted[r.Name][r.Revision] = true
 	}
 

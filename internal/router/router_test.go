@@ -88,7 +88,7 @@ func TestCheckBearer(t *testing.T) {
 
 func TestCatalog(t *testing.T) {
 	backend, _ := startBackend(t)
-	h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: map[string]config.Model{
 		"b":        {URL: backend.URL},
 		"a":        {URL: backend.URL},
 		"detector": {URL: backend.URL, Unlisted: true},
@@ -143,7 +143,7 @@ func TestCatalog(t *testing.T) {
 func TestRouterRequests(t *testing.T) {
 	cases := []struct {
 		name       string
-		auth       []string
+		auth       map[string]string
 		headers    map[string]string
 		body       string
 		authHeader string
@@ -157,7 +157,7 @@ func TestRouterRequests(t *testing.T) {
 		{name: "non-string model", body: `{"model":123}`, wantCode: http.StatusBadRequest},
 		{name: "duplicate model key", body: `{"model":"m","model":null}`, wantCode: http.StatusBadRequest},
 		{name: "unknown model", body: `{"model": "nope"}`, wantCode: http.StatusNotFound},
-		{name: "auth runs before model lookup", auth: []string{"secret"}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
+		{name: "auth runs before model lookup", auth: map[string]string{"t": "secret"}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
 		{name: "oversized body", maxBody: 16, body: `{"model": "m", "prompt": "` + strings.Repeat("x", 100) + `"}`, wantCode: http.StatusRequestEntityTooLarge},
 		{
 			name:     "known model is proxied with its body intact",
@@ -182,7 +182,7 @@ func TestRouterRequests(t *testing.T) {
 		},
 		{
 			name:       "auth strips client Authorization before forwarding",
-			auth:       []string{"secret"},
+			auth:       map[string]string{"t": "secret"},
 			body:       `{"model": "m"}`,
 			authHeader: "Bearer secret",
 			wantCode:   http.StatusOK,
@@ -259,7 +259,7 @@ func TestProxyPreservesHostAndQuery(t *testing.T) {
 
 func TestPathRouting(t *testing.T) {
 	backend, captured := startBackend(t)
-	h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: map[string]config.Model{
 		"detector": {URL: backend.URL + "/base", Unlisted: true},
 	}})
 
@@ -392,14 +392,14 @@ func TestReadiness(t *testing.T) {
 	t.Cleanup(unix.Close)
 
 	models := map[string]config.Model{
-		"tcp":      {URL: tcp.URL, Health: "/health", Headers: map[string]string{"X-Key": "k", "Host": "probe.example"}},
-		"unix":     {URL: "unix://" + socket, Health: "/health", Headers: map[string]string{"X-Key": "k"}},
+		"tcp":      {URL: tcp.URL, HealthPath: "/health", Headers: map[string]string{"X-Key": "k", "Host": "probe.example"}},
+		"unix":     {URL: "unix://" + socket, HealthPath: "/health", Headers: map[string]string{"X-Key": "k"}},
 		"unprobed": {URL: tcp.URL},
 	}
 
 	check := func(wantCode int, want readiness) {
 		t.Helper()
-		h := newRouter(t, &config.Config{AuthTokens: []string{"secret"}, Models: models})
+		h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: models})
 		rec := send(t, h, http.MethodGet, "/readiness", "", "")
 
 		var got readiness
@@ -413,7 +413,7 @@ func TestReadiness(t *testing.T) {
 	}
 
 	check(http.StatusOK, readiness{Status: "ok", Ready: 2, Probed: 2})
-	models["broken"] = config.Model{URL: tcp.URL, Health: "/missing"}
+	models["broken"] = config.Model{URL: tcp.URL, HealthPath: "/missing"}
 	check(http.StatusServiceUnavailable, readiness{Status: "unavailable", Ready: 2, Probed: 3})
 }
 

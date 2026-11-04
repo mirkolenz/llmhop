@@ -14,25 +14,41 @@ It is built for single-model servers like [vLLM](https://github.com/vllm-project
 LLMhop looks up the request's `model` in its config and forwards the request verbatim.
 Unknown models return `404`, invalid JSON or a missing `model` return `400`.
 `GET /v1/models` and `GET /v1/models/{model}` are answered from the config and never proxied.
+Model names may contain `/`, as in Hugging Face names such as `org/name`.
 
 A request under `/route/{model}/` is routed by path instead, with the prefix stripped and the body left unparsed, so `POST /route/production/detect` reaches `production` as `POST /detect`.
-Write a `/` in a model name as `%2F`.
+The longest configured model name that prefixes the path wins, and a `/` in a model name may be written raw or as `%2F`.
 A model marked `"unlisted": true` is routed but left out of the models API, which suits services such as a watermark detector.
 
 `GET /health` returns `{ "status": "ok", "models": 3 }` with the number of listed models.
-`GET /readiness` probes the `health` path of every model that sets one and answers `200` only if all respond `2xx`, else `503`.
+`GET /readiness` probes the `healthPath` of every model that sets one and answers `200` only if all respond `2xx`, else `503`.
 Both never require a token.
 LLMhop sends `READY=1` to systemd once its listeners are bound, and drains in-flight requests on `SIGTERM` or `SIGINT`.
+
+### Errors
+
+Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", "type": "not_found_error", "code": "model_not_found"}}`.
+
+| Status | Meaning                                                                                |
+| ------ | -------------------------------------------------------------------------------------- |
+| `400`  | invalid JSON, a missing `model` or an unreadable body                                  |
+| `401`  | missing or invalid bearer token, with `WWW-Authenticate: Bearer`                       |
+| `404`  | unknown model                                                                          |
+| `408`  | the body did not arrive within a minute                                                |
+| `413`  | the body exceeds `maxBodyBytes`                                                        |
+| `429`  | the model reached `maxConcurrentRequests`, with `Retry-After: 1`                       |
+| `502`  | the backend is unreachable                                                             |
+| `503`  | the `maxBufferedBytes` budget is exhausted, with `Retry-After: 1`                      |
 
 ## Configuration
 
 ```json
 {
-  "host": "127.0.0.1",
-  "port": 8080,
-  "authTokens": ["${cred:llmhop.client-token}"],
+  "listen": ["127.0.0.1:8080", "unix:///run/llmhop/http.sock"],
+  "authTokens": { "client": "${cred:llmhop.client-token}" },
   "models": {
-    "llama-3-8b": { "url": "http://localhost:30000", "health": "/health" },
+    "llama-3-8b": { "url": "http://localhost:30000", "healthPath": "/health" },
+    "meta-llama/Llama-3.1-8B": { "url": "http://localhost:30001" },
     "qwen3-8b": {
       "url": "unix:///run/llmhop/vllm-qwen3-8b/http.sock",
       "maxConcurrentRequests": 16
@@ -45,15 +61,17 @@ LLMhop sends `READY=1` to systemd once its listeners are bound, and drains in-fl
 }
 ```
 
-`host` defaults to every interface and `port` to `8080`.
+`listen` holds `host:port` addresses, with `[::1]:8080` for IPv6 and `:8080` for every interface, or `unix:///<socket path>`.
+It has no default, and `serve` uses the sockets of systemd socket activation when present, else `listen`.
+Setting both or neither is an error, and `check` does not require `listen`.
 A `url` is an absolute `http(s)` URL or `unix:///<socket path>`.
-With `authTokens` set, every route but `/health` and `/readiness` requires a matching bearer token, which is stripped before forwarding.
+With `authTokens`, a map of names to tokens, set, every route but `/health` and `/readiness` requires a matching bearer token, which is stripped before forwarding.
 A model's `headers` are applied last, so a configured `Authorization` replaces the client's.
-Unknown keys are rejected, and `llmhop check -config config.json` validates a config without binding a port or expanding secrets.
+Unknown keys are rejected, and `llmhop check config.json` validates a config without binding a port or expanding secrets.
 
 ### Secret references
 
-Strings in `authTokens` and `models.*.headers` are expanded at startup, and an unresolved reference is a startup error:
+Token values in `authTokens` and strings in `models.*.headers` are expanded at startup, and an unresolved reference is a startup error:
 
 - `${cred:name}`: the systemd credential `name` from `$CREDENTIALS_DIRECTORY`.
 - `${env:NAME}`: an environment variable.
@@ -63,18 +81,21 @@ Strings in `authTokens` and `models.*.headers` are expanded at startup, and an u
 ### Request limits
 
 - `maxBodyBytes` (100 MiB): larger bodies get `413`.
-- `maxBufferedBytes` (1 GiB): bytes of body-routed requests buffered at once, further ones get `503`. A body is buffered until the backend starts its response, and must arrive within a minute, or the request gets `408`.
-- `models.*.maxConcurrentRequests` (unlimited): proxied requests per model, further ones get `503`.
+- `maxBufferedBytes` (1 GiB): bytes of body-routed requests buffered at once, further ones get `503` with `Retry-After: 1`. A body is buffered until the backend starts its response, and must arrive within a minute, or the request gets `408`.
+- `models.*.maxConcurrentRequests` (unlimited): proxied requests per model, further ones get `429` with `Retry-After: 1`.
 
 `0` disables a limit.
 
 ## Running
 
 ```sh
-llmhop serve -config config.json
-nix run github:mirkolenz/llmhop -- serve -config config.json
+llmhop serve config.json
+nix run github:mirkolenz/llmhop -- serve config.json
 docker run --rm -p 8080:8080 -v ./config.json:/config.json ghcr.io/mirkolenz/llmhop
 ```
+
+`llmhop version` prints the version.
+The image runs `serve /config.json`, so the mounted config must set `"listen": [":8080"]`.
 
 ## NixOS module
 

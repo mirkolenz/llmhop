@@ -248,6 +248,8 @@ testers.nixosTest {
 
     with subtest("restarting a listener reconnects the gateway to its sockets"):
         machine.succeed("systemctl restart llmhop-default.socket")
+        # The restart of the service it is part of runs after the socket's returns.
+        machine.wait_for_unit("llmhop.service")
         machine.succeed("curl --max-time 5 -fsS http://127.0.0.1:8080/health")
         machine.succeed("curl --max-time 5 -fsS --unix-socket /run/llmhop/local.sock http://localhost/health")
 

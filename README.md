@@ -63,7 +63,7 @@ Strings in `authTokens` and `models.*.headers` are expanded at startup, and an u
 ### Request limits
 
 - `maxBodyBytes` (100 MiB): larger bodies get `413`.
-- `maxBufferedRequests` (8): body-routed requests buffered at once, further ones get `503`. A buffered body must arrive within a minute, or the request gets `408`.
+- `maxBufferedBytes` (1 GiB): bytes of body-routed requests buffered at once, further ones get `503`. A body is buffered until the backend starts its response, and must arrive within a minute, or the request gets `408`.
 - `models.*.maxConcurrentRequests` (unlimited): proxied requests per model, further ones get `503`.
 
 `0` disables a limit.

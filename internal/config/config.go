@@ -37,12 +37,12 @@ type Config struct {
 	Host         string `json:"host,omitempty"`
 	Port         uint16 `json:"port,omitempty"`
 	MaxBodyBytes int64  `json:"maxBodyBytes,omitempty"`
-	// MaxBufferedRequests bounds the requests whose body is held in memory to
-	// read their JSON "model" field, until the backend has received it, so memory
-	// stays below this times MaxBodyBytes. Zero means unlimited.
-	MaxBufferedRequests uint             `json:"maxBufferedRequests,omitempty"`
-	AuthTokens          []string         `json:"authTokens,omitempty"`
-	Models              map[string]Model `json:"models"`
+	// MaxBufferedBytes bounds the bytes of all bodies held in memory at once to
+	// read their JSON "model" field, until the backend starts its response.
+	// Zero means unlimited.
+	MaxBufferedBytes int64            `json:"maxBufferedBytes,omitempty"`
+	AuthTokens       []string         `json:"authTokens,omitempty"`
+	Models           map[string]Model `json:"models"`
 }
 
 // DefaultMaxBodyBytes bounds the size of a request body the router will buffer
@@ -50,8 +50,9 @@ type Config struct {
 // base64-encoded images; bump it explicitly for larger multimodal payloads.
 const DefaultMaxBodyBytes = 100 * 1024 * 1024
 
-// DefaultMaxBufferedRequests bounds the request bodies buffered at once.
-const DefaultMaxBufferedRequests = 8
+// DefaultMaxBufferedBytes bounds the bytes of request bodies buffered at once,
+// thousands of typical requests or ten at the body size limit.
+const DefaultMaxBufferedBytes = 1024 * 1024 * 1024
 
 // DefaultPort is the port llmhop listens on when the config sets none.
 const DefaultPort = 8080
@@ -89,8 +90,8 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 	defer func() { _ = f.Close() }()
 
 	cfg := &Config{
-		MaxBodyBytes:        DefaultMaxBodyBytes,
-		MaxBufferedRequests: DefaultMaxBufferedRequests,
+		MaxBodyBytes:     DefaultMaxBodyBytes,
+		MaxBufferedBytes: DefaultMaxBufferedBytes,
 	}
 	dec := json.NewDecoder(f)
 	// Unknown keys are an error rather than a silent no-op: a misspelled
@@ -131,6 +132,10 @@ func (cfg *Config) validate(load bool) error {
 
 	if cfg.MaxBodyBytes < 0 {
 		return errors.New("maxBodyBytes must not be negative")
+	}
+
+	if cfg.MaxBufferedBytes < 0 {
+		return errors.New("maxBufferedBytes must not be negative")
 	}
 
 	for i, token := range cfg.AuthTokens {

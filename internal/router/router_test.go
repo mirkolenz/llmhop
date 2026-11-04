@@ -380,14 +380,14 @@ func TestReadiness(t *testing.T) {
 	check(http.StatusServiceUnavailable, readiness{Status: "unavailable", Ready: 2, Probed: 3})
 }
 
-func TestBufferedRequestLimit(t *testing.T) {
+func TestBufferedBytesLimit(t *testing.T) {
 	srv, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
-		MaxBufferedRequests: 1,
-		Models:              map[string]config.Model{"m": {URL: srv.URL}},
+		MaxBufferedBytes: 16,
+		Models:           map[string]config.Model{"m": {URL: srv.URL}},
 	})
 
-	// The first body arrives slowly, so its request holds the only slot.
+	// The first body arrives slowly, so its partial body holds 10 bytes.
 	body, writer := io.Pipe()
 	done := make(chan struct{})
 
@@ -396,15 +396,18 @@ func TestBufferedRequestLimit(t *testing.T) {
 		close(done)
 	}()
 
-	if _, err := writer.Write([]byte(`{"model":`)); err != nil {
-		t.Fatal(err)
+	// The second write returns only once the router reads again, so the first is charged.
+	for _, chunk := range []string{`{"model":`, " "} {
+		if _, err := writer.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("buffered request got status %d, want 503", rec.Code)
 	}
 
-	// Path-routed bodies stream, so they need no slot.
+	// Path-routed bodies stream, so they need no budget.
 	if rec := send(t, h, http.MethodPost, "/route/m/", "{}", ""); rec.Code != http.StatusOK {
 		t.Errorf("streamed request got status %d, want 200", rec.Code)
 	}
@@ -412,7 +415,7 @@ func TestBufferedRequestLimit(t *testing.T) {
 	_ = writer.CloseWithError(io.ErrUnexpectedEOF)
 	<-done
 
-	// Forwarding the body released its slot.
+	// The failed read released its bytes.
 	for range 2 {
 		if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusOK {
 			t.Errorf("buffered request got status %d, want 200", rec.Code)
@@ -420,23 +423,25 @@ func TestBufferedRequestLimit(t *testing.T) {
 	}
 }
 
-func TestBufferedSlotReleasedOnceSent(t *testing.T) {
+func TestBufferedBytesReleasedOnceResponding(t *testing.T) {
 	unblock := make(chan struct{})
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	streaming := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+		_ = http.NewResponseController(w).Flush()
 		<-unblock
 	}))
-	t.Cleanup(slow.Close)
+	t.Cleanup(streaming.Close)
 	fast, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
-		MaxBufferedRequests: 1,
-		Models:              map[string]config.Model{"slow": {URL: slow.URL}, "fast": {URL: fast.URL}},
+		MaxBufferedBytes: 16,
+		Models:           map[string]config.Model{"slow": {URL: streaming.URL}, "fast": {URL: fast.URL}},
 	})
 
-	// The router's own WroteRequest hook, which releases the slot, runs before this outer one.
+	// The router's own hook, which releases the bytes, runs before this outer one.
 	sent, done := make(chan struct{}), make(chan struct{})
 	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
-		WroteRequest: func(httptrace.WroteRequestInfo) { close(sent) },
+		GotFirstResponseByte: func() { close(sent) },
 	})
 
 	go func() {
@@ -447,7 +452,7 @@ func TestBufferedSlotReleasedOnceSent(t *testing.T) {
 
 	<-sent
 
-	// The slow response still runs, but its body was sent.
+	// The slow response still streams, but its body can no longer be resent.
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"fast"}`, ""); rec.Code != http.StatusOK {
 		t.Errorf("buffered request got status %d, want 200", rec.Code)
 	}

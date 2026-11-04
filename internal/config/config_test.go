@@ -29,8 +29,8 @@ func TestLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cfg.Listen() != ":8080" || cfg.MaxBodyBytes != DefaultMaxBodyBytes || cfg.MaxBufferedRequests != DefaultMaxBufferedRequests {
-		t.Errorf("got listen %q and limits %d and %d, want defaults", cfg.Listen(), cfg.MaxBodyBytes, cfg.MaxBufferedRequests)
+	if cfg.Listen() != ":8080" || cfg.MaxBodyBytes != DefaultMaxBodyBytes || cfg.MaxBufferedBytes != DefaultMaxBufferedBytes {
+		t.Errorf("got listen %q and limits %d and %d, want defaults", cfg.Listen(), cfg.MaxBodyBytes, cfg.MaxBufferedBytes)
 	}
 
 	if !slices.Equal(cfg.AuthTokens, []string{"from-env", "plain-token"}) {
@@ -70,7 +70,7 @@ func TestLoadErrors(t *testing.T) {
 		{"unknown field", `{"maxBodyByes": 4096, "models": {"m": {"url": "http://x"}}}`, "unknown field"},
 		{"trailing JSON", `{"models": {"m": {"url": "http://x"}}} {}`, "multiple JSON values"},
 		{"out of range port", `{"port": 65536, "models": {"m": {"url": "http://x"}}}`, "port"},
-		{"negative buffering limit", `{"maxBufferedRequests": -1, "models": {"m": {"url": "http://x"}}}`, "maxBufferedRequests"},
+		{"negative buffering limit", `{"maxBufferedBytes": -1, "models": {"m": {"url": "http://x"}}}`, "maxBufferedBytes"},
 		{"negative concurrency limit", `{"models": {"m": {"url": "http://x", "maxConcurrentRequests": -1}}}`, "maxConcurrentRequests"},
 		{"empty auth token", `{"authTokens": [""], "models": {"m": {"url": "http://x"}}}`, "empty or invalid token"},
 		{"duplicate header ignoring case", `{"models": {"m": {"url": "http://x", "headers": {"Authorization": "one", "authorization": "two"}}}}`, "duplicate header"},

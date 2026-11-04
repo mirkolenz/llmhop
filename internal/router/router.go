@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mirkolenz/llmhop/internal/config"
@@ -51,7 +52,7 @@ func New(cfg *config.Config) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	registerModels(mux, listed)
-	proxy := proxyHandler(backends, cfg.MaxBodyBytes, newSlots(cfg.MaxBufferedRequests))
+	proxy := proxyHandler(backends, cfg.MaxBodyBytes, newBudget(cfg.MaxBufferedBytes))
 	mux.Handle(routePrefix+"{model}/{path...}", proxy)
 	mux.Handle("/", proxy)
 
@@ -130,7 +131,7 @@ func (b *backend) rewrite(r *httputil.ProxyRequest) {
 const routePrefix = "/route/"
 
 // bodyTimeout bounds reading a body buffered for its JSON "model" field,
-// so a slow client cannot hold a buffering slot for long.
+// so a slow client cannot hold buffered bytes for long.
 const bodyTimeout = time.Minute
 
 // newSlots returns a semaphore of n slots, nil for unlimited.
@@ -142,8 +143,8 @@ func newSlots(n uint) chan struct{} {
 	return make(chan struct{}, n)
 }
 
-// acquire takes a slot and returns its release, safe to call more than once,
-// or rejects the request with 503 and reports false once all are taken.
+// acquire takes a slot and returns its release, or rejects the request with
+// 503 and reports false once all are taken.
 func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
 	if slots == nil {
 		return func() {}, true
@@ -151,7 +152,7 @@ func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
 
 	select {
 	case slots <- struct{}{}:
-		return sync.OnceFunc(func() { <-slots }), true
+		return func() { <-slots }, true
 	default:
 		http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
 		return nil, false
@@ -160,11 +161,11 @@ func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
 
 // proxyHandler forwards each request to the backend named by its
 // /route/{model} path prefix, which is stripped and the body streamed,
-// or else by its JSON "model" field, for which the body is buffered in one
-// of the `buffered` slots until the transport can no longer resend it.
+// or else by its JSON "model" field, for which the body is buffered within
+// the `buffered` budget until the backend starts its response.
 // The per-model concurrency limit applies only once the backend is resolved,
 // so a saturated model never blocks requests to another.
-func proxyHandler(backends map[string]*backend, maxBytes int64, buffered chan struct{}) http.HandlerFunc {
+func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *budget) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 {
 			if req.ContentLength > maxBytes {
@@ -177,16 +178,13 @@ func proxyHandler(backends map[string]*backend, maxBytes int64, buffered chan st
 
 		name := req.PathValue("model")
 		if name == "" {
-			release, ok := acquire(w, buffered)
-			if !ok {
+			var release func()
+			var ok bool
+			if req, name, release, ok = bodyModel(w, req, buffered); !ok {
 				return
 			}
 
 			defer release()
-
-			if req, name, ok = bodyModel(w, req, release); !ok {
-				return
-			}
 		} else {
 			// Cut the escaped path, so escapes such as %2F in the remainder survive.
 			_, rest, _ := strings.Cut(strings.TrimPrefix(req.URL.EscapedPath(), routePrefix), "/")
@@ -211,24 +209,33 @@ func proxyHandler(backends map[string]*backend, maxBytes int64, buffered chan st
 	}
 }
 
-// bodyModel buffers the body to read its JSON "model" field and returns the
-// request carrying it as a replayBody, which calls release once the transport
-// can no longer resend it, or writes an error response and reports false.
+// bodyModel buffers the body, charged to buffered, to read its JSON "model"
+// field and returns the request carrying it as a replayBody with the release
+// of its budget, or writes an error response and reports false.
 //
 // Full buffering validates the entire JSON body before forwarding.
-func bodyModel(w http.ResponseWriter, req *http.Request, release func()) (*http.Request, string, bool) {
-	body, err := readBody(w, req)
+func bodyModel(w http.ResponseWriter, req *http.Request, buffered *budget) (_ *http.Request, model string, release func(), ok bool) {
+	charged := &chargedReader{r: req.Body, budget: buffered}
+	defer func() {
+		if !ok {
+			buffered.give(charged.n)
+		}
+	}()
+
+	body, err := readBody(w, charged)
 	if err != nil {
 		switch _, tooLarge := errors.AsType[*http.MaxBytesError](err); {
 		case tooLarge:
 			bodyTooLarge(w)
+		case errors.Is(err, errBudgetExceeded):
+			http.Error(w, "too many buffered requests", http.StatusServiceUnavailable)
 		case errors.Is(err, os.ErrDeadlineExceeded):
 			http.Error(w, "request body timeout", http.StatusRequestTimeout)
 		default:
 			http.Error(w, "failed to read request body", http.StatusBadRequest)
 		}
 
-		return nil, "", false
+		return nil, "", nil, false
 	}
 
 	var request struct {
@@ -236,18 +243,17 @@ func bodyModel(w http.ResponseWriter, req *http.Request, release func()) (*http.
 	}
 	if err := json.Unmarshal(body, &request); err != nil {
 		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
-		return nil, "", false
+		return nil, "", nil, false
 	}
 
 	if request.Model == nil {
 		http.Error(w, "missing model", http.StatusBadRequest)
-		return nil, "", false
+		return nil, "", nil, false
 	}
 
-	rb := &replayBody{body: body, release: release, replayable: replayable(req)}
+	rb := newReplayBody(body, func() { buffered.give(charged.n) })
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		WroteRequest:         rb.wrote,
-		GotFirstResponseByte: rb.gotResponse,
+		GotFirstResponseByte: rb.drop,
 	}))
 	req.Body, _ = rb.open()
 	req.GetBody = rb.open
@@ -258,122 +264,136 @@ func bodyModel(w http.ResponseWriter, req *http.Request, release func()) (*http.
 		req.ContentLength = -1
 	}
 
-	return req, *request.Model, true
+	return req, *request.Model, rb.drop, true
 }
 
-// replayable mirrors the rule by which http.Transport resends a request with
-// a rewindable body after writing it.
-func replayable(req *http.Request) bool {
-	switch req.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
-		return true
-	}
-
-	_, key := req.Header["Idempotency-Key"]
-	_, xKey := req.Header["X-Idempotency-Key"]
-
-	return key || xKey
-}
-
-// readBody reads the whole request body within bodyTimeout, growing the buffer
-// as data arrives rather than by the declared length, so a stalled client
-// holds neither a buffering slot for long nor memory it never sends.
-func readBody(w http.ResponseWriter, req *http.Request) ([]byte, error) {
+// readBody reads the whole body within bodyTimeout, growing the buffer as
+// data arrives rather than by the declared length, so a stalled client holds
+// neither a budget nor memory it never sends.
+func readBody(w http.ResponseWriter, body io.Reader) ([]byte, error) {
 	rc := http.NewResponseController(w)
 	// Fails only for writers without deadlines, such as test recorders.
 	_ = rc.SetReadDeadline(time.Now().Add(bodyTimeout))
-	body, err := io.ReadAll(req.Body)
+	data, err := io.ReadAll(body)
 	// Cleared, since expiring once the body was read would cancel the request.
 	_ = rc.SetReadDeadline(time.Time{})
 
-	return body, err
+	return data, err
 }
 
-// replayBody holds a buffered request body as long as the transport may
-// resend it. It hands out readers of the buffer, which the transport sends
-// along with the headers and opens afresh to retry on a stale backend
-// connection. Once no retry is possible, it drops the buffer and releases its
-// slot, so a long response keeps neither.
+// budget bounds the bytes of buffered bodies held at once, so any number of
+// small requests buffer in parallel while large ones cannot exhaust memory.
+// A nil budget is unlimited.
+type budget struct {
+	free atomic.Int64
+}
+
+func newBudget(n int64) *budget {
+	if n == 0 {
+		return nil
+	}
+
+	b := &budget{}
+	b.free.Store(n)
+
+	return b
+}
+
+// take reserves n bytes, or reports false if fewer are free.
+func (b *budget) take(n int64) bool {
+	if b == nil {
+		return true
+	}
+
+	for {
+		free := b.free.Load()
+		if free < n {
+			return false
+		}
+
+		if b.free.CompareAndSwap(free, free-n) {
+			return true
+		}
+	}
+}
+
+func (b *budget) give(n int64) {
+	if b != nil {
+		b.free.Add(n)
+	}
+}
+
+var errBudgetExceeded = errors.New("buffered request bodies exceed their budget")
+
+// chargedReader takes every byte it reads from the budget, so a body is
+// charged only for the data that has arrived.
+type chargedReader struct {
+	r      io.Reader
+	budget *budget
+	// n counts the bytes charged so far.
+	n int64
+}
+
+func (c *chargedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if !c.budget.take(int64(n)) {
+		return 0, errBudgetExceeded
+	}
+
+	c.n += int64(n)
+
+	return n, err
+}
+
+// replayBody hands a buffered body to the transport, which resends it on a
+// fresh connection until the response starts. Then drop lets go of the buffer
+// and releases its budget, so a response streamed for long holds neither.
 type replayBody struct {
-	mu      sync.Mutex
-	body    []byte
-	release func()
-	// Whether the transport resends a written request until its response
-	// starts, and the state of the current attempt.
-	replayable, written, failed, responded bool
+	buf  atomic.Pointer[[]byte]
+	drop func()
+}
+
+func newReplayBody(body []byte, release func()) *replayBody {
+	rb := &replayBody{}
+	rb.buf.Store(&body)
+	rb.drop = sync.OnceFunc(func() {
+		rb.buf.Store(nil)
+		release()
+	})
+
+	return rb
 }
 
 var errBodySent = errors.New("buffered request body already sent")
 
-func (b *replayBody) open() (io.ReadCloser, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.body == nil {
+func (rb *replayBody) open() (io.ReadCloser, error) {
+	buf := rb.buf.Load()
+	if buf == nil {
 		return nil, errBodySent
 	}
 
-	b.written, b.failed = false, false
-
-	return &replayReader{b: b}, nil
+	return &dropReader{buf: *buf}, nil
 }
 
-// wrote is the WroteRequest hook.
-func (b *replayBody) wrote(info httptrace.WroteRequestInfo) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.written, b.failed = true, info.Err != nil
-	b.settle()
+// dropReader reads a buffer and lets go of it at EOF, so the request, which
+// lives as long as its response, does not keep the buffer alive.
+type dropReader struct {
+	buf []byte
 }
 
-// gotResponse is the GotFirstResponseByte hook.
-func (b *replayBody) gotResponse() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	b.responded = true
-	b.settle()
-}
-
-// settle releases the buffer and its slot, with b.mu held, once the transport
-// can no longer resend the body: after a response to the written request, or
-// after a successful write of a request it never resends. A dropped buffer
-// marks it settled, so it releases once.
-func (b *replayBody) settle() {
-	if b.body == nil || !b.written || !b.responded && (b.failed || b.replayable) {
-		return
-	}
-
-	b.body = nil
-	b.release()
-}
-
-// replayReader reads the buffer of b under its lock, so dropping the buffer
-// never races with a reader of an earlier attempt, which fails instead.
-type replayReader struct {
-	b   *replayBody
-	off int
-}
-
-func (r *replayReader) Read(p []byte) (int, error) {
-	r.b.mu.Lock()
-	defer r.b.mu.Unlock()
-
-	switch {
-	case r.b.body == nil:
-		return 0, errBodySent
-	case r.off >= len(r.b.body):
+func (r *dropReader) Read(p []byte) (int, error) {
+	if len(r.buf) == 0 {
+		r.buf = nil
 		return 0, io.EOF
 	}
 
-	n := copy(p, r.b.body[r.off:])
-	r.off += n
+	n := copy(p, r.buf)
+	r.buf = r.buf[n:]
 
 	return n, nil
 }
 
-func (*replayReader) Close() error { return nil }
+func (*dropReader) Close() error { return nil }
 
 // bodyTooLarge reports a request body exceeding the size limit.
 func bodyTooLarge(w http.ResponseWriter) {

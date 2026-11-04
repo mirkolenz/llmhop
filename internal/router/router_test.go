@@ -127,8 +127,15 @@ func TestCatalog(t *testing.T) {
 	})
 
 	t.Run("requires a token", func(t *testing.T) {
-		if rec := send(t, h, http.MethodGet, "/v1/models", "", ""); rec.Code != http.StatusUnauthorized {
-			t.Fatalf("got status %d", rec.Code)
+		rec := send(t, h, http.MethodGet, "/v1/models", "", "")
+
+		var got apiError
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+
+		if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != "Bearer" || got.Error.Type != "authentication_error" {
+			t.Fatalf("got status %d, header %v, error %+v", rec.Code, rec.Header(), got)
 		}
 	})
 }
@@ -319,8 +326,8 @@ func TestConcurrentRequestLimit(t *testing.T) {
 	// Returns once the first request holds the only slot of model a.
 	<-entered
 
-	if rec := send(t, h, http.MethodPost, "/", `{"model":"a"}`, ""); rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("saturated model got status %d, want 503", rec.Code)
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"a"}`, ""); rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1" {
+		t.Errorf("saturated model got status %d, want 429", rec.Code)
 	}
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"b"}`, ""); rec.Code != http.StatusOK {

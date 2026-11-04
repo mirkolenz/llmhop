@@ -144,7 +144,7 @@ func newSlots(n uint) chan struct{} {
 }
 
 // acquire takes a slot and returns its release, or rejects the request with
-// 503 and reports false once all are taken.
+// 429 and reports false once all are taken.
 func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
 	if slots == nil {
 		return func() {}, true
@@ -154,7 +154,8 @@ func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
 	case slots <- struct{}{}:
 		return func() { <-slots }, true
 	default:
-		http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "too_many_requests", "too many concurrent requests for this model")
 		return nil, false
 	}
 }
@@ -228,11 +229,12 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *budget) (_ *h
 		case tooLarge:
 			bodyTooLarge(w)
 		case errors.Is(err, errBudgetExceeded):
-			http.Error(w, "too many buffered requests", http.StatusServiceUnavailable)
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "buffer_budget_exceeded", "request body buffer budget exhausted, retry later")
 		case errors.Is(err, os.ErrDeadlineExceeded):
-			http.Error(w, "request body timeout", http.StatusRequestTimeout)
+			writeError(w, http.StatusRequestTimeout, "request_body_timeout", "request body timeout")
 		default:
-			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid_request_body", "failed to read request body")
 		}
 
 		return nil, "", nil, false
@@ -242,12 +244,12 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *budget) (_ *h
 		Model *string `json:"model"`
 	}
 	if err := json.Unmarshal(body, &request); err != nil {
-		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request body")
 		return nil, "", nil, false
 	}
 
 	if request.Model == nil {
-		http.Error(w, "missing model", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_model", "missing model")
 		return nil, "", nil, false
 	}
 
@@ -397,7 +399,7 @@ func (*dropReader) Close() error { return nil }
 
 // bodyTooLarge reports a request body exceeding the size limit.
 func bodyTooLarge(w http.ResponseWriter) {
-	http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+	writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
 }
 
 // proxyError maps a streamed body exceeding the size limit to 413, and every
@@ -409,7 +411,7 @@ func proxyError(w http.ResponseWriter, _ *http.Request, err error) {
 	}
 
 	log.Printf("http: proxy error: %v", err)
-	w.WriteHeader(http.StatusBadGateway)
+	writeError(w, http.StatusBadGateway, "bad_gateway", "backend unreachable")
 }
 
 // authMiddleware gates next with the configured bearer tokens and strips the
@@ -422,7 +424,8 @@ func authMiddleware(tokens [][]byte, next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if !checkBearer(req.Header.Get("Authorization"), tokens) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid bearer token")
 			return
 		}
 		req.Header.Del("Authorization")

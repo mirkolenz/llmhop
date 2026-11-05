@@ -323,7 +323,7 @@ in
       );
     };
     assertions = map (w: util.firewallAssertion w.owner w) workloads;
-    networking.firewall.allowedTCPPorts = map (w: w.port) (
+    networking.firewall.allowedTCPPorts = lib.catAttrs "port" (
       lib.filter (w: w.socket == null && w.openFirewall) workloads
     );
     # Every workload owns its own directory below the root, and every rule of

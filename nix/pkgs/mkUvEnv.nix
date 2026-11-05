@@ -90,7 +90,7 @@ let
   # Every package the lock resolves, rather than a hand-curated list of the ones
   # known to ship GPU extensions: a wheel growing one, or a new dependency
   # appearing on an upstream bump, would otherwise silently fail to build.
-  lockedNames = map (package: package.name) uvLock.package;
+  lockedNames = lib.catAttrs "name" uvLock.package;
 
   # A wheel tagged for any platform carries no host code, but may still ship
   # device code as ELF, such as the thousands of cubins in `flashinfer-cubin`.

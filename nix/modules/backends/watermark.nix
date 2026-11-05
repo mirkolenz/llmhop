@@ -225,7 +225,7 @@ let
   inlineKeyAssertion = path: workload: watermarks: {
     assertion =
       !lib.any (config: lib.isAttrs config && config ? key) (
-        map (watermark: watermark.settings) watermarks ++ [ (workload.settings.watermark-config or null) ]
+        lib.catAttrs "settings" watermarks ++ [ (workload.settings.watermark-config or null) ]
       )
       && !lib.any (lib.hasPrefix "watermark-config.") (lib.attrNames workload.settings);
     message = "services.llmhop.vllm: `${path}` configures the watermark key inline, which its `credential` provides.";

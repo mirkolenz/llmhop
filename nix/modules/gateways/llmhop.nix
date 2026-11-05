@@ -205,7 +205,7 @@ in
         networking.firewall.allowedTCPPorts = lib.pipe tcpListeners [
           lib.attrValues
           (lib.filter (listener: listener.openFirewall))
-          (map (listener: listener.port))
+          (lib.catAttrs "port")
         ];
 
         systemd = {

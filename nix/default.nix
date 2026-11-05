@@ -67,7 +67,10 @@ in
       // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;
         vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
-        bundle = pkgs.callPackage ./checks/bundle.nix { inherit (config.legacyPackages) mkQuadletBundle; };
+        bundle = pkgs.callPackage ./checks/bundle.nix {
+          inherit (config.legacyPackages) mkQuadletBundle;
+          inherit (config.packages) vllm-bundle;
+        };
         eval = pkgs.callPackage ./checks/eval.nix {
           inherit mkEvalCheck self;
           mkBundleSystem = { modules }: inputs.quadlet-nix.lib.mkBundleSystem { inherit pkgs modules; };
@@ -88,6 +91,7 @@ in
         docker = pkgs.callPackage ./docker.nix {
           inherit (config.packages) llmhop;
         };
+        vllm-bundle = config.legacyPackages.mkQuadletBundle { modules = [ ./bundles/vllm.nix ]; };
       };
       # The builders are functions rather than packages: downstream calls them
       # with their own args, e.g.

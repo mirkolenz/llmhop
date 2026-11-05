@@ -207,6 +207,7 @@ An explicitly stopped server stays stopped.
 
 `fetch.enable = false` drops the fetchers, refresh and update units, so each server downloads its repositories itself when it starts, which needs `offline = false`, its default then.
 A container backend can then also set `cache.directory = null`, keeping each cache in the named volume `<engine>-<name>` without tmpfiles rules, and `container.imageUnit = false`, so each container references `container.image` directly rather than through the image unit `<engine>-image`.
+Together they leave one unit per model, as in the bundle `packages.x86_64-linux.vllm-bundle` of [`nix/bundles/vllm.nix`](nix/bundles/vllm.nix).
 
 With fetchers, servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
 A native server on a socket gets no network at all and on a `port` only loopback, while a container gets `Network=none`, which needs a socket, so a container workload with a `port` defaults to `offline = false` and rejects `offline = true`.

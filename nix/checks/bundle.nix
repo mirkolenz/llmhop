@@ -1,9 +1,11 @@
-# Bundles Quadlet backends and the llmhop gateway for a host without Nix, and
-# rejects what cannot be bundled.
+# Bundles Quadlet backends and the llmhop gateway for a host without Nix,
+# rejects what cannot be bundled, and checks that `vllm-bundle` holds a
+# single container.
 {
   lib,
   mkQuadletBundle,
   runCommand,
+  vllm-bundle,
 }:
 let
   config = {
@@ -81,5 +83,18 @@ runCommand "llmhop-bundle-tests" { } ''
   grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-update.timer
   grep -qE '^Image=docker-archive:/usr/local/lib/llmhop/[^ ]+\.tar\.gz$' etc/containers/systemd/llmhop.image
   grep -qx 'Policy=missing' etc/containers/systemd/vllm.image
+
+  cd ${vllm-bundle}/etc
+  test "$(find . -type f | sort)" = "./containers/systemd/vllm-qwen3.8-27b.container
+  ./systemd/system/multi-user.target.d/llmhop.conf"
+  container=containers/systemd/vllm-qwen3.8-27b.container
+  grep -qx 'Image=docker.io/vllm/vllm-openai:latest' $container
+  grep -qx 'Volume=vllm-qwen3.8-27b:/var/cache/vllm/qwen3.8-27b' $container
+  grep -qx 'AddDevice=nvidia.com/gpu=all' $container
+
+  if grep -E '^(Pull|PartOf|Wants|After)=|HF_HUB_OFFLINE' $container; then
+    exit 1
+  fi
+
   touch $out
 ''

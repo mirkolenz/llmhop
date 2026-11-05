@@ -108,12 +108,15 @@ rec {
             options = {
               host = mkOption {
                 type = types.str;
+                description = "Address the server binds.";
               };
               port = mkOption {
                 type = with types; nullOr port;
+                description = "Port the server binds, or null for its socket.";
               };
               socket = mkOption {
                 type = with types; nullOr str;
+                description = "Unix socket the server binds, or null for its port.";
               };
             };
           };
@@ -150,14 +153,17 @@ rec {
               options = {
                 repo = mkOption {
                   type = str;
+                  description = "Hugging Face repository.";
                 };
                 revision = mkOption {
                   type = nullOr str;
                   default = null;
+                  description = "Branch, tag or commit, or null for the default branch.";
                 };
                 include = mkOption {
                   type = listOf str;
                   default = [ ];
+                  description = "Glob patterns of the files to download, or all files if empty.";
                 };
               };
             });

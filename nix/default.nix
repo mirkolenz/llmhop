@@ -2,9 +2,11 @@
   inputs,
   self,
   lib,
+  config,
   ...
 }:
 let
+  devFlake = config.partitions.dev.module.flake;
   version = self.shortRev or self.dirtyShortRev or "dev";
   # Keyed, so importing both modules sets the version once.
   versionModule = {
@@ -15,9 +17,19 @@ in
 {
   systems = lib.remove "x86_64-darwin" (import inputs.systems);
   imports = [
-    inputs.treefmt-nix.flakeModule
+    inputs.flake-parts.flakeModules.partitions
     ./docs
   ];
+  # The dev partition loads its inputs only when these attributes are evaluated.
+  partitions.dev = {
+    extraInputsFlake = ./dev;
+    module = ./dev;
+  };
+  partitionedAttrs = {
+    checks = "dev";
+    devShells = "dev";
+    formatter = "dev";
+  };
   flake = {
     nixosModules = {
       default.imports = [
@@ -55,15 +67,6 @@ in
       );
     in
     {
-      treefmt = {
-        projectRootFile = "flake.nix";
-        programs = {
-          gofmt.enable = true;
-          nixfmt.enable = true;
-          ruff-check.enable = true;
-          ruff-format.enable = true;
-        };
-      };
       checks = {
         inherit (config.packages) llmhop;
         inherit (scope) check-elf;
@@ -93,14 +96,6 @@ in
         docker = pkgs.callPackage ./docker.nix {
           inherit (config.packages) llmhop;
         };
-        # Reads `VERSION` and `GITHUB_TOKEN` when it runs.
-        docker-manifest = inputs.flocken.legacyPackages.${system}.mkDockerManifest {
-          github.enable = true;
-          images = with self.packages; [
-            x86_64-linux.docker
-            aarch64-linux.docker
-          ];
-        };
       };
       # The builders are functions rather than packages: downstream calls them
       # with their own args, e.g.
@@ -108,6 +103,8 @@ in
       #     inputs.llmhop.legacyPackages.${system}.mkUvEnv { workspaceRoot = ./vllm-env; };
       legacyPackages = {
         inherit (scope) mkUvEnv mkCudaHome;
+        # Not a package, so `nix flake check` does not load the dev partition.
+        inherit (devFlake.packages.${system}) docker-manifest;
         # The Quadlet units of a minimal system with llmhop's modules,
         # configured by `modules`, as files for a host without Nix,
         # see `virtualisation.quadlet.bundle` of quadlet-nix.
@@ -116,13 +113,6 @@ in
           inputs.quadlet-nix.legacyPackages.${system}.mkBundle {
             modules = [ self.nixosModules.quadlet ] ++ modules;
           };
-      };
-      devShells.default = pkgs.mkShell {
-        packages = with pkgs; [
-          go
-          goreleaser
-          config.treefmt.build.wrapper
-        ];
       };
     };
 }

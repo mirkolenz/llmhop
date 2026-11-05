@@ -3,14 +3,6 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     systems.url = "github:nix-systems/default";
-    flocken = {
-      url = "github:mirkolenz/flocken/v2";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    treefmt-nix = {
-      url = "github:numtide/treefmt-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     quadlet-nix = {
       url = "github:mirkolenz/quadlet-nix/v1";
       inputs = {

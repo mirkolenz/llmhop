@@ -1,5 +1,67 @@
 # Changelog
 
+## [3.0.0](https://github.com/mirkolenz/llmhop/compare/v2.2.1...v3.0.0) (2026-11-05)
+
+### ⚠ BREAKING CHANGES
+
+* **nixos:** rework module options and socket-activate quadlet llmhop gateway
+* **pkgs:** drop venv prefix of mkUvEnv arguments
+* **cli:** take config as argument, listen on configured addresses and name auth tokens
+* **router:** route model names containing slashes
+* **router:** answer errors as openai json with retry and auth headers
+* **router:** bound buffered bodies by bytes instead of requests
+* **nixos:** open firewall per llmhop listener and reject it on loopback
+* **cli:** replace flags with serve and check subcommands
+* **nixos:** test several watermark profiles per detector and drop detector unit prefix
+* **nixos:** use complete container image references
+* **nixos:** serve models through one selectable gateway or none
+* **router:** limit concurrency per model and add readiness probe
+* remove llmhop-notify in favor of post-start health checks
+* **nixos:** remove rootless quadlet user, unit override options and encrypted credentials
+* **nixos:** fetch models in separate units, serve them offline and prune hub cache
+
+### Features
+
+* **cli:** replace flags with serve and check subcommands ([52bd09d](https://github.com/mirkolenz/llmhop/commit/52bd09d211e0a25fb9ceae3c77fefe15e8db2c5d))
+* **cli:** take config as argument, listen on configured addresses and name auth tokens ([01211a8](https://github.com/mirkolenz/llmhop/commit/01211a8e156ef7c33d83e73b6384ad01265eace7))
+* drain in-flight requests on shutdown ([96a639f](https://github.com/mirkolenz/llmhop/commit/96a639fe1c4b969c3b192a2057ff10d55c1dfa3b))
+* **nixos:** add bundle uninstall script and retire units dropped on reinstall ([0f8d0d8](https://github.com/mirkolenz/llmhop/commit/0f8d0d892768cf2e857360ab6bbe01ecb7775b2a))
+* **nixos:** add fetch token credential for gated repositories ([eaed844](https://github.com/mirkolenz/llmhop/commit/eaed844c360d2497a3b4143846cbc2eee19ed711))
+* **nixos:** add llmhop-quadlet gateway running bundled image archive ([be3ee92](https://github.com/mirkolenz/llmhop/commit/be3ee927f977c0a7659eed1d7a19c78af76594e1))
+* **nixos:** configure user namespaces and mount options for every quadlet container ([3a2a8dc](https://github.com/mirkolenz/llmhop/commit/3a2a8dca5a806b3ff447e706b6608ee10a562aef))
+* **nixos:** expand credential references in worker and gateway environments ([b376a3d](https://github.com/mirkolenz/llmhop/commit/b376a3df50804389e8265b2918e9a207627bc5b3))
+* **nixos:** export quadlet units as bundle for hosts without nix ([da8a43e](https://github.com/mirkolenz/llmhop/commit/da8a43ebca1f096b662b2ac6894869d97e8bedc8))
+* **nixos:** fetch models in separate units, serve them offline and prune hub cache ([0f0212f](https://github.com/mirkolenz/llmhop/commit/0f0212f4470330784ff7aea7d984e267c7876a85))
+* **nixos:** open firewall per llmhop listener and reject it on loopback ([d9c4aeb](https://github.com/mirkolenz/llmhop/commit/d9c4aeb418bcd78ae2a721a893088e04efa9bd64))
+* **nixos:** prune hub caches with llmhop instead of python ([c1aa4b5](https://github.com/mirkolenz/llmhop/commit/c1aa4b5b925f9823d533a4be5417227267603283))
+* **nixos:** restart quadlet containers with their image ([93a637d](https://github.com/mirkolenz/llmhop/commit/93a637d4b856313fd198644cdd896154c11b1fdb))
+* **nixos:** rework module options and socket-activate quadlet llmhop gateway ([08743c0](https://github.com/mirkolenz/llmhop/commit/08743c0ff85b5d807c136128632d9a36bd522b15))
+* **nixos:** serve models through one selectable gateway or none ([b8f9a6e](https://github.com/mirkolenz/llmhop/commit/b8f9a6e8effb39b67f0d29f7a7fda5dd11b1bc1a))
+* **nixos:** test several watermark profiles per detector and drop detector unit prefix ([4597700](https://github.com/mirkolenz/llmhop/commit/4597700752a87689f228b9299690e2140526abbe))
+* **nixos:** use complete container image references ([abe1353](https://github.com/mirkolenz/llmhop/commit/abe13531dc0dbb40189ce9d17420ee0b0e917a2a))
+* **nixos:** wait for native servers with llmhop instead of curl ([77b5b3e](https://github.com/mirkolenz/llmhop/commit/77b5b3e4653ab47f1579e03e3e2a54af161fe4ca))
+* **pkgs:** drop venv prefix of mkUvEnv arguments ([658c746](https://github.com/mirkolenz/llmhop/commit/658c746589b669f1baf325dbb3d8caae97c47edf))
+* **router:** answer errors as openai json with retry and auth headers ([b477f40](https://github.com/mirkolenz/llmhop/commit/b477f4012ebafea363efd7b6ecc0604f729b57eb))
+* **router:** bound buffered bodies by bytes instead of requests ([22acd74](https://github.com/mirkolenz/llmhop/commit/22acd74ec63ca19054a8130313b0cf98aa4df93d))
+* **router:** limit concurrency per model and add readiness probe ([cbf4fc8](https://github.com/mirkolenz/llmhop/commit/cbf4fc8039d95a030f1aec28e699704308bb1caa))
+* **router:** route model names containing slashes ([9b7845b](https://github.com/mirkolenz/llmhop/commit/9b7845b8b253f47606d4aa228363466dc0f69feb))
+
+### Bug Fixes
+
+* close idle keep-alive connections ([1448d9d](https://github.com/mirkolenz/llmhop/commit/1448d9dc41fb00a1a4932d1be636ada07b30a9c2))
+* **docker:** run image as nobody and ship llmhop and ca certificates in its root ([ac126aa](https://github.com/mirkolenz/llmhop/commit/ac126aa703b25244b2ab6dd2513c82f1dfae2db5))
+* **nixos:** always restart every server ([fc8d780](https://github.com/mirkolenz/llmhop/commit/fc8d780ea2f9e046f683f0c61f75a61896948862))
+* **nixos:** restart native gateway with its listener sockets ([c682dac](https://github.com/mirkolenz/llmhop/commit/c682dac0102e78e75cab0a34d6fcbf714fb74788))
+
+### Performance Improvements
+
+* **upstream:** keep more idle connections per backend ([62f44b0](https://github.com/mirkolenz/llmhop/commit/62f44b053045f93ff817f694a17767f5466cc18b))
+
+### Code Refactoring
+
+* **nixos:** remove rootless quadlet user, unit override options and encrypted credentials ([2130b43](https://github.com/mirkolenz/llmhop/commit/2130b438607f20088124ef3a5ac1dccb431e5863))
+* remove llmhop-notify in favor of post-start health checks ([9ae5e38](https://github.com/mirkolenz/llmhop/commit/9ae5e38f33636147df800fc6dbd506456e50a4e2))
+
 ## [2.2.1](https://github.com/mirkolenz/llmhop/compare/v2.2.0...v2.2.1) (2026-10-01)
 
 ### Bug Fixes

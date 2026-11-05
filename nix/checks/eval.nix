@@ -13,6 +13,10 @@ let
   watermarkKey = "/run/secrets/watermark-key";
   watermark.settings.algorithm = "dual_key_gumbel";
   fakeVllm = pkgs.writeShellScriptBin "vllm" "exit 0";
+  nativeVllm = {
+    enable = true;
+    package = fakeVllm;
+  };
 
   # Not `lib.hasInfix`: it compiles the needle into a regex, and `lib.match`
   # rejects patterns carrying store-path context.
@@ -46,7 +50,7 @@ let
     llmhopConfig:
     (mkBundleSystem {
       modules = [
-        self.nixosModules.quadlet
+        self.nixosModules.default
         { services.llmhop = llmhopConfig; }
       ];
     }).config;
@@ -54,13 +58,13 @@ let
   mkQuadlet =
     overrides:
     mkSystem {
-      vllm-quadlet = lib.recursiveUpdate {
+      vllm = lib.recursiveUpdate {
         enable = true;
+        runtime = "quadlet";
         container.image = "docker.io/vllm/vllm-openai:latest";
         models.test = {
           model = "example/test";
           port = 18001;
-          offline = false;
         };
       } overrides;
     };
@@ -71,6 +75,7 @@ let
       mountOptions.credentials = [ "idmap=uids=0-1000-1;gids=0-1000-1" ];
     };
     models.test = {
+      container.devices = [ "nvidia.com/gpu=0" ];
       credentials = {
         api-keys = apiKeys;
         server-config = serverConfig;
@@ -85,12 +90,10 @@ let
     models.marked = {
       model = "example/marked";
       port = 18003;
-      offline = false;
       inherit watermark;
     };
     detectors.watermark = {
       port = 18002;
-      offline = false;
       # Two keys of the same tokenizer, the retired one rotated out.
       profiles = rec {
         current = {
@@ -114,9 +117,7 @@ let
   # The VM test covers the native llama.cpp path end to end.
   native = mkSystem {
     gateway.type = "llmhop";
-    vllm = {
-      enable = true;
-      package = fakeVllm;
+    vllm = nativeVllm // {
       fetch.hfTokenCredential = "llmhop.hf-token";
       models = {
         local = {
@@ -165,13 +166,12 @@ let
       llmhop.user = "hop";
     };
     socketDirectory = "/run/sockets/llmhop";
-    vllm = {
-      enable = true;
-      package = fakeVllm;
+    vllm = nativeVllm // {
       models.test.model = "example/test";
     };
-    llama-cpp-quadlet = {
+    llama-cpp = {
       enable = true;
+      runtime = "quadlet";
       container.image = "ghcr.io/ggml-org/llama.cpp:server";
       models = {
         b.model = "example/b";
@@ -182,11 +182,9 @@ let
   socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
   socketRules = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
 
-  managedWorker =
+  managed =
     (mkSystem {
-      vllm = {
-        enable = true;
-        package = fakeVllm;
+      vllm = nativeVllm // {
         modelSettings.host = "0.0.0.0";
         models.test = {
           model = "example/test";
@@ -197,28 +195,26 @@ let
           };
         };
       };
-    }).systemd.services.vllm-test;
+    }).services.llmhop.vllm.models.test;
 
   # A model of each engine kind on a port, which every gateway reaches.
   mkRoutable =
     overrides:
     mkSystem (
       lib.recursiveUpdate {
-        vllm = {
-          enable = true;
-          package = fakeVllm;
+        vllm = nativeVllm // {
           models.qwen = {
             model = "example/qwen";
             port = 24001;
           };
         };
-        sglang-quadlet = {
+        sglang = {
           enable = true;
+          runtime = "quadlet";
           container.image = "docker.io/lmsysorg/sglang:latest";
           models.llama = {
             model = "example/llama";
             port = 24002;
-            offline = false;
           };
         };
       } overrides
@@ -237,8 +233,9 @@ let
   smgQuadlet =
     (mkRoutable {
       gateway = {
-        type = "smg-quadlet";
-        smg-quadlet = {
+        type = "smg";
+        smg = {
+          runtime = "quadlet";
           container = {
             image = "ghcr.io/smg-project/smg:nightly";
             config.UserNS = "auto";
@@ -251,8 +248,118 @@ let
     }).virtualisation.quadlet.containers.smg;
   bifrost = mkRoutable {
     gateway = {
-      type = "bifrost-quadlet";
-      bifrost-quadlet.container.image = "docker.io/maximhq/bifrost:v2.3.2";
+      type = "bifrost";
+      bifrost.runtime = "quadlet";
+      bifrost.container.image = "docker.io/maximhq/bifrost:v2.3.2";
+    };
+  };
+
+  # Failing assertions containing `needle` of `system`, expected `count` times.
+  assertionCases = {
+    inlineWatermarkKey = {
+      needle = "watermark key inline";
+      count = 2;
+      system = mkQuadlet {
+        models.test.watermark.settings.key = 42;
+        models.inline = {
+          model = "example/inline";
+          port = 18004;
+          settings.watermark-config = {
+            algorithm = "gumbel";
+            key = 42;
+          };
+        };
+      };
+    };
+    routedBeyondLoopback = {
+      needle = "is routed by the gateway";
+      count = 1;
+      system = mkRoutable {
+        gateway = {
+          type = "smg";
+          smg.package = fakeVllm;
+        };
+        vllm.models.qwen.host = "0.0.0.0";
+      };
+    };
+    firewallOnRoutedModel = {
+      needle = "is loopback";
+      count = 1;
+      system = mkRoutable { vllm.models.qwen.openFirewall = true; };
+    };
+    socketBehindTcpGateway = {
+      needle = "cannot reach";
+      count = 1;
+      system = mkRoutable {
+        gateway = {
+          type = "bifrost";
+          bifrost.package = fakeVllm;
+        };
+        vllm.models.local.model = "example/local";
+      };
+    };
+    llmhopListenSetting = {
+      needle = "sets `listen`";
+      count = 1;
+      system = mkRoutable {
+        gateway = {
+          type = "llmhop";
+          llmhop = {
+            runtime = "quadlet";
+            settings.listen = [ ":8080" ];
+          };
+        };
+      };
+    };
+    portClash = {
+      needle = "is claimed by";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.native = {
+            model = "example/test";
+            port = 22001;
+          };
+        };
+        sglang = {
+          enable = true;
+          runtime = "quadlet";
+          container.image = "docker.io/lmsysorg/sglang:latest";
+          models.container = {
+            model = "example/test";
+            port = 22001;
+          };
+        };
+      };
+    };
+    nameClash = {
+      needle = "model `test` is claimed";
+      count = 1;
+      system = mkSystem {
+        gateway.type = "llmhop";
+        vllm = nativeVllm // {
+          models.test.model = "example/test";
+        };
+        llama-cpp = {
+          enable = true;
+          runtime = "quadlet";
+          container.image = "ghcr.io/ggml-org/llama.cpp:server";
+          models.test = {
+            model = "example/test";
+            port = 22002;
+          };
+        };
+      };
+    };
+    offlineOnPort = {
+      needle = "with `offline = true`";
+      count = 1;
+      system = mkQuadlet { models.test.offline = true; };
+    };
+    offlineOnSocket = {
+      needle = "with `offline = true`";
+      count = 0;
+      system = mkQuadlet { models.test.port = null; };
     };
   };
 
@@ -344,45 +451,49 @@ let
     # The key reaches vLLM through the script, never the command line.
     testWatermark = {
       expr = {
-        quadlet = containsAll [
-          "/run/llmhop/watermark.py serve example/marked"
-          "--watermark-key-file /run/llmhop/credentials/vllm.watermark-key"
-        ] quadletMarked.containerConfig.Exec;
-        native = containsAll [
-          "/bin/python"
-          "serve"
-          "example/marked"
-          "--watermark-key-file"
-          "%d/vllm.watermark-key"
-        ] native.systemd.services.vllm-marked.serviceConfig.ExecStart;
-        # Each inline key fails its own assertion.
-        inline = failing "watermark key inline" (mkQuadlet {
-          models.test.watermark.settings.key = 42;
-          models.inline = {
-            model = "example/inline";
-            port = 18004;
-            offline = false;
-            settings.watermark-config = {
-              algorithm = "gumbel";
-              key = 42;
-            };
+        quadlet = {
+          inherit (quadlet.services.llmhop.vllm.models.marked) command mounts;
+          key = quadlet.services.llmhop.vllm.models.marked.settings.watermark-key-file;
+          # The reference resolves to the credential mount.
+          exec = lib.hasInfix "--watermark-key-file /run/llmhop/credentials/vllm.watermark-key" quadletMarked.containerConfig.Exec;
+        };
+        native =
+          let
+            inherit (native.services.llmhop.vllm.models.marked) command;
+          in
+          {
+            python = lib.hasSuffix "/bin/python" (lib.head command);
+            arguments = lib.drop 2 command;
           };
-        });
       };
       expected = {
-        quadlet = true;
-        native = true;
-        inline = 2;
+        quadlet = {
+          command = [
+            "python"
+            "/run/llmhop/watermark.py"
+            "serve"
+            "example/marked"
+          ];
+          mounts = [ "${../pkgs/mkVllmWatermark/watermark.py}:/run/llmhop/watermark.py:ro" ];
+          key = "\${cred:vllm.watermark-key}";
+          exec = true;
+        };
+        native = {
+          python = true;
+          arguments = [
+            "serve"
+            "example/marked"
+          ];
+        };
       };
     };
 
     testDetector = {
       expr = {
-        arguments = containsAll [
-          "/run/llmhop/watermark.py detect"
-          "/run/llmhop/credentials/vllm.watermark-key\""
-          "/run/llmhop/credentials/vllm.watermark-key.retired"
-        ] quadletDetector.containerConfig.Exec;
+        command = quadlet.services.llmhop.vllm.detectors.watermark.command;
+        keys = lib.mapAttrs (
+          _: profile: profile.key_file
+        ) quadlet.services.llmhop.vllm.detectors.watermark.settings.profiles;
         import = quadletDetector.serviceConfig.ImportCredential;
         # Only the tokenizer files, not the weights, once for both profiles.
         fetch =
@@ -399,9 +510,21 @@ let
         # An auxiliary service, so no GPU access and no state directory.
         state = nativeDetector.serviceConfig ? StateDirectory;
         devices = nativeDetector.serviceConfig.PrivateDevices;
+        modelDevices = nativeWorker.serviceConfig.PrivateDevices;
+        containerModelDevices = quadletWorker.containerConfig.AddDevice;
+        containerDetectorDevices = quadletDetector.containerConfig ? AddDevice;
+        detectorAfterModel = lib.elem "vllm-marked.service" nativeDetector.after;
       };
       expected = {
-        arguments = true;
+        command = [
+          "python"
+          "/run/llmhop/watermark.py"
+          "detect"
+        ];
+        keys = {
+          current = "\${cred:vllm.watermark-key}";
+          retired = "\${cred:vllm.watermark-key.retired}";
+        };
         import = [
           "vllm.watermark-key"
           "vllm.watermark-key.retired"
@@ -410,6 +533,10 @@ let
         routed = true;
         state = false;
         devices = true;
+        modelDevices = false;
+        containerModelDevices = [ "nvidia.com/gpu=0" ];
+        containerDetectorDevices = false;
+        detectorAfterModel = false;
       };
     };
 
@@ -495,10 +622,7 @@ let
           inherit (socketRules.d) mode;
           inherit (socketRules.a) argument;
         };
-        uds = containsAll [
-          "--uds"
-          "/run/sockets/llmhop/vllm-test/http.sock"
-        ] sockets.systemd.services.vllm-test.serviceConfig.ExecStart;
+        uds = sockets.services.llmhop.vllm.models.test.settings.uds;
         routed = sockets.services.llmhop.gateway.llmhop.settings.models.test.url;
         inherit (socketContainer.containerConfig) PodmanArgs Network;
         mount = lib.elem "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U" socketContainer.containerConfig.Volume;
@@ -509,7 +633,7 @@ let
           mode = "0711";
           argument = "default:user:hop:-wx";
         };
-        uds = true;
+        uds = "/run/sockets/llmhop/vllm-test/http.sock";
         routed = "unix:///run/sockets/llmhop/vllm-test/http.sock";
         PodmanArgs = [ "--umask=0007" ];
         Network = "none";
@@ -532,24 +656,7 @@ let
         ] smg.systemd.services.smg.serviceConfig.ExecStart;
         bifrost = lib.mapAttrs (
           _: provider: lib.concatMap (key: key.models) provider.keys
-        ) bifrost.services.llmhop.gateway.bifrost-quadlet.settings.providers;
-        rejected = failing "is routed by the gateway" (mkRoutable {
-          gateway = {
-            type = "smg";
-            smg.package = fakeVllm;
-          };
-          vllm.models.qwen.host = "0.0.0.0";
-        });
-        firewall = failing "is loopback" (mkRoutable {
-          vllm.models.qwen.openFirewall = true;
-        });
-        socket = failing "cannot reach" (mkRoutable {
-          gateway = {
-            type = "bifrost";
-            bifrost.package = fakeVllm;
-          };
-          vllm.models.local.model = "example/local";
-        });
+        ) bifrost.services.llmhop.gateway.bifrost.settings.providers;
       };
       expected = {
         smg = true;
@@ -557,9 +664,6 @@ let
           vllm = [ "qwen" ];
           sgl = [ "llama" ];
         };
-        rejected = 1;
-        firewall = 1;
-        socket = 1;
       };
     };
 
@@ -570,8 +674,11 @@ let
         let
           llmhopQuadlet = mkRoutable {
             gateway = {
-              type = "llmhop-quadlet";
-              llmhop-quadlet.listen.proxy.socketGroup = "caddy";
+              type = "llmhop";
+              llmhop = {
+                runtime = "quadlet";
+                listen.proxy.socketGroup = "caddy";
+              };
             };
           };
         in
@@ -585,12 +692,6 @@ let
             sockets = llmhopQuadlet.virtualisation.quadlet.containers.llmhop.serviceConfig.Sockets;
             group = llmhopQuadlet.systemd.sockets.llmhop-proxy.socketConfig.SocketGroup;
           };
-          listen = failing "sets `listen`" (mkRoutable {
-            gateway = {
-              type = "llmhop-quadlet";
-              llmhop-quadlet.settings.listen = [ ":8080" ];
-            };
-          });
         };
       expected = {
         native = {
@@ -605,84 +706,38 @@ let
           ];
           group = "caddy";
         };
-        listen = 1;
       };
     };
 
-    # Clashing ports, units and names fail one assertion each, even when the
+    # Each misconfiguration fails exactly its own assertions, even when a
     # gateway reads the clashing endpoints.
-    testClaims = {
-      expr = {
-        twins = failing "is claimed by" (mkSystem {
-          vllm = {
-            enable = true;
-            package = fakeVllm;
-            models.native = {
-              model = "example/test";
-              port = 22001;
-            };
-          };
-          vllm-quadlet = {
-            enable = true;
-            container.image = "docker.io/vllm/vllm-openai:latest";
-            models.container = {
-              model = "example/test";
-              port = 22001;
-              offline = false;
-            };
-          };
-        });
-        names = failing "model `test` is claimed" (mkSystem {
-          gateway.type = "llmhop";
-          vllm = {
-            enable = true;
-            package = fakeVllm;
-            models.test.model = "example/test";
-          };
-          llama-cpp-quadlet = {
-            enable = true;
-            container.image = "ghcr.io/ggml-org/llama.cpp:server";
-            models.test = {
-              model = "example/test";
-              port = 22002;
-              offline = false;
-            };
-          };
-        });
-      };
-      expected = {
-        # The port.
-        twins = 1;
-        names = 1;
-      };
+    testAssertions = {
+      expr = lib.mapAttrs (_: case: failing case.needle case.system) assertionCases;
+      expected = lib.mapAttrs (_: case: case.count) assertionCases;
     };
 
-    # The listener and the derived flags win over `settings`, so gateways and
-    # the health probe reach the server where it listens, by the name it
-    # serves.
-    # A published port cannot run without network.
-    testOfflinePort = {
+    # A container needs the network for its published port, while a socket
+    # or a native server runs offline by default.
+    testOfflineDefault = {
       expr = {
-        port = failing "with `offline = true`" (mkQuadlet {
-          models.test.offline = true;
-        });
-        socket = failing "with `offline = true`" (mkQuadlet {
-          models.test.port = null;
-        });
+        container = quadlet.services.llmhop.vllm.models.test.offline;
+        containerSocket = sockets.services.llmhop.llama-cpp.models.b.offline;
+        native = native.services.llmhop.vllm.models.test.offline;
       };
       expected = {
-        port = 1;
-        socket = 0;
+        container = false;
+        containerSocket = true;
+        native = true;
       };
     };
 
     testManagedSettings = {
-      expr = containsAll [
-        ''"--host" "127.0.0.1"''
-        ''"--port" "25001"''
-        ''"--served-model-name" "test"''
-      ] managedWorker.serviceConfig.ExecStart;
-      expected = true;
+      expr = lib.getAttrs [ "host" "port" "served-model-name" ] managed.settings;
+      expected = {
+        host = "127.0.0.1";
+        port = 25001;
+        served-model-name = "test";
+      };
     };
   };
 

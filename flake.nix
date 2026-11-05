@@ -5,10 +5,7 @@
     systems.url = "github:nix-systems/default";
     quadlet-nix = {
       url = "github:mirkolenz/quadlet-nix/v1";
-      inputs = {
-        nixpkgs.follows = "nixpkgs";
-        flake-parts.follows = "flake-parts";
-      };
+      inputs.flake-parts.follows = "flake-parts";
     };
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";

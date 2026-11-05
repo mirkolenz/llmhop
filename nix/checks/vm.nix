@@ -9,7 +9,7 @@
   ...
 }:
 let
-  shared = import ../modules/backends/shared.nix lib;
+  util = import ../modules/lib.nix lib;
 
   # Exits 0 only if it can write `/srv/writable`, but neither `/etc` nor the
   # private socket of systemd, through which root could escape.
@@ -152,7 +152,7 @@ testers.nixosTest {
     # Started by hand, so the test controls when they load.
     systemd.services = {
       jail-probe.serviceConfig =
-        shared.hubSandbox {
+        util.hubSandbox {
           user = "root";
           group = "root";
         } "/srv/writable"
@@ -201,16 +201,14 @@ testers.nixosTest {
   };
 
   nodes.containers = {
-    imports = [ self.nixosModules.quadlet ];
+    imports = [ self.nixosModules.default ];
     virtualisation = {
       diskSize = 4096;
-      quadlet = {
-        enable = true;
-        images.llama-cpp.imageConfig.ImageTag = "localhost/fake-llama:test";
-      };
+      quadlet.images.llama-cpp.imageConfig.ImageTag = "localhost/fake-llama:test";
     };
     services.llmhop = {
-      llama-cpp-quadlet = {
+      runtime = "quadlet";
+      llama-cpp = {
         enable = true;
         container.image = "docker-archive:${fakeImage}";
         container.config.AutoUpdate = "disabled";
@@ -218,10 +216,9 @@ testers.nixosTest {
         models.fake-model = {
           model = "example/fake:Q4_K_M";
           port = 18081;
-          offline = false;
         };
       };
-      gateway.type = "llmhop-quadlet";
+      gateway.type = "llmhop";
     };
   };
 
@@ -275,7 +272,7 @@ testers.nixosTest {
 
     for node, request, backend in [
         (machine, curl("client-secret"), "llama-cpp"),
-        (containers, curl(), "llama-cpp-quadlet"),
+        (containers, curl(), "llama-cpp"),
     ]:
         worker = "llama-cpp-fake-model"
         cache = "/var/cache/llama-cpp/fake-model"

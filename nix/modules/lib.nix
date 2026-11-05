@@ -185,44 +185,75 @@ rec {
     StartLimitIntervalSec = 3600;
   };
 
-  # The account options of llmhop and of the native backends, a named account
-  # rather than a `DynamicUser`. `prefix` is the option path, for the
-  # documented defaults.
+  # The `runtime` of a backend or gateway, whose units run natively as
+  # hardened services or as Quadlet containers, defaulting to `default`.
+  runtimeOption =
+    default:
+    mkOption {
+      type = types.enum [
+        "native"
+        "quadlet"
+      ];
+      inherit default;
+      defaultText = lib.literalExpression "config.services.llmhop.runtime";
+      description = "Whether the units run natively as hardened services or as Quadlet containers.";
+    };
+
+  # The account options of llmhop and of the backends, a named account rather
+  # than a `DynamicUser`, defaulting to `user`. `prefix` is the option path,
+  # for the documented defaults, and `nativeOnly` marks an account that only
+  # native units use.
   identityOptions =
     {
       name,
       cfg,
       prefix,
+      user ? name,
+      userText ? null,
+      group ? cfg.user,
+      groupText ? lib.literalExpression "config.${prefix}.user",
+      runsAs ? "the native units and any refresh units run as, which owns their directories",
+      nativeOnly ? false,
     }:
+    let
+      native = ''Only used if `runtime` is `"native"`.'';
+      declaration = ''
+        ${
+          if nativeOnly then "The module" else ''If `runtime` is `"native"`, the module''
+        } declares it while it keeps the name `${name}`, and otherwise the
+        deployer declares it.${lib.optionalString nativeOnly " ${native}"}
+      '';
+    in
     {
       user = mkOption {
         type = types.str;
-        default = name;
+        default = user;
+        ${if userText == null then null else "defaultText"} = userText;
         description = ''
-          System user the units run as. The module declares it while it keeps
-          its default name, any other user is the deployer's to declare.
+          System user ${runsAs}.
+          ${declaration}
         '';
       };
       uid = mkOption {
         type = with types; nullOr ints.unsigned;
         default = null;
         example = 503;
-        description = "UID of the declared `user`. `null` lets NixOS allocate one.";
+        description = "UID of the declared `user`. `null` lets NixOS allocate one. ${native}";
       };
       group = mkOption {
         type = types.str;
-        default = cfg.user;
-        defaultText = lib.literalExpression "config.${prefix}.user";
+        default = group;
+        defaultText = groupText;
         description = ''
-          Primary group of `user`. The module declares it while it keeps its
-          default name, any other group is the deployer's to declare.
+          Primary group of `user`.
+          ${declaration}
         '';
       };
       gid = mkOption {
         type = with types; nullOr ints.unsigned;
         default = cfg.uid;
         defaultText = lib.literalExpression "config.${prefix}.uid";
-        description = "GID of the declared `group`. `null` lets NixOS allocate one.";
+        description = "GID of the declared `group`. `null` lets NixOS allocate one. ${native}";
       };
     };
 
@@ -291,6 +322,18 @@ rec {
       SocketBindDeny = "any";
     };
 
+  # The sandbox of a unit running as the account of `owner` that writes only
+  # `directory` and opens no socket, since an `owner` that is root could reach
+  # systemd or Podman through one.
+  hubSandbox =
+    owner: directory:
+    accountServiceConfig owner
+    // {
+      PrivateNetwork = true;
+      SystemCallFilter = hardenedServiceConfig.SystemCallFilter ++ [ "~@network-io" ];
+      ReadWritePaths = [ directory ];
+    };
+
   # systemd's specifier of `$CREDENTIALS_DIRECTORY`, which it expands in
   # `Environment=` as well.
   credentialDirectory = "%d";
@@ -301,10 +344,10 @@ rec {
   execStart =
     utils: credentials: command:
     let
-      placeholder = "@llmhopCredentialsDirectory@";
+      credentialPlaceholder = "@llmhopCredentialsDirectory@";
     in
-    lib.replaceStrings [ placeholder ] [ credentialDirectory ] (
-      utils.escapeSystemdExecArgs (resolveCredentialRefs placeholder credentials command)
+    lib.replaceStrings [ credentialPlaceholder ] [ credentialDirectory ] (
+      utils.escapeSystemdExecArgs (resolveCredentialRefs credentialPlaceholder credentials command)
     );
 
   # Root of everything llmhop mounts into a container. Its socket directory
@@ -337,7 +380,7 @@ rec {
 
   imageOption = mkOption {
     type = types.str;
-    description = "Container image reference, including a tag or digest.";
+    description = "Container image reference, including a tag or digest. Only used if `runtime` is `\"quadlet\"`.";
   };
 
   # `[Container]` keys of every container of `noun`, over the generated ones,
@@ -353,7 +396,7 @@ rec {
       description = ''
         `[Container]` keys of every container of ${noun}, over the generated
         ones, such as `UserNS=` or `UIDMap=` and `GIDMap=` to run it without
-        host root, or `User=`.
+        host root, or `User=`. Only used if `runtime` is `"quadlet"`.
       '';
     };
 
@@ -368,7 +411,7 @@ rec {
         Podman volume options of the credential mount of every container of
         ${noun}, which stays read-only. `idmap` lets a user namespace read the
         credentials owned by host root, and `idmap=uids=0-<uid>-1;gids=0-<gid>-1`
-        a non-root `User=` in it.
+        a non-root `User=` in it. Only used if `runtime` is `"quadlet"`.
       '';
     };
 
@@ -397,10 +440,4 @@ rec {
       }
       // lib.optionalAttrs (tag == null && !lib.hasInfix "@" image) { AutoUpdate = "registry"; };
     };
-
-  # Assertion that the module of `owner` has Quadlet enabled.
-  requireQuadlet = config: owner: {
-    assertion = config.virtualisation.quadlet.enable;
-    message = "services.llmhop: ${owner} requires virtualisation.quadlet.enable.";
-  };
 }

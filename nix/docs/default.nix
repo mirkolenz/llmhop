@@ -6,7 +6,7 @@
       moduleOptions =
         (lib.evalModules {
           modules = [
-            (import ../modules/quadlet.nix inputs.quadlet-nix.lib.sectionType)
+            (import ../modules inputs.quadlet-nix.lib.sectionType)
             {
               _module.args = {
                 inherit pkgs;

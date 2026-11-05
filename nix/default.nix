@@ -8,10 +8,13 @@
 let
   devFlake = config.partitions.dev.module.flake;
   version = self.shortRev or self.dirtyShortRev or "dev";
-  # Keyed, so importing both modules sets the version once.
-  versionModule = {
-    key = "llmhop-version";
-    services.llmhop.version = version;
+  # llmhop's modules on top of those of quadlet-nix for the same platform.
+  mkModule = quadlet: {
+    imports = [
+      quadlet
+      (lib.modules.importApply ./modules inputs.quadlet-nix.lib.sectionType)
+      { services.llmhop.version = version; }
+    ];
   };
 in
 {
@@ -31,16 +34,11 @@ in
     formatter = "dev";
   };
   flake = {
-    nixosModules = {
-      default.imports = [
-        ./modules/core.nix
-        versionModule
-      ];
-      quadlet.imports = [
-        inputs.quadlet-nix.nixosModules.default
-        (import ./modules/quadlet.nix inputs.quadlet-nix.lib.sectionType)
-        versionModule
-      ];
+    nixosModules.default = mkModule inputs.quadlet-nix.nixosModules.default;
+    # The host's systemd runs the units, not the store one of system-manager.
+    systemManagerModules.default = {
+      imports = [ (mkModule inputs.quadlet-nix.systemManagerModules.default) ];
+      services.llmhop.systemctl = "/usr/bin/systemctl";
     };
   };
   perSystem =
@@ -53,23 +51,17 @@ in
     let
       mkEvalCheck = pkgs.callPackage ./checks/lib.nix { };
       inherit (pkgs.stdenv.hostPlatform) isLinux;
-      # Every file of ./pkgs, a builder or a package, which may take the others
-      # as arguments. Only the builders meant for downstream are published.
-      scope = lib.makeScope pkgs.newScope (
-        self:
-        {
-          inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
-        }
-        // lib.packagesFromDirectoryRecursive {
-          inherit (self) callPackage;
-          directory = ./pkgs;
-        }
-      );
+      check-elf = pkgs.callPackage ./pkgs/check-elf/package.nix { };
+      mkCudaHome = pkgs.callPackage ./pkgs/mkCudaHome.nix { };
+      mkUvEnv = pkgs.callPackage ./pkgs/mkUvEnv.nix {
+        inherit check-elf;
+        inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
+      };
     in
     {
       checks = {
         inherit (config.packages) llmhop;
-        inherit (scope) check-elf;
+        inherit check-elf;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs isLinux {
@@ -78,7 +70,7 @@ in
         bundle = pkgs.callPackage ./checks/bundle.nix { inherit (config.legacyPackages) mkQuadletBundle; };
         eval = pkgs.callPackage ./checks/eval.nix {
           inherit mkEvalCheck self;
-          inherit (inputs.quadlet-nix.legacyPackages.${system}) mkBundleSystem;
+          mkBundleSystem = { modules }: inputs.quadlet-nix.lib.mkBundleSystem { inherit pkgs modules; };
         };
       };
       packages = {
@@ -102,7 +94,7 @@ in
       #   services.llmhop.vllm.package =
       #     inputs.llmhop.legacyPackages.${system}.mkUvEnv { workspaceRoot = ./vllm-env; };
       legacyPackages = {
-        inherit (scope) mkUvEnv mkCudaHome;
+        inherit mkUvEnv mkCudaHome;
         # Not a package, so `nix flake check` does not load the dev partition.
         inherit (devFlake.packages.${system}) docker-manifest;
         # The Quadlet units of a minimal system with llmhop's modules,
@@ -110,8 +102,13 @@ in
         # see `virtualisation.quadlet.bundle` of quadlet-nix.
         mkQuadletBundle =
           { modules }:
-          inputs.quadlet-nix.legacyPackages.${system}.mkBundle {
-            modules = [ self.nixosModules.quadlet ] ++ modules;
+          inputs.quadlet-nix.lib.mkBundle {
+            inherit pkgs;
+            modules = [
+              self.nixosModules.default
+              { services.llmhop.runtime = lib.mkDefault "quadlet"; }
+            ]
+            ++ modules;
           };
       };
     };

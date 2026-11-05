@@ -1,6 +1,8 @@
 # Module internals
 
-Decisions behind the NixOS module in `nix/modules/` that are hard to re-derive from the code.
+Decisions behind the NixOS and system-manager modules in `nix/modules/` that are hard to re-derive from the code.
+Both import the matching module of quadlet-nix, so they share all of llmhop's modules.
+Every backend and gateway selects its `runtime` as `native` or `quadlet`, defaulting to `services.llmhop.runtime`, and `mkQuadletBundle` defaults that to `quadlet`.
 
 ## CLI dialects
 
@@ -71,7 +73,7 @@ It resets the server's start limit first, so planned restarts do not use it up, 
 The server starts after it, so a first download finds the server still waiting rather than restarting it.
 
 The fetcher controls everything in the cache, so no command touching it runs with more privileges than the cache owner, or a planted symlink could redirect a privileged write or deletion.
-The refresh unit prunes as `user`, or `cache.user` for Quadlet, writing only the hub cache and opening no socket, since a root owner could otherwise reach systemd or Podman.
+The refresh unit prunes as the workload's `user`, writing only the hub cache and opening no socket, since a root owner could otherwise reach systemd or Podman.
 Only its `systemctl` step runs as root, and it reads no file.
 
 `huggingface_hub` moves a ref before downloading its snapshot, so an interrupted download leaves the ref on an incomplete snapshot, which an offline server fails to load until the next complete download.
@@ -99,14 +101,17 @@ A native server on a loopback port is limited to `127.0.0.1` and `::1` by the cg
 
 At most one gateway runs, since chained gateways duplicate routing and auth, and a model reachable beside the gateway bypasses its auth.
 Backends publish their workloads to the internal `services.llmhop.endpoints`, which the selected gateway renders, so a new gateway needs no backend changes.
-Each gateway module adds its name to the `gateway.type` enum.
+The `gateway.type` enum in `core.nix` lists every gateway module.
 Only llmhop routes detectors, which neither SMG's discovery nor Bifrost's providers can describe.
 SMG gets a discovery file, since it gives up on `--worker-urls` after a startup timeout shorter than model loading.
 External gateways run as dynamic users or on the host network in a container, reaching models on loopback.
-Both llmhop variants share their `listen` options, socket units, claims, firewall rules and tmpfiles in `gateways/llmhop.nix`, and never bind themselves, since their config must not set `listen`.
+Both llmhop runtimes share their `listen` options, socket units, claims, firewall rules and tmpfiles in `gateways/llmhop.nix`, and never bind themselves, since their config must not set `listen`.
 Podman passes the sockets of the units listed in the container's `Sockets=` into the container, which stays on the host network.
 
 ## Watermarking
+
+Models and detectors share the runtime renderers, with an explicit workload kind selecting their execution settings.
+Catalog visibility is derived separately when publishing endpoints.
 
 `mkVllmWatermark`'s `serve` merges the key into vLLM's watermark config in-process, and its `detect` replaces vLLM's example detector, which lacks unix sockets, health, file-based keys, several profiles and most algorithms.
 Native builds check the script against the vLLM environment, while containers run it unchecked with the image's Python.
@@ -114,9 +119,9 @@ Native builds check the script against the vLLM environment, while containers ru
 ## Bundles
 
 Bundles come from quadlet-nix, which renders every rootful Quadlet unit of the system, the NixOS services named by `bundle.services` with their timers, the sockets named by `bundle.sockets`, and its `bundle.tmpfiles`, and copies the store paths they reference below `bundle.assetDirectory`.
-Every Quadlet backend names its update and refresh units there, which the bundle renders without the store `PATH=` of NixOS, so they run `systemctl` and llmhop by their absolute paths.
+Every container backend names its update and refresh units there, which the bundle renders without the store `PATH=` of NixOS, so they run `systemctl` and llmhop by their absolute paths.
 llmhop names the bundle, adds its `10-llmhop` tmpfiles rules and rejects native backends and gateways through `bundle.assertions`, which only the bundle checks.
-The Quadlet llmhop gateway names its `llmhop-<name>` listeners in `bundle.sockets`, so the bundle carries their socket units.
+The container llmhop gateway names its `llmhop-<name>` listeners in `bundle.sockets`, so the bundle carries their socket units.
 The build fails if a copied file still references the store, so only self-contained files such as scripts, configs, the static llmhop binary and its image archive can be bundled.
 
 ## Containers

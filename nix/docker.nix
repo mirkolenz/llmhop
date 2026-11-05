@@ -1,5 +1,5 @@
 # The llmhop image, streamed for publishing or, with `stream = false`, as the
-# archive that the llmhop-quadlet gateway loads.
+# archive that a gateway with `runtime = "quadlet"` loads.
 {
   dockerTools,
   tzdata,

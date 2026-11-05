@@ -1,88 +1,90 @@
-# The native systemd backend of the engine `name` under
-# `services.llmhop.<name>`. Every workload runs its internal `command`,
-# followed by its settings, as a hardened service beside its fetcher.
-lib: name:
+# The native units of the backend `backend` of `common.nix`, each workload a
+# hardened system service beside its fetcher.
 {
+  backend,
   config,
+  lib,
   pkgs,
   utils,
-  ...
 }:
 let
-  inherit (lib) mkOption types;
   util = import ../lib.nix lib;
-  shared = import ./shared.nix lib;
-  opts = import ./options.nix lib;
-  engine = (import ../engines.nix lib).${name};
+  llmhop = config.services.llmhop;
+  inherit (backend)
+    name
+    engine
+    cfg
+    socketUMask
+    cacheDirectory
+    hubDirectories
+    fetches
+    fetchUnit
+    fetchServices
+    fetchOrder
+    fetch
+    serverServiceConfig
+    serverEnvironment
+    environmentFiles
+    ;
   inherit (engine.native) uv;
-  cfg = config.services.llmhop.${name};
 
-  # A model's relaxations for GPUs and for NCCL in tensor-parallel inference,
-  # and its own state directory. See "GPU relaxations" and "NCCL relaxations"
-  # in the module internals documentation.
-  gpuServiceConfig = workload: {
-    PrivateDevices = false;
-    SupplementaryGroups = [
-      "render"
-      "video"
-    ];
-    PrivateUsers = "identity";
-    MemoryDenyWriteExecute = false;
-    LimitMEMLOCK = "infinity";
-    ProcSubset = "all";
-    RestrictAddressFamilies = util.hardenedServiceConfig.RestrictAddressFamilies ++ [ "AF_NETLINK" ];
-    SocketBindAllow = "tcp";
-    KillSignal = "SIGINT";
-    TasksMax = 4096;
-    StateDirectory = "${name}/${workload.name}";
-    WorkingDirectory = "/var/lib/${name}/${workload.name}";
-  };
-
-  # An auxiliary service works in its cache directory and may bind only its
-  # own port.
-  auxiliaryServiceConfig =
-    workload:
-    {
-      WorkingDirectory = shared.cacheDirectory cfg workload;
-    }
-    // lib.optionalAttrs (workload.port != null) {
-      SocketBindAllow = "tcp:${toString workload.port}";
-    };
-
-  # The units of `workload`: its offline server, started after `after`, and the
-  # fetcher it starts after. See "Offline servers" and "Python backends built
-  # from wheels" in the module internals documentation.
-  units =
+  # The services of `workload`: its offline server, started after `after`, and
+  # the fetcher it starts after, which shares its identity and cache, with
+  # network access and the backend's `fetch` credentials. See "Offline
+  # servers" and "Python backends built from wheels" in the module internals
+  # documentation.
+  services =
     workload: after:
     let
       inherit (workload) unit;
-      cache = shared.cacheDirectory cfg workload;
-      fetch = shared.fetchUnitConfig {
-        inherit
-          engine
-          cfg
-          workload
-          ;
-        inherit (util) credentialDirectory;
-        fetcher = engine.native.fetcher workload.package;
-      };
+      cache = cacheDirectory workload;
+      fetcher = fetch workload;
       offline = lib.optionalAttrs workload.offline;
       # Downloading at runtime or binding beyond loopback needs the network,
       # while an offline server on loopback or its socket starts without it.
       online = !workload.offline || workload.socket == null && !util.isLoopback workload.host;
-      # A socket's own network namespace, or else loopback only, unless
-      # the server listens beyond it.
+      # A model's relaxations for GPUs and for NCCL in tensor-parallel inference,
+      # and its own state directory, while an auxiliary service works in its
+      # cache directory and may bind only its own port. See "GPU relaxations" and
+      # "NCCL relaxations" in the module internals documentation.
+      relaxations =
+        if workload.kind == "detector" then
+          {
+            WorkingDirectory = cacheDirectory workload;
+          }
+          // lib.optionalAttrs (workload.port != null) {
+            SocketBindAllow = "tcp:${toString workload.port}";
+          }
+        else
+          {
+            PrivateDevices = false;
+            SupplementaryGroups = [
+              "render"
+              "video"
+            ];
+            PrivateUsers = "identity";
+            MemoryDenyWriteExecute = false;
+            LimitMEMLOCK = "infinity";
+            ProcSubset = "all";
+            RestrictAddressFamilies = util.hardenedServiceConfig.RestrictAddressFamilies ++ [ "AF_NETLINK" ];
+            SocketBindAllow = "tcp";
+            KillSignal = "SIGINT";
+            TasksMax = 4096;
+            StateDirectory = "${name}/${workload.name}";
+            WorkingDirectory = "/var/lib/${name}/${workload.name}";
+          };
+      # A socket's own network namespace, or else loopback only, unless the
+      # server listens beyond it. Not `localhost`, whose `127.0.0.0/8`
+      # includes the resolver stub of systemd-resolved.
       network =
         if workload.socket != null then
-          { UMask = shared.socketUMask; } // offline { PrivateNetwork = true; }
+          { UMask = socketUMask; } // offline { PrivateNetwork = true; }
         else
           {
             UMask = "0077";
           }
           // lib.optionalAttrs (workload.offline && util.isLoopback workload.host) {
             IPAddressDeny = "any";
-            # Not `localhost`, whose `127.0.0.0/8` includes the resolver
-            # stub of systemd-resolved.
             IPAddressAllow = [
               "127.0.0.1"
               "::1"
@@ -101,28 +103,26 @@ let
           ]
         );
         wantedBy = [ "multi-user.target" ];
-        wants = shared.fetchServices workload ++ lib.optional online "network-online.target";
-        after = shared.fetchOrder workload ++ after ++ lib.optional online "network-online.target";
-        environment = shared.serverEnvironment {
-          inherit engine cfg workload;
-          inherit (util) credentialDirectory;
-          environment = {
+        wants = fetchServices workload ++ lib.optional online "network-online.target";
+        after = fetchOrder workload ++ after ++ lib.optional online "network-online.target";
+        environment = serverEnvironment workload (
+          {
             HOME = cache;
           }
           // lib.optionalAttrs uv {
             LD_LIBRARY_PATH = "/run/opengl-driver/lib";
             TRITON_LIBCUDA_PATH = "/run/opengl-driver/lib";
-          };
-        };
+          }
+        );
         unitConfig = util.startLimitConfig;
         serviceConfig =
-          shared.serverServiceConfig cfg workload
+          serverServiceConfig workload
           # Its group owns the worker socket, which every client joins.
           // util.accountServiceConfig cfg
           // {
             ReadWritePaths = [ cache ];
-            ReadOnlyPaths = shared.hubDirectories cfg workload;
-            EnvironmentFile = shared.environmentFiles cfg workload;
+            ReadOnlyPaths = hubDirectories workload;
+            EnvironmentFile = environmentFiles workload;
           }
           // offline {
             InaccessiblePaths = [
@@ -131,7 +131,7 @@ let
             ];
           }
           // network
-          // (if workload.unlisted then auxiliaryServiceConfig workload else gpuServiceConfig workload)
+          // relaxations
           // {
             Type = "exec";
             ExecStart = util.execStart utils workload.credentials (
@@ -142,7 +142,7 @@ let
             # expands `$MAINPID`, which escaping would turn into a literal.
             ExecStartPost = "${
               utils.escapeSystemdExecArgs [
-                (lib.getExe config.services.llmhop.package)
+                (lib.getExe llmhop.package)
                 "internal"
                 "wait-healthy"
               ]
@@ -155,132 +155,39 @@ let
           };
       };
     }
-    # The fetcher shares its server's identity and cache, with network access
-    # and the backend's `fetch` credentials.
-    // lib.optionalAttrs (shared.fetches workload) {
-      ${shared.fetchUnit unit} = {
+    // lib.optionalAttrs (fetches workload) {
+      ${fetchUnit workload} = {
         description = "Fetch the models of ${unit}";
-        inherit (fetch) unitConfig;
+        inherit (fetcher) unitConfig;
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
-        environment = fetch.environment // {
+        environment = fetcher.environment // {
           HOME = "/tmp";
         };
         serviceConfig =
           util.accountServiceConfig cfg
-          // fetch.serviceConfig
+          // fetcher.serviceConfig
           // {
             ReadWritePaths = [ cache ];
             UMask = "0077";
-            EnvironmentFile = fetch.environmentFile;
-            ExecStart = pkgs.writeShellScript (shared.fetchUnit unit) fetch.script;
+            EnvironmentFile = fetcher.environmentFile;
+            ExecStart = pkgs.writeShellScript (fetchUnit workload) fetcher.script;
           };
       };
     };
-
-  models = shared.sortedWorkloads cfg.models;
-  workloads = models ++ cfg.extraWorkloads;
 in
 {
-  options.services.llmhop.${name} =
-    opts.backendOptions engine
-    // util.identityOptions {
-      inherit name cfg;
-      prefix = "services.llmhop.${name}";
-    }
-    // {
-      package =
-        if uv then
-          mkOption {
-            type = types.package;
-            description = ''
-              Package providing ${engine.native.packageEntry}, built from
-              a uv workspace with the flake's `mkUvEnv`, as in
-              `inputs.llmhop.legacyPackages.''${pkgs.stdenv.hostPlatform.system}.mkUvEnv { workspaceRoot = ./${name}-env; }`.
-            '';
-          }
-        else
-          lib.mkPackageOption pkgs name { };
-
-      models =
-        opts.modelsOption
-          {
-            inherit engine;
-            description = ''
-              Models to serve, each as the hardened system service
-              `${name}-<name>` beside its fetcher `${name}-<name>-fetch`.
-            '';
-          }
-          [
-            (opts.workloadModule {
-              inherit engine;
-              noun = "model";
-              inherit (config.services.llmhop) socketDirectory;
-              listener = lib.id;
-              derivedSettings = engine.modelSettings;
-              defaults = cfg.modelSettings;
-            })
-            (opts.modelModule {
-              inherit engine;
-              requiredRepositories = engine.native.repositories;
-            })
-            (
-              { config, ... }:
-              {
-                options = {
-                  package = mkOption {
-                    type = types.package;
-                    default = cfg.package;
-                    defaultText = lib.literalExpression "config.services.llmhop.${name}.package";
-                    description = ''
-                      Package providing this model's server, overriding the
-                      backend-wide `package`, e.g. a nightly build for a
-                      just-released architecture.
-                    '';
-                  };
-                  command = mkOption {
-                    type = with types; listOf (either str package);
-                    internal = true;
-                    default = engine.native.command config;
-                    description = "Command of this model's server, followed by its settings.";
-                  };
-                };
-              }
-            )
-          ];
-      startupOrdering = opts.startupOrderingOption "via `environment`, e.g. `CUDA_VISIBLE_DEVICES`";
-    };
-
-  config = lib.mkIf cfg.enable (
+  config = lib.mkIf (cfg.enable && backend.native) (
     lib.mkMerge [
       {
-        systemd.services = lib.mkMerge (
-          shared.mapWorkloads {
-            chained = cfg.startupOrdering;
-            inherit models;
-            inherit (cfg) extraWorkloads;
-            perWorkload = units;
-          }
-        );
+        systemd.services = backend.chain services;
         # Every socket client joins `group`, which owns the worker sockets.
-        users.users = lib.mkIf (lib.any (w: w.socket != null) workloads) (
-          lib.genAttrs config.services.llmhop.socketClients (_: {
+        users.users = lib.mkIf backend.sockets (
+          lib.genAttrs llmhop.socketClients (_: {
             extraGroups = [ cfg.group ];
           })
         );
       }
-      (shared.backendConfig {
-        inherit
-          config
-          pkgs
-          utils
-          engine
-          cfg
-          workloads
-          ;
-        backend = name;
-        cacheOwner = cfg;
-      })
       (util.identityConfig { inherit name cfg; })
     ]
   );

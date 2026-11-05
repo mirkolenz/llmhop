@@ -7,6 +7,11 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "";
     };
+    # With its own nixpkgs, which its fork of userborn needs.
+    system-manager = {
+      url = "github:numtide/system-manager";
+      inputs.flake-compat.follows = "";
+    };
     # The overlay of flocken builds from our nixpkgs, so its own only needs `lib`.
     flocken = {
       url = "github:mirkolenz/flocken/v2";

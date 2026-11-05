@@ -29,16 +29,16 @@ LLMhop sends `READY=1` to systemd once its listeners are bound, and drains in-fl
 
 Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", "type": "not_found_error", "code": "model_not_found"}}`.
 
-| Status | Meaning                                                                                |
-| ------ | -------------------------------------------------------------------------------------- |
-| `400`  | invalid JSON, a missing `model` or an unreadable body                                  |
-| `401`  | missing or invalid bearer token, with `WWW-Authenticate: Bearer`                       |
-| `404`  | unknown model                                                                          |
-| `408`  | the body did not arrive within a minute                                                |
-| `413`  | the body exceeds `maxBodyBytes`                                                        |
-| `429`  | the model reached `maxConcurrentRequests`, with `Retry-After: 1`                       |
-| `502`  | the backend is unreachable                                                             |
-| `503`  | the `maxBufferedBytes` budget is exhausted, with `Retry-After: 1`                      |
+| Status | Meaning                                                           |
+| ------ | ----------------------------------------------------------------- |
+| `400`  | invalid JSON, a missing `model` or an unreadable body             |
+| `401`  | missing or invalid bearer token, with `WWW-Authenticate: Bearer`  |
+| `404`  | unknown model                                                     |
+| `408`  | the body did not arrive within a minute                           |
+| `413`  | the body exceeds `maxBodyBytes`                                   |
+| `429`  | the model reached `maxConcurrentRequests`, with `Retry-After: 1`  |
+| `502`  | the backend is unreachable                                        |
+| `503`  | the `maxBufferedBytes` budget is exhausted, with `Retry-After: 1` |
 
 ## Configuration
 
@@ -97,9 +97,9 @@ docker run --rm -p 8080:8080 -v ./config.json:/config.json ghcr.io/mirkolenz/llm
 `llmhop version` prints the version.
 The image runs `serve /config.json`, so the mounted config must set `"listen": [":8080"]`.
 
-## NixOS module
+## NixOS and system-manager modules
 
-Add the flake input `github:mirkolenz/llmhop` and import `llmhop.nixosModules.default`:
+Add the flake input `github:mirkolenz/llmhop` and import `llmhop.nixosModules.default` on NixOS or `llmhop.systemManagerModules.default` on other distributions with [system-manager](https://github.com/numtide/system-manager):
 
 ```nix
 services.llmhop = {
@@ -111,21 +111,23 @@ services.llmhop = {
 };
 ```
 
-`nixosModules.default` has the gateways and native backends and works without quadlet-nix, for example with [system-manager](https://github.com/numtide/system-manager).
-`nixosModules.quadlet` adds the container variants `llama-cpp-quadlet`, `vllm-quadlet`, `sglang-quadlet`, `llmhop-quadlet`, `smg-quadlet` and `bifrost-quadlet`, which can also be [bundled](#hosts-without-nix) for hosts without Nix.
+Both include [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) for containers, which every backend and gateway selects with `runtime = "native"` or `"quadlet"`, defaulting to the global `services.llmhop.runtime`, `"native"`.
+Container setups can also be [bundled](#hosts-without-nix) for hosts without Nix.
+With system-manager, the host provides the configuration of podman in `/etc/containers`.
 See the [options reference](https://mirkolenz.github.io/llmhop/) for every option and the [module internals](https://mirkolenz.github.io/llmhop/internals.html) for the design rationale.
 
 ### Gateways
 
 `services.llmhop.gateway.type` selects at most one gateway, configured by the option set of the same name, which routes every model of every backend by its `name`.
 
-| `type`                           | Gateway                                                          | Unix sockets | Detectors |
-| -------------------------------- | ---------------------------------------------------------------- | ------------ | --------- |
-| `null`                           | none, clients connect to each model                              |              |           |
-| `"llmhop"`                       | llmhop                                                           | yes          | yes       |
-| `"llmhop-quadlet"`               | llmhop                                                           | no           | yes       |
-| `"smg"`, `"smg-quadlet"`         | the [Shepherd Model Gateway](https://github.com/smg-project/smg) | no           | no        |
-| `"bifrost"`, `"bifrost-quadlet"` | [Bifrost](https://github.com/maximhq/bifrost)                    | no           | no        |
+| `type`      | Gateway                                                          | Unix sockets | Detectors |
+| ----------- | ---------------------------------------------------------------- | ------------ | --------- |
+| `null`      | none, clients connect to each model                              |              |           |
+| `"llmhop"`  | llmhop                                                           | native only  | yes       |
+| `"smg"`     | the [Shepherd Model Gateway](https://github.com/smg-project/smg) | no           | no        |
+| `"bifrost"` | [Bifrost](https://github.com/maximhq/bifrost)                    | no           | no        |
+
+Each gateway runs natively or as a container, as selected by `gateway.<type>.runtime`.
 
 Routed models must stay on loopback and leave authentication to the gateway, and gateways without socket support need every model to set a `port`.
 SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`, `port` and `openFirewall`.
@@ -158,8 +160,9 @@ services.llmhop = {
       settings.reasoning-parser = "qwen3";
     };
   };
-  sglang-quadlet = {
+  sglang = {
     enable = true;
+    runtime = "quadlet";
     container.image = "docker.io/lmsysorg/sglang:latest";
     models."llama-3-8b" = {
       model = "meta-llama/Meta-Llama-3-8B-Instruct";
@@ -170,7 +173,8 @@ services.llmhop = {
 ```
 
 Each model runs as the unit `<engine>-<name>`.
-Native workers are hardened services running as the backend's `user`, while container workers run rootful through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) with the backend's `container.image`, managed with `quadletctl`.
+Native workers are hardened services running as the backend's `user`, which defaults to the engine name, while container workers run rootful, with `user` defaulting to `root`, through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) with the backend's `container.image`, managed with `quadletctl`.
+Switching a backend's `runtime` therefore changes the owner of its cache directories, but not of the files a previous fetch left in them, so a native fetcher cannot update a cache filled by a container until `chown -R` hands it to the new `user` and `group`, or the cache is deleted for a fresh download.
 A worker stays `activating` until it answers its health endpoint, and `startupOrdering`, enabled by default for every backend, starts workers one at a time by `name`, so two never profile or size their GPU memory at once.
 Evaluation rejects any port, unit or model name claimed twice.
 Customize the generated units directly, as in `systemd.services.vllm-qwen3-8b.serviceConfig.MemoryHigh = "64G"` or `virtualisation.quadlet.containers.vllm-qwen3-8b.containerConfig`.
@@ -197,12 +201,12 @@ services.llmhop.vllm.models."qwen3-8b" = {
 ```
 
 Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the Hugging Face token of gated repositories, which `fetch.hfTokenCredential = "llmhop.hf-token"` imports for every engine.
-`<backend>-update`, such as `vllm-update` or `vllm-quadlet-update`, reruns every fetcher on the `fetch.schedule` (`OnCalendar=`), weekly by default, prunes what the model no longer references, and restarts each running server after a successful fetch, even if its model did not change.
+`<backend>-update`, such as `vllm-update`, reruns every fetcher on the `fetch.schedule` (`OnCalendar=`), weekly by default, prunes what the model no longer references, and restarts each running server after a successful fetch, even if its model did not change.
 An interrupted download leaves a running server alone, and a successful retry refreshes it.
 An explicitly stopped server stays stopped.
 
 Servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
-A native server on a socket gets no network at all and on a `port` only loopback, while a Quadlet container gets `Network=none`, which needs a socket, so a Quadlet workload with a `port` defaults to `offline = false` and rejects `offline = true`.
+A native server on a socket gets no network at all and on a `port` only loopback, while a container gets `Network=none`, which needs a socket, so a container workload with a `port` defaults to `offline = false` and rejects `offline = true`.
 `offline = false` lifts the network restrictions for features like media URLs in requests.
 Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`.
 
@@ -217,12 +221,13 @@ Strings and paths are passed verbatim and everything else as JSON, so attribute 
 
 #### Containers and user namespaces
 
-Every Quadlet backend and gateway runs its containers as root by default, which a user namespace maps to an unprivileged host range.
+Every container backend and gateway runs as root by default, which a user namespace maps to an unprivileged host range.
 `container.config` adds `[Container]` keys to every container of a backend, servers, fetchers and detectors alike, or of a gateway, and `container.mountOptions` adds idmapped mounts let the namespace own the cache and read the credentials:
 
 ```nix
 services.llmhop = {
-  vllm-quadlet = {
+  vllm = {
+    runtime = "quadlet";
     container = {
       config.UserNS = "auto:size=65536";
       mountOptions = {
@@ -231,29 +236,32 @@ services.llmhop = {
       };
     };
   };
-  gateway.llmhop-quadlet.container = {
-    config.UserNS = "auto";
-    mountOptions.credentials = [ "idmap" ];
+  gateway.llmhop = {
+    runtime = "quadlet";
+    container = {
+      config.UserNS = "auto";
+      mountOptions.credentials = [ "idmap" ];
+    };
   };
 };
 ```
 
 `UIDMap=` and `GIDMap=` work the same way in place of `UserNS=`.
 A non-root `User=` inside the namespace takes the mapping `idmap=uids=0-<uid>-1;gids=0-<gid>-1` in both lists, so the cache stays owned by host root.
-Only a cache on a filesystem without idmapped mounts, such as NFS, needs `cache.user` and `cache.group` set to the host IDs that an explicit `UIDMap=` and `GIDMap=` give the container user.
+Only a cache on a filesystem without idmapped mounts, such as NFS, needs the backend's `user` and `group` set to the host IDs that an explicit `UIDMap=` and `GIDMap=` give the container user.
 Rootful `UserNS=auto` needs subordinate IDs for a `containers` user, which NixOS does not declare.
 
 #### Hosts without Nix
 
-The Quadlet backends and gateways can be rendered into plain files for any host with podman 5 and systemd, such as Ubuntu 25.04:
+The container backends and gateways can be rendered into plain files for any host with podman 5 and systemd, such as Ubuntu 25.04:
 
 ```nix
 packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.mkQuadletBundle {
   modules = [
     {
       services.llmhop = {
-        gateway.type = "llmhop-quadlet";
-        vllm-quadlet = {
+        gateway.type = "llmhop";
+        vllm = {
           enable = true;
           container.image = "docker.io/vllm/vllm-openai:latest";
           models."qwen3-8b" = {
@@ -267,7 +275,8 @@ packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.
 };
 ```
 
-It is the [bundle of quadlet-nix](https://github.com/mirkolenz/quadlet-nix#bundles-for-hosts-without-nix) named `llmhop`, which a NixOS system importing `nixosModules.quadlet` exposes as `virtualisation.quadlet.bundle.package`, with every rootful Quadlet unit of that system.
+It is the [bundle of quadlet-nix](https://github.com/mirkolenz/quadlet-nix#bundles-for-hosts-without-nix) named `llmhop`, which every system importing llmhop's modules exposes as `virtualisation.quadlet.bundle.package`, with every rootful Quadlet unit of that system.
+It defaults `services.llmhop.runtime` to `"quadlet"`.
 The bundle holds the Quadlet files, update and refresh units, timers, the llmhop gateway's socket units and tmpfiles rules below `etc/`, the scripts and generated configs below `/usr/local/lib/llmhop`, and an `install.sh` that copies them into place, starts the servers, restarts every running unit it changed and retires those a previous bundle had but this one lacks.
 The `uninstall.sh` installed beside the assets removes the bundle again, keeping the model caches.
 Native backends and gateways cannot be bundled, and firewall and user options have no effect there.

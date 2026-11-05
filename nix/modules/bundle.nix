@@ -3,7 +3,9 @@
 { config, lib, ... }:
 let
   llmhop = config.services.llmhop;
-  native = lib.filter (engine: llmhop.${engine}.enable) (lib.attrNames (import ./engines.nix lib));
+  native = lib.filter (engine: llmhop.${engine}.enable && llmhop.${engine}.runtime == "native") (
+    lib.attrNames (import ./engines.nix lib)
+  );
   gateway = llmhop.gateway.type;
 in
 {
@@ -16,8 +18,8 @@ in
         message = "services.llmhop: only Quadlet backends can be bundled, but `${lib.concatStringsSep "`, `" native}` is enabled.";
       }
       {
-        assertion = gateway == null || lib.hasSuffix "-quadlet" gateway;
-        message = "services.llmhop: only Quadlet gateways can be bundled, but the gateway is `${toString gateway}`.";
+        assertion = gateway == null || llmhop.gateway.${gateway}.runtime == "quadlet";
+        message = "services.llmhop: only Quadlet gateways can be bundled, but the gateway `${toString gateway}` runs natively.";
       }
     ];
   };

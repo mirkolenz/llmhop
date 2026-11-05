@@ -8,66 +8,15 @@ let
   cfg = config.services.llmhop;
 
   util = import ./lib.nix lib;
+  sockets = lib.filter (e: e.socket != null) (lib.attrValues cfg.endpoints);
 
   # Assertion that only one owner claims the resource `key` of `kind`.
   claimAssertion = kind: key: owners: {
     assertion = lib.length (lib.unique owners) < 2;
     message = "services.llmhop: ${kind} `${key}` is claimed by ${lib.concatStringsSep ", " owners}.";
   };
-
-  # Assertion of the routed endpoint of `owner`, which only the gateway may
-  # expose.
-  gatewayAssertion =
-    owner:
-    let
-      endpoint = cfg.endpoints.${owner};
-    in
-    {
-      assertion = !endpoint.exposed;
-      message = "services.llmhop: `${endpoint.owner}` is routed by the gateway `${cfg.gateway.type}`, but binds a `host` beyond loopback, so clients could bypass the gateway.";
-    };
-
-  endpointModule = {
-    options = {
-      name = lib.mkOption {
-        type = lib.types.str;
-        description = "Name the workload advertises and gateways route by.";
-      };
-      engine = lib.mkOption {
-        type = lib.types.str;
-        description = "Engine of the workload's backend.";
-      };
-      owner = lib.mkOption {
-        type = lib.types.str;
-        description = "Option path of the workload.";
-      };
-      url = lib.mkOption {
-        type = lib.types.str;
-        description = "URL of the server, `http://` on its port or `unix://` on its socket.";
-      };
-      socket = lib.mkOption {
-        type = with lib.types; nullOr str;
-        description = "Unix socket of the server, or null on a port.";
-      };
-      unlisted = lib.mkOption {
-        type = lib.types.bool;
-        description = "Whether the workload is no inference model, such as a detector.";
-      };
-      exposed = lib.mkOption {
-        type = lib.types.bool;
-        description = "Whether the server is reachable other than through loopback or its socket.";
-      };
-    };
-  };
 in
 {
-  imports = map (import ./backends/native.nix lib) (lib.attrNames (import ./engines.nix lib)) ++ [
-    (import ./backends/watermark.nix lib).native
-    (import ./gateways/llmhop.nix lib).native
-    (import ./gateways/smg.nix lib).native
-    (import ./gateways/bifrost.nix lib).native
-  ];
-
   meta = {
     maintainers = with lib.maintainers; [ mirkolenz ];
     doc = ../../docs/src/internals.md;
@@ -90,6 +39,18 @@ in
       description = "The llmhop package, whose binary also runs the worker commands.";
     };
 
+    systemctl = lib.mkOption {
+      type = lib.types.str;
+      internal = true;
+      default = lib.getExe' config.systemd.package "systemctl";
+      defaultText = lib.literalExpression ''lib.getExe' config.systemd.package "systemctl"'';
+      description = "The `systemctl` of the running systemd, which the refresh units call.";
+    };
+
+    runtime = removeAttrs (util.runtimeOption "native") [ "defaultText" ] // {
+      description = "Default `runtime` of every backend and gateway, natively as hardened services or as Quadlet containers.";
+    };
+
     socketDirectory = lib.mkOption {
       type = lib.types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
       default = "/run/llmhop";
@@ -107,13 +68,19 @@ in
         Users that may connect to the unix socket of every workload without a
         `port`, such as a reverse proxy in front of them. Each joins the group
         of every native backend and gets a default ACL on `socketDirectory`
-        for the Quadlet ones. A gateway reaching sockets adds its own user.
+        for the containers. A gateway reaching sockets adds its own user.
       '';
     };
 
     gateway = {
       type = lib.mkOption {
-        type = lib.types.nullOr (lib.types.enum [ ]);
+        type = lib.types.nullOr (
+          lib.types.enum [
+            "llmhop"
+            "smg"
+            "bifrost"
+          ]
+        );
         default = null;
         example = "llmhop";
         description = ''
@@ -123,22 +90,18 @@ in
           stay on loopback and leave authentication to the gateway.
         '';
       };
-
-      routes = lib.mkOption {
-        type = with lib.types; listOf str;
-        default = [ ];
-        internal = true;
-        description = "Owners of the endpoints the selected gateway routes, all others staying direct.";
-      };
     };
 
     endpoints = lib.mkOption {
-      type = with lib.types; attrsOf (submodule endpointModule);
+      type = with lib.types; attrsOf attrs;
       default = { };
       internal = true;
-      # Unlike `internal`, also hides the options of the submodule.
-      visible = false;
-      description = "Every workload by its `owner`, which gateways route by its `name`.";
+      description = ''
+        Every workload by its `owner`, which gateways route by its `name`,
+        with its `engine`, its `url` on its port or socket, its `socket` or
+        null, whether it is `unlisted` and whether it is `exposed` beyond
+        loopback.
+      '';
     };
 
     claims = lib.mkOption {
@@ -158,12 +121,22 @@ in
   };
 
   config = {
-    assertions =
-      lib.concatLists (lib.mapAttrsToList (kind: lib.mapAttrsToList (claimAssertion kind)) cfg.claims)
-      ++ map gatewayAssertion cfg.gateway.routes;
+    assertions = lib.concatLists (
+      lib.mapAttrsToList (kind: lib.mapAttrsToList (claimAssertion kind)) cfg.claims
+    );
 
-    systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (e: e.socket != null) (
-      lib.attrValues cfg.endpoints
-    )) (util.rootDirectoryRule cfg.socketDirectory);
+    # A container maps to no host group known in advance, so its socket is
+    # reachable through a default ACL on the root instead. See "Unix sockets"
+    # in the module internals documentation.
+    systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (sockets != [ ]) (
+      lib.mkMerge [
+        (util.rootDirectoryRule cfg.socketDirectory)
+        (lib.mkIf (lib.any (e: cfg.${e.engine}.runtime == "quadlet") sockets && cfg.socketClients != [ ]) {
+          ${cfg.socketDirectory}.a.argument = lib.concatMapStringsSep "," (
+            user: "default:user:${user}:-wx"
+          ) cfg.socketClients;
+        })
+      ]
+    );
   };
 }

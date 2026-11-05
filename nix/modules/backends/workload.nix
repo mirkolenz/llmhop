@@ -1,12 +1,16 @@
-# Options shared by the native and the Quadlet backends: those of a backend,
-# of every workload and of every model.
+# The submodules of the workloads of a backend, its models and its auxiliary
+# services such as watermark detectors.
 lib:
 let
   inherit (lib) mkOption types;
   util = import ../lib.nix lib;
-  shared = import ./shared.nix lib;
 in
 rec {
+  # A workload without a `port` binds `socketName` in a `RuntimeDirectory=` of
+  # its own below `services.llmhop.socketDirectory`. See "Unix sockets" in the
+  # module internals documentation.
+  socketName = "http.sock";
+
   # One-sentence dialect summary appended to every `settings` description.
   settingsRendering =
     engine:
@@ -19,150 +23,27 @@ rec {
       if engine.listStyle == "values" then "handed to a single flag" else "repeating the flag"
     }. See [settings rendering](../README.md#settings-rendering) for the full rules.";
 
-  # Options of every backend, regardless of kind.
-  backendOptions = engine: {
-    enable = lib.mkEnableOption "${engine.displayName} model serving";
-    fetch = {
-      schedule = mkOption {
-        type = with types; nullOr str;
-        default = "weekly";
-        example = "daily";
-        description = ''
-          `OnCalendar=` schedule of this backend's `<backend>-update`, such
-          as `${engine.name}-update`, which runs every fetcher and restarts
-          each running server after a successful fetch, even if its model
-          did not change.
-          `null` disables scheduled fetching.
-        '';
-      };
-      environment = mkOption {
-        type = with types; attrsOf str;
-        default = { };
-        example.HTTPS_PROXY = "http://proxy.example:3128";
-        description = ''
-          Environment variables set on every fetcher, such as a proxy. Values
-          may reference `fetch.credentials` as `''${cred:<name>}`.
-          The servers run offline and never see them.
-        '';
-      };
-      environmentFile = mkOption {
-        type = with types; nullOr externalPath;
-        default = null;
-        description = ''
-          File in `KEY=VALUE` format forwarded to every fetcher, for
-          variables that only exist as values.
-        '';
-      };
-      hfTokenCredential = mkOption {
-        type = with types; nullOr str;
-        default = null;
-        example = "llmhop.hf-token";
-        description = ''
-          Credential holding a Hugging Face token for gated repositories,
-          imported from the system credential store unless
-          `fetch.credentials` names a file for it. Only the fetchers receive
-          it, as `HF_TOKEN`, and skip it while it is missing.
-        '';
-      };
-      credentials = util.credentialsOption // {
-        description = ''
-          Credentials granted to every fetcher, in the format of a
-          workload's `credentials`. Reference them from `fetch.environment`
-          as `''${cred:<name>}`.
-        '';
-      };
-    };
-    cache.directory = mkOption {
-      type = types.externalPath;
-      default = "/var/cache/${engine.name}";
-      description = ''
-        Root of the cache directories of this backend's workloads, created
-        with mode `0711`, each `<name>` the `HF_HOME` of one fetcher and its
-        server, created with mode `0700`. The fetcher writes its `hub/`,
-        which the server only reads. Point it at a data disk for large
-        models.
-      '';
-    };
-    environment = mkOption {
-      type = with types; attrsOf str;
-      default = { };
-      description = ''
-        Environment variables set on every model service, under the
-        `environment` of each model, where `''${cred:<name>}` expands to the
-        path of a credential.
-      '';
-    };
-    environmentFile = mkOption {
-      type = with types; nullOr externalPath;
-      default = null;
-      example = "/etc/${engine.name}/.env";
-      description = ''
-        File in `KEY=VALUE` format forwarded to every server, loaded before
-        the `environmentFile` of each model. Prefer `credentials` for any
-        secret a server can read from a file.
-      '';
-    };
-    modelSettings = mkOption {
-      type = with types; attrsOf json;
-      default = { };
-      description = ''
-        CLI flags forwarded to the server of every model, under the
-        `settings` of each model.
-        ${settingsRendering engine}
-      '';
-    };
-    openFilesLimit = mkOption {
-      type = types.ints.positive;
-      default = 1048576;
-      description = ''
-        File descriptor limit (`LimitNOFILE`) of every server of this
-        backend. Increase it if a server logs `accept: Too many open files`.
-      '';
-    };
-    extraWorkloads = mkOption {
-      type = with types; listOf attrs;
-      internal = true;
-      default = [ ];
-      description = "Workloads served beside the models, such as watermark detectors.";
-    };
-  };
+  # Enabled workloads of `collection` sorted by ascending `name`, the order
+  # servers are emitted and chained in.
+  sortedWorkloads =
+    collection:
+    lib.pipe collection [
+      (lib.filterAttrs (_: w: w.enable))
+      lib.attrValues
+      (lib.sortOn (w: w.name))
+    ];
 
-  # Whether a backend starts its models one at a time, pinned to devices as
-  # `pinNote` describes otherwise.
-  startupOrderingOption =
-    pinNote:
-    mkOption {
-      type = types.bool;
-      default = true;
-      description = ''
-        Whether to start model services one at a time by ascending `name`,
-        so two workers profiling memory on the same GPU do not race into an
-        OOM. Disable only when each model pins itself to a dedicated device
-        ${pinNote}.
-      '';
-    };
-
-  # The listener a server container binds, on the engine's port or the
-  # mounted socket.
-  quadletListener = engine: workload: {
-    host = "0.0.0.0";
-    inherit (engine.quadlet) port;
-    socket =
-      if workload.socket != null then "${util.containerSocketDirectory}/${shared.socketName}" else null;
-  };
-
-  # Submodule of every workload, a model or an auxiliary service, served by
-  # `engine` as the unit `<engine>-<name>`. `listener` maps the workload to the
-  # `{ host, port, socket }` its server binds, natively the workload itself, and `derivedSettings` to further
-  # flags. Both override `settings`, so the gateways, the health probe and the
-  # fetcher always agree with the server, while `defaults` only provide
-  # defaults.
+  # Submodule of every workload of a backend of `engine` with `runtime`, served
+  # as the unit `<engine>-<name>` by its internal `command`, followed by its
+  # settings. Its listener and `derivedSettings` override `settings`, so the
+  # gateways, the health probe and the fetcher always agree with the server,
+  # while `defaults` only provide defaults.
   workloadModule =
     {
       engine,
-      noun,
+      runtime,
+      kind,
       socketDirectory,
-      listener,
       derivedSettings,
       defaults ? { },
     }:
@@ -173,9 +54,19 @@ rec {
       ...
     }:
     let
+      noun = if kind == "model" then "model" else "watermark detector";
       socketCapable = engine.socketSettings != null;
       portDescription = "Host port the server binds to on `host`.";
-      listen = listener config;
+      # A container binds the engine's port or the mounted socket.
+      listener =
+        if runtime == "native" then
+          { inherit (config) host port socket; }
+        else
+          {
+            host = "0.0.0.0";
+            inherit (engine.quadlet) port;
+            socket = if config.socket != null then "${util.containerSocketDirectory}/${socketName}" else null;
+          };
     in
     {
       options = {
@@ -212,18 +103,64 @@ rec {
           default = "${engine.displayName} ${noun} ${config.name}";
           description = "Description of the server unit.";
         };
-        unlisted = mkOption {
-          type = types.bool;
+        listener = mkOption {
+          type = types.submodule {
+            options = {
+              host = mkOption {
+                type = types.str;
+              };
+              port = mkOption {
+                type = with types; nullOr port;
+              };
+              socket = mkOption {
+                type = with types; nullOr str;
+              };
+            };
+          };
           internal = true;
-          default = false;
-          description = ''
-            Whether this is an auxiliary service rather than an inference
-            model, which gets no GPU, no place in the startup chain, and is
-            routed only by the llmhop gateway.
-          '';
+          readOnly = true;
+          default = listener;
+          description = "The `host`, `port` and `socket` the server binds, in its container if any.";
+        };
+        command = mkOption {
+          type = with types; listOf (either str package);
+          internal = true;
+          description = "Command of the server, followed by its settings.";
+        };
+        mounts = mkOption {
+          type = with types; listOf str;
+          internal = true;
+          default = [ ];
+          description = "Further `Volume=` lines of the server's container.";
+        };
+        kind = mkOption {
+          type = types.enum [
+            "model"
+            "detector"
+          ];
+          internal = true;
+          readOnly = true;
+          default = kind;
+          description = "Whether this workload serves a model or detects watermarks.";
         };
         repositories = mkOption {
-          type = with types; listOf attrs;
+          type =
+            with types;
+            listOf (submodule {
+              options = {
+                repo = mkOption {
+                  type = str;
+                };
+                revision = mkOption {
+                  type = nullOr str;
+                  default = null;
+                };
+                include = mkOption {
+                  type = listOf str;
+                  default = [ ];
+                };
+              };
+            });
           internal = true;
           default = [ ];
           description = "Repositories the fetcher downloads, each `{ repo, revision ? null, include ? [ ] }`.";
@@ -251,10 +188,10 @@ rec {
           readOnly = true;
           default =
             if socketCapable && config.port == null then
-              "${socketDirectory}/${config.unit}/${shared.socketName}"
+              "${socketDirectory}/${config.unit}/${socketName}"
             else
               null;
-          defaultText = lib.literalMD "`<services.llmhop.socketDirectory>/${engine.name}-<name>/${shared.socketName}` while `port` is null, else null";
+          defaultText = lib.literalMD "`<services.llmhop.socketDirectory>/${engine.name}-<name>/${socketName}` while `port` is null, else null";
           description = "Unix socket the server binds, derived from `port`.";
         };
         host = mkOption {
@@ -273,8 +210,7 @@ rec {
           description = ''
             Whether to open `port` in the host firewall, which requires a
             `host` other than loopback and no gateway routing this ${noun}.
-            A Quadlet container's published port bypasses the firewall either
-            way.
+            A container's published port bypasses the firewall either way.
           '';
         };
         environment = mkOption {
@@ -298,13 +234,15 @@ rec {
         credentials = util.credentialsOption;
         offline = mkOption {
           type = types.bool;
-          default = true;
+          # `Network=none` rules out a published port.
+          default = runtime == "native" || config.socket != null;
+          defaultText = lib.literalMD "`true` if the backend's `runtime` is `\"native\"`, else whether `socket` is set";
           description = ''
             Whether this ${noun}'s server runs without network access. Natively,
             a socket gets a network namespace of its own and a `port` on
             loopback an IP address filter, while one beyond loopback stays
-            online. A Quadlet container runs with `Network=none`, which
-            requires its socket, so there it defaults to whether `port` is null.
+            online. A container runs with `Network=none`, which requires its
+            socket.
             Disable it for features that download at runtime, such as media URLs
             in requests.
             The server serves only what its fetcher downloaded either way.
@@ -324,10 +262,10 @@ rec {
       config.settings = lib.mkMerge [
         (lib.mapAttrs (_: lib.mkForce) (
           (
-            if listen.socket == null then
-              { inherit (listen) host port; }
+            if listener.socket == null then
+              { inherit (listener) host port; }
             else
-              engine.socketSettings listen.socket
+              engine.socketSettings listener.socket
           )
           // derivedSettings config
         ))
@@ -382,20 +320,5 @@ rec {
         }
         ++ map (repo: { inherit repo; }) config.extraRepositories
         ++ requiredRepositories;
-    };
-
-  # The models of a backend, each a submodule of `modules`.
-  modelsOption =
-    { engine, description }:
-    modules:
-    mkOption {
-      type = types.attrsOf (types.submodule modules);
-      default = { };
-      example = lib.literalExpression ''
-        {
-          "qwen3-8b".model = "${engine.modelExample}";
-        }
-      '';
-      inherit description;
     };
 }

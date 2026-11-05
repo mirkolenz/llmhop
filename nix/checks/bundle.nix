@@ -8,13 +8,13 @@
 let
   config = {
     gateway = {
-      type = "llmhop-quadlet";
-      llmhop-quadlet = {
+      type = "llmhop";
+      llmhop = {
         credentials."llmhop.client-token" = null;
         settings.authTokens.client = "\${cred:llmhop.client-token}";
       };
     };
-    vllm-quadlet = {
+    vllm = {
       enable = true;
       container.image = "docker.io/vllm/vllm-openai:latest";
       fetch.schedule = "weekly";
@@ -39,11 +39,17 @@ in
 assert rejects {
   vllm = {
     enable = true;
+    runtime = "native";
     package = bundle;
     models.qwen.model = "Qwen/Qwen3-8B";
   };
 };
-assert rejects { gateway.type = "llmhop"; };
+assert rejects {
+  gateway = {
+    type = "llmhop";
+    llmhop.runtime = "native";
+  };
+};
 runCommand "llmhop-bundle-tests" { } ''
   set -euo pipefail
   cd ${bundle}
@@ -64,7 +70,7 @@ runCommand "llmhop-bundle-tests" { } ''
   grep -qE '^ExecStartPre="/usr/local/lib/llmhop/[^ ]+-llmhop-[^/]+/bin/llmhop" "internal" "hub-prune" ' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block vllm-qwen.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
-  grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-quadlet-update.timer
+  grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-update.timer
   grep -qE '^Image=docker-archive:/usr/local/lib/llmhop/[^ ]+\.tar\.gz$' etc/containers/systemd/llmhop.image
   touch $out
 ''

@@ -16,8 +16,8 @@ let
     hf:
     {
       repo,
-      revision ? null,
-      include ? [ ],
+      revision,
+      include,
     }:
     [
       hf
@@ -33,9 +33,8 @@ let
       pattern
     ]) include;
 in
-{
+lib.mapAttrs (name: engine: engine // { inherit name; }) {
   llama-cpp = {
-    name = "llama-cpp";
     displayName = "llama.cpp";
     negateBools = true;
     listStyle = "repeat";
@@ -83,7 +82,6 @@ in
   };
 
   vllm = {
-    name = "vllm";
     displayName = "vLLM";
     negateBools = true;
     listStyle = "values";
@@ -129,7 +127,6 @@ in
   };
 
   sglang = {
-    name = "sglang";
     displayName = "SGLang";
     negateBools = false;
     listStyle = "values";

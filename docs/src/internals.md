@@ -90,10 +90,12 @@ Endpoints are keyed by owner too, so a name clash reaches that assertion instead
 
 Each workload's `cache.directory/<name>` is the `HF_HOME` of its fetcher and server, holding the hub cache in `hub/`, which the server can only read, beside the server's runtime caches.
 It is no `CacheDirectory=`, which would have to stay below `/var/cache`, and containers mount it at the same path.
+Without `cache.directory`, a container mounts the named volume `<unit>` there instead, which Podman creates on first use, so no tmpfiles rule is needed.
+A fetcher rules this out, since its refresh unit prunes the hub cache on the host.
 
 ## Offline servers
 
-Servers get `HF_HUB_OFFLINE`, llama.cpp `--offline`, and vLLM `VLLM_HOST_IP`, since it would otherwise derive its address from a route to a public host.
+Servers get `HF_HUB_OFFLINE` and llama.cpp `--offline` only with `fetch.enable`, since otherwise they download their repositories themselves, and vLLM always gets `VLLM_HOST_IP`, since it would otherwise derive its address from a route to a public host.
 A socket server gets its own network namespace, keeping `lo` for NCCL.
 A native server on a loopback port is limited to `127.0.0.1` and `::1` by the cgroup IP filter, not all of `127.0.0.0/8`, which holds the systemd-resolved stub, and cannot see `/run/nscd` and `/run/systemd/resolve`.
 
@@ -131,3 +133,5 @@ The llmhop container loads an archive of the image built with the binary that va
 The container rootfs stays writable, since ML runtimes scatter caches across `HOME`, and `/tmp` is a tmpfs.
 Every container of a backend runs the backend's image unit, which quadlet-nix starts only when a dependent starts.
 Backend containers, fetchers and gateways are `PartOf=` their image unit, so an image restart also restarts its running dependents.
+A registry image unit pulls with `Policy=missing`, since `podman image pull` otherwise contacts the registry on every start, so a boot during an outage would fail.
+`container.imageUnit = false` references the image directly with Podman's default `Pull=missing`, which pulls within the server's start timeout and drops that restart handle, while a changed image still changes and thereby restarts every container.

@@ -158,7 +158,7 @@ rec {
         RestartSec = 5;
       };
       online = !util.isLoopback (cfg.host or "");
-      imageUnit = util.imageUnit {
+      image = util.containerImage {
         inherit (config.virtualisation.quadlet) images;
         inherit name;
         inherit (spec) image;
@@ -191,19 +191,19 @@ rec {
         };
       })
       (lib.mkIf (cfg.runtime == "quadlet") {
-        services.llmhop.claims = imageUnit.claims;
+        services.llmhop.claims = image.claims;
         virtualisation.quadlet = {
           enable = true;
-          inherit (imageUnit) images;
+          inherit (image) images;
           containers.${name} = {
             unitConfig = lib.mkMerge [
-              (util.startLimitConfig // imageUnit.unitConfig)
+              (util.startLimitConfig // image.unitConfig)
               unitConfig
             ];
             serviceConfig = util.credentialServiceConfig cfg.credentials // restart // spec.serviceConfig;
             containerConfig =
               util.baseContainerConfig
-              // imageUnit.containerConfig
+              // image.containerConfig
               // {
                 Network = "host";
                 Environment =

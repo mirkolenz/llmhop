@@ -205,10 +205,13 @@ Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the
 An interrupted download leaves a running server alone, and a successful retry refreshes it.
 An explicitly stopped server stays stopped.
 
-Servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
+`fetch.enable = false` drops the fetchers, refresh and update units, so each server downloads its repositories itself when it starts, which needs `offline = false`, its default then.
+A container backend can then also set `cache.directory = null`, keeping each cache in the named volume `<engine>-<name>` without tmpfiles rules, and `container.imageUnit = false`, so each container references `container.image` directly rather than through the image unit `<engine>-image`.
+
+With fetchers, servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
 A native server on a socket gets no network at all and on a `port` only loopback, while a container gets `Network=none`, which needs a socket, so a container workload with a `port` defaults to `offline = false` and rejects `offline = true`.
 `offline = false` lifts the network restrictions for features like media URLs in requests.
-Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`.
+Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`, and are otherwise only pulled while missing, so a start needs no registry.
 
 #### Settings rendering
 

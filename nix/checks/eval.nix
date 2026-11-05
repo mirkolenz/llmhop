@@ -361,6 +361,17 @@ let
       count = 0;
       system = mkQuadlet { models.test.port = null; };
     };
+    offlineWithoutFetch = {
+      needle = "downloads its repositories itself";
+      count = 1;
+      system = mkQuadlet {
+        fetch.enable = false;
+        models.test = {
+          port = null;
+          offline = true;
+        };
+      };
+    };
   };
 
   tests = {

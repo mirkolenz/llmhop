@@ -25,17 +25,22 @@ rec {
   # and thereby off its group or ACL.
   socketUMask = "0007";
 
+  defaultCacheDirectory = "/var/cache/${name}";
+
   # The cache directory of `workload`, which no other workload shares, holding
   # the hub cache its fetcher writes in `hub/` beside the runtime caches of
-  # its server, at the same path in a container. See "Directory layout" in the
-  # module internals documentation.
-  cacheDirectory = workload: "${cfg.cache.directory}/${workload.name}";
+  # its server, at the same path in a container, where it is the named volume
+  # `<unit>` without `cache.directory`. See "Directory layout" in the module
+  # internals documentation.
+  cacheDirectory =
+    workload: "${lib.defaultTo defaultCacheDirectory cfg.cache.directory}/${workload.name}";
   hubDirectory = workload: "${cacheDirectory workload}/hub";
 
-  # Every server runs offline from its hub cache, which the fetcher
-  # `<unit>-fetch` fills before it, and which exists only for a workload that
-  # fetches. See "Fetching" in the module internals documentation.
-  fetches = workload: workload.repositories != [ ];
+  # With `fetch.enable`, every server runs offline from its hub cache, which
+  # the fetcher `<unit>-fetch` fills before it, and which exists only for a
+  # workload that fetches. See "Fetching" in the module internals
+  # documentation.
+  fetches = workload: cfg.fetch.enable && workload.repositories != [ ];
   hubDirectories = workload: lib.optional (fetches workload) (hubDirectory workload);
   fetchUnit = workload: "${workload.unit}-fetch";
   refreshUnit = workload: "${workload.unit}-refresh";
@@ -138,9 +143,6 @@ rec {
     in
     {
       HF_HOME = cache;
-      # Only the fetcher writes the hub, so even a server with network access
-      # never downloads into it.
-      HF_HUB_OFFLINE = "1";
       HF_HUB_DISABLE_TELEMETRY = "1";
       DO_NOT_TRACK = "1";
       XDG_CACHE_HOME = cache;
@@ -153,6 +155,9 @@ rec {
       NEO_CACHE_PERSISTENT = "1";
       NEO_CACHE_DIR = "${cache}/neo";
     }
+    # Only the fetchers write the hub, so even a server with network access
+    # never downloads into it.
+    // lib.optionalAttrs cfg.fetch.enable { HF_HUB_OFFLINE = "1"; }
     // engine.environment
     // environment
     // lib.optionalAttrs (workload.kind == "model") {

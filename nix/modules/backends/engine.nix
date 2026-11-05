@@ -79,6 +79,17 @@ in
             description = "The ${name} package. Only used if `runtime` is `\"native\"`.";
           };
       fetch = {
+        enable = lib.mkEnableOption "the fetchers" // {
+          default = true;
+          description = ''
+            Whether every workload has a fetcher `<unit>-fetch` downloading
+            its repositories before its server starts, with a refresh unit and
+            `${name}-update`, after which the server runs offline. Otherwise
+            each server downloads its repositories itself when it starts, which
+            requires `offline = false`, and none of the other `fetch` options
+            apply.
+          '';
+        };
         schedule = mkOption {
           type = with types; nullOr str;
           default = "weekly";
@@ -128,14 +139,17 @@ in
         };
       };
       cache.directory = mkOption {
-        type = types.externalPath;
-        default = "/var/cache/${name}";
+        type = with types; nullOr externalPath;
+        default = backend.defaultCacheDirectory;
         description = ''
           Root of the cache directories of this backend's workloads, created
           with mode `0711`, each `<name>` the `HF_HOME` of one fetcher and its
           server, created with mode `0700` for `user` and `group`. The
           fetcher writes its `hub/`, which the server only reads. Point it at
           a data disk for large models.
+          `null` keeps each cache in the Podman named volume `<unit>` instead,
+          which needs no tmpfiles rules but only works for a container backend
+          without `fetch.enable`.
         '';
       };
       environment = mkOption {
@@ -189,6 +203,17 @@ in
         image = util.imageOption // {
           example = engine.quadlet.imageExample;
         };
+        imageUnit = mkOption {
+          type = types.bool;
+          default = true;
+          description = ''
+            Whether every container runs `image` through the image unit
+            `${name}-image`, which pulls it once for all of them and restarts
+            them when restarted. Otherwise each container references `image`
+            directly and pulls it while it is missing.
+            Only used if `runtime` is `"quadlet"`.
+          '';
+        };
         config = util.containerConfigOption sectionType "this backend, servers, fetchers and detectors alike";
         devices = mkOption {
           type = with types; listOf str;
@@ -227,6 +252,7 @@ in
               inherit engine;
               inherit (cfg) runtime;
               inherit (llmhop) socketDirectory;
+              fetch = cfg.fetch.enable;
               kind = "model";
               derivedSettings = engine.modelSettings;
               defaults = cfg.modelSettings;
@@ -322,16 +348,30 @@ in
         }
       );
     };
-    assertions = map (w: util.firewallAssertion w.owner w) workloads;
+    assertions =
+      map (w: util.firewallAssertion w.owner w) workloads
+      ++ map (w: {
+        assertion = !cfg.fetch.enable && w.repositories != [ ] -> !w.offline;
+        message = "services.llmhop: `${w.owner}` downloads its repositories itself without the backend's `fetch.enable`, so it needs `offline = false`.";
+      }) workloads
+      ++ [
+        {
+          # A fetcher prunes the hub cache on the host.
+          assertion = cfg.cache.directory == null -> !native && !cfg.fetch.enable;
+          message = "services.llmhop: `${owner}.cache.directory` is null, which only a container backend without `fetch.enable` supports.";
+        }
+      ];
     networking.firewall.allowedTCPPorts = lib.catAttrs "port" (
       lib.filter (w: w.socket == null && w.openFirewall) workloads
     );
     # Every workload owns its own directory below the root, and every rule of
     # llmhop shares one file.
-    systemd.tmpfiles.settings."10-llmhop" = lib.mkMerge (
-      [ (util.rootDirectoryRule cfg.cache.directory) ]
-      ++ map (util.directoryRule cfg "0700") (
-        lib.concatMap (w: [ (cacheDirectory w) ] ++ hubDirectories w) workloads
+    systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (cfg.cache.directory != null) (
+      lib.mkMerge (
+        [ (util.rootDirectoryRule cfg.cache.directory) ]
+        ++ map (util.directoryRule cfg "0700") (
+          lib.concatMap (w: [ (cacheDirectory w) ] ++ hubDirectories w) workloads
+        )
       )
     );
     systemd.services = backend.maintenanceServices;

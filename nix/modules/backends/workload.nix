@@ -35,13 +35,15 @@ rec {
 
   # Submodule of every workload of a backend of `engine` with `runtime`, served
   # as the unit `<engine>-<name>` by its internal `command`, followed by its
-  # settings. Its listener and `derivedSettings` override `settings`, so the
-  # gateways, the health probe and the fetcher always agree with the server,
-  # while `defaults` only provide defaults.
+  # settings, and while `fetch` from what its fetcher downloaded. Its listener,
+  # `derivedSettings` and, while `fetch`, the engine's `offlineSettings`
+  # override `settings`, so the gateways, the health probe and the fetcher
+  # always agree with the server, while `defaults` only provide defaults.
   workloadModule =
     {
       engine,
       runtime,
+      fetch,
       kind,
       socketDirectory,
       derivedSettings,
@@ -241,8 +243,8 @@ rec {
         offline = mkOption {
           type = types.bool;
           # `Network=none` rules out a published port.
-          default = runtime == "native" || config.socket != null;
-          defaultText = lib.literalMD "`true` if the backend's `runtime` is `\"native\"`, else whether `socket` is set";
+          default = fetch && (runtime == "native" || config.socket != null);
+          defaultText = lib.literalMD "`false` without the backend's `fetch.enable`, else `true` if its `runtime` is `\"native\"`, else whether `socket` is set";
           description = ''
             Whether this ${noun}'s server runs without network access. Natively,
             a socket gets a network namespace of its own and a `port` on
@@ -251,7 +253,9 @@ rec {
             socket.
             Disable it for features that download at runtime, such as media URLs
             in requests.
-            The server serves only what its fetcher downloaded either way.
+            With the backend's `fetch.enable`, the server serves only what its
+            fetcher downloaded either way, and otherwise downloads its
+            repositories itself, which requires `false`.
           '';
         };
         settings = mkOption {
@@ -274,6 +278,7 @@ rec {
               engine.socketSettings listener.socket
           )
           // derivedSettings config
+          // lib.optionalAttrs fetch engine.offlineSettings
         ))
         (lib.mapAttrs (_: lib.mkDefault) defaults)
       ];

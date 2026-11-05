@@ -27,11 +27,13 @@ let
     workloads
     ;
 
-  # The image unit `<name>-image`, shared by every container.
-  image = util.imageUnit {
+  # The image unit `<name>-image`, shared by every container, unless they
+  # reference the image directly.
+  image = util.containerImage {
     inherit (config.virtualisation.quadlet) images;
     inherit name owner;
     inherit (cfg.container) image;
+    unit = cfg.container.imageUnit;
   };
   fetchScriptPath = "${util.containerRuntimeDirectory}/fetch.sh";
 
@@ -40,11 +42,12 @@ let
     workload: after:
     let
       inherit (workload) unit listener;
-      # A host directory mounted at the same path.
       cacheMount =
-        directory: options:
-        "${directory}:${directory}${util.mountSuffix (options ++ cfg.container.mountOptions.cache)}";
-      cache = cacheMount (cacheDirectory workload) [ ];
+        source: target: options:
+        "${source}:${target}${util.mountSuffix (options ++ cfg.container.mountOptions.cache)}";
+      # The host directory at the same path, or else the named volume.
+      cacheSource = if cfg.cache.directory == null then unit else cacheDirectory workload;
+      cache = cacheMount cacheSource (cacheDirectory workload) [ ];
       fetcher = fetch workload;
       credentials = util.credentialMount cfg.container.mountOptions.credentials;
       healthTarget =
@@ -92,7 +95,7 @@ let
             Volume = [
               cache
             ]
-            ++ map (directory: cacheMount directory [ "ro" ]) (hubDirectories workload)
+            ++ map (directory: cacheMount directory directory [ "ro" ]) (hubDirectories workload)
             ++ workload.mounts
             ++ lib.optional (
               workload.socket != null

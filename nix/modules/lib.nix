@@ -415,29 +415,48 @@ rec {
       '';
     };
 
-  # The image unit `<name>-image` pulling `image`, its claim by `owner`, and
-  # the `containerConfig` of a container running it.
-  # An archive `image` loads as `tag`, and only a registry reference without
-  # a digest auto-updates.
-  imageUnit =
+  # How a container runs `image`: with `unit`, through the image unit
+  # `<name>-image` pulling it, claimed by `owner`, and else directly, as the
+  # `images`, `claims`, `unitConfig` and `containerConfig` to merge.
+  # Either pulls a registry `image` only while it is missing, so a start needs
+  # no registry. An archive `image` loads as `tag`, and only a registry
+  # reference without a digest auto-updates.
+  containerImage =
     {
       images,
       name,
       image,
       owner,
       tag ? null,
+      unit ? true,
     }:
-    {
-      images.${name}.imageConfig = {
-        Image = image;
+    let
+      autoUpdate = lib.optionalAttrs (tag == null && !lib.hasInfix "@" image) {
+        AutoUpdate = "registry";
+      };
+    in
+    if unit then
+      {
+        images.${name}.imageConfig = {
+          Image = image;
+        }
+        // (if tag == null then { Policy = "missing"; } else { ImageTag = tag; });
+        claims.unit.${images.${name}.serviceName} = [ owner ];
+        unitConfig.PartOf = [ "${images.${name}.serviceName}.service" ];
+        containerConfig = {
+          Image = images.${name}.ref;
+          Pull = "never";
+        }
+        // autoUpdate;
       }
-      // lib.optionalAttrs (tag != null) { ImageTag = tag; };
-      claims.unit.${images.${name}.serviceName} = [ owner ];
-      unitConfig.PartOf = [ "${images.${name}.serviceName}.service" ];
-      containerConfig = {
-        Image = images.${name}.ref;
-        Pull = "never";
-      }
-      // lib.optionalAttrs (tag == null && !lib.hasInfix "@" image) { AutoUpdate = "registry"; };
-    };
+    else
+      {
+        images = { };
+        claims = { };
+        unitConfig = { };
+        containerConfig = {
+          Image = image;
+        }
+        // autoUpdate;
+      };
 }

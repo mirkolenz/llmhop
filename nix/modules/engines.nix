@@ -4,7 +4,8 @@
 # lists, see `renderCliArgs`. `socketSettings` renders the flags binding a unix
 # socket, or is null for a server that only listens on TCP. `fetch` renders the
 # argv downloading one repository with the given `fetcher` into the hub cache
-# below `HF_HOME`. `modelSettings` are the flags derived from a model and
+# below `HF_HOME`. `modelSettings` are the flags derived from a model,
+# `offlineSettings` those of a server whose fetcher downloads for it, and
 # `environment` is set on every server. `native` and `quadlet` hold what only
 # one kind of backend needs.
 lib:
@@ -45,11 +46,11 @@ lib.mapAttrs (name: engine: engine // { inherit name; }) {
     };
     revisions = false;
     environment = { };
+    offlineSettings.offline = true;
     modelSettings =
       model:
       {
         alias = model.name;
-        offline = true;
       }
       // (if isRepository model.model then { hf-repo = model.model; } else { inherit (model) model; });
     modelDescription = ''
@@ -94,6 +95,7 @@ lib.mapAttrs (name: engine: engine // { inherit name; }) {
     # vLLM otherwise derives the address of its distributed workers from
     # the route to a public one, which an offline server lacks.
     environment.VLLM_HOST_IP = "127.0.0.1";
+    offlineSettings = { };
     modelSettings = model: {
       served-model-name = model.name;
       inherit (model) revision;
@@ -133,6 +135,7 @@ lib.mapAttrs (name: engine: engine // { inherit name; }) {
     socketSettings = null;
     revisions = true;
     environment = { };
+    offlineSettings = { };
     modelSettings = model: {
       served-model-name = model.name;
       inherit (model) revision;

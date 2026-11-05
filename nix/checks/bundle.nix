@@ -50,6 +50,14 @@ assert rejects {
     llmhop.runtime = "native";
   };
 };
+assert rejects {
+  vllm = {
+    enable = true;
+    cache.directory = null;
+    container.image = "docker.io/vllm/vllm-openai:latest";
+    models.qwen.model = "Qwen/Qwen3-8B";
+  };
+};
 runCommand "llmhop-bundle-tests" { } ''
   set -euo pipefail
   cd ${bundle}
@@ -72,5 +80,6 @@ runCommand "llmhop-bundle-tests" { } ''
   grep -qx 'Requires=vllm-qwen-fetch.service' etc/systemd/system/vllm-qwen-refresh.service
   grep -qx 'OnCalendar=weekly' etc/systemd/system/vllm-update.timer
   grep -qE '^Image=docker-archive:/usr/local/lib/llmhop/[^ ]+\.tar\.gz$' etc/containers/systemd/llmhop.image
+  grep -qx 'Policy=missing' etc/containers/systemd/vllm.image
   touch $out
 ''

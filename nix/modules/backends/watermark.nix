@@ -149,6 +149,7 @@ let
           inherit engine;
           inherit (cfg) runtime;
           inherit socketDirectory;
+          fetch = cfg.fetch.enable;
           kind = "detector";
           derivedSettings = detector: {
             profiles = lib.mapAttrs (_: profile: {

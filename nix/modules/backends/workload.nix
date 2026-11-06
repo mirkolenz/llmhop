@@ -134,6 +134,13 @@ rec {
           default = config.socket == null && !util.isLoopback config.host;
           description = "Whether the server is reachable beyond loopback.";
         };
+        fetches = mkOption {
+          type = types.bool;
+          internal = true;
+          readOnly = true;
+          default = fetch && config.repositories != [ ];
+          description = "Whether a fetcher downloads the repositories of this ${noun}.";
+        };
         # See "Offline servers" in the module internals documentation.
         isolable = mkOption {
           type = types.bool;

@@ -17,7 +17,6 @@ let
     socketUMask
     cacheDirectory
     hubDirectories
-    fetches
     fetchUnit
     fetchServices
     fetchOrder
@@ -155,7 +154,7 @@ let
           };
       };
     }
-    // lib.optionalAttrs (fetches workload) {
+    // lib.optionalAttrs workload.fetches {
       ${fetchUnit workload} = {
         description = "Fetch the models of ${unit}";
         inherit (fetcher) unitConfig;

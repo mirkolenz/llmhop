@@ -38,20 +38,19 @@ rec {
 
   # With `fetch.enable`, every server runs offline from its hub cache, which
   # the fetcher `<unit>-fetch` fills before it, and which exists only for a
-  # workload that fetches. See "Fetching" in the module internals
+  # workload that `fetches`. See "Fetching" in the module internals
   # documentation.
-  fetches = workload: cfg.fetch.enable && workload.repositories != [ ];
-  hubDirectories = workload: lib.optional (fetches workload) (hubDirectory workload);
+  hubDirectories = workload: lib.optional workload.fetches (hubDirectory workload);
   fetchUnit = workload: "${workload.unit}-fetch";
   refreshUnit = workload: "${workload.unit}-refresh";
   # The fetcher a server `Wants=`.
-  fetchServices = workload: lib.optional (fetches workload) "${fetchUnit workload}.service";
+  fetchServices = workload: lib.optional workload.fetches "${fetchUnit workload}.service";
   # The units a server starts after: its fetcher, and the refresh that a
   # successful download triggers, which thereby finds the server still waiting
   # rather than restarting it.
   fetchOrder =
     workload:
-    fetchServices workload ++ lib.optional (fetches workload) "${refreshUnit workload}.service";
+    fetchServices workload ++ lib.optional workload.fetches "${refreshUnit workload}.service";
 
   # The file of the hub cache of `workload` and the cache `name` and
   # `revision` of each of its repositories. huggingface_hub records the
@@ -206,7 +205,7 @@ rec {
       unit = {
         ${workload.unit} = [ workload.owner ];
       }
-      // lib.optionalAttrs (fetches workload) {
+      // lib.optionalAttrs workload.fetches {
         ${fetchUnit workload} = [ workload.owner ];
         ${refreshUnit workload} = [ workload.owner ];
       };
@@ -226,7 +225,7 @@ rec {
   # server restarts queue in that order too and keep to the startup chain, and
   # a failed one leaves the others alone.
   maintenanceServices =
-    lib.genAttrs' (lib.filter fetches workloads) (
+    lib.genAttrs' (lib.filter (w: w.fetches) workloads) (
       workload:
       lib.nameValuePair (refreshUnit workload) {
         description = "Refresh ${workload.unit} after a successful fetch";

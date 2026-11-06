@@ -15,7 +15,6 @@ let
     socketUMask
     cacheDirectory
     hubDirectories
-    fetches
     fetchUnit
     fetchServices
     fetchOrder
@@ -120,7 +119,7 @@ let
           // cfg.container.config;
       };
     }
-    // lib.optionalAttrs (fetches workload) {
+    // lib.optionalAttrs workload.fetches {
       ${fetchUnit workload} = {
         inherit (fetcher) serviceConfig;
         unitConfig = image.unitConfig // fetcher.unitConfig;

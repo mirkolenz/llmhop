@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.1.0](https://github.com/mirkolenz/llmhop/compare/v3.0.0...v3.1.0) (2026-11-06)
+
+### ⚠ BREAKING CHANGES
+
+* **nixos:** the `-quadlet` backends and gateways are replaced by `runtime = "quadlet"` on `services.llmhop.<engine>` and `services.llmhop.gateway.<type>`, or globally on `services.llmhop.runtime`. `nixosModules.quadlet` is merged into `nixosModules.default`, `systemManagerModules.default` is new, the `cache.user` and `cache.group` of container backends are now `user` and `group`, and `<engine>-quadlet-update` is now `<engine>-update`. llmhop now requires a quadlet-nix release with `systemManagerModules` and `lib.mkBundle`.
+
+### Features
+
+* **nixos:** replace quadlet variants with runtime option and add system-manager module ([3a18898](https://github.com/mirkolenz/llmhop/commit/3a1889877c20694539f262d3dcf507b5f4e18670))
+
+### Bug Fixes
+
+* **nixos:** allow backends without fetchers, cache directory and image unit ([8a9a401](https://github.com/mirkolenz/llmhop/commit/8a9a4019df283f783812c24b03458e5327371a26))
+* **nixos:** reject offline workloads that cannot be isolated ([f65375a](https://github.com/mirkolenz/llmhop/commit/f65375acc9b15172ae3de1fc8a19822f07c7df71))
+
 ## [3.0.0](https://github.com/mirkolenz/llmhop/compare/v2.2.1...v3.0.0) (2026-11-05)
 
 ### ⚠ BREAKING CHANGES

@@ -40,9 +40,9 @@ let
       cache = cacheDirectory workload;
       fetcher = fetch workload;
       offline = lib.optionalAttrs workload.offline;
-      # Downloading at runtime or binding beyond loopback needs the network,
-      # while an offline server on loopback or its socket starts without it.
-      online = !workload.offline || workload.socket == null && !util.isLoopback workload.host;
+      # Only a server with network access waits for it, to download at
+      # runtime or to bind beyond loopback.
+      online = lib.optional (!workload.offline) "network-online.target";
       # A model's relaxations for GPUs and for NCCL in tensor-parallel inference,
       # and its own state directory, while an auxiliary service works in its
       # cache directory and may bind only its own port. See "GPU relaxations" and
@@ -73,9 +73,9 @@ let
             StateDirectory = "${name}/${workload.name}";
             WorkingDirectory = "/var/lib/${name}/${workload.name}";
           };
-      # A socket's own network namespace, or else loopback only, unless the
-      # server listens beyond it. Not `localhost`, whose `127.0.0.0/8`
-      # includes the resolver stub of systemd-resolved.
+      # Offline, a socket's own network namespace, or else loopback only, which
+      # `isolable` guarantees the port is bound to. Not `localhost`, whose
+      # `127.0.0.0/8` includes the resolver stub of systemd-resolved.
       network =
         if workload.socket != null then
           { UMask = socketUMask; } // offline { PrivateNetwork = true; }
@@ -83,7 +83,7 @@ let
           {
             UMask = "0077";
           }
-          // lib.optionalAttrs (workload.offline && util.isLoopback workload.host) {
+          // offline {
             IPAddressDeny = "any";
             IPAddressAllow = [
               "127.0.0.1"
@@ -103,8 +103,8 @@ let
           ]
         );
         wantedBy = [ "multi-user.target" ];
-        wants = fetchServices workload ++ lib.optional online "network-online.target";
-        after = fetchOrder workload ++ after ++ lib.optional online "network-online.target";
+        wants = fetchServices workload ++ online;
+        after = fetchOrder workload ++ after ++ online;
         environment = serverEnvironment workload (
           {
             HOME = cache;

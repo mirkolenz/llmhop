@@ -108,7 +108,7 @@ in
           description = ''
             Environment variables set on every fetcher, such as a proxy. Values
             may reference `fetch.credentials` as `''${cred:<name>}`.
-            The servers run offline and never see them.
+            The servers never see them.
           '';
         };
         environmentFile = mkOption {
@@ -344,12 +344,16 @@ in
           engine = name;
           url = util.probeUrl workload;
           # Reachable beyond loopback.
-          exposed = workload.socket == null && !util.isLoopback workload.host;
+          inherit (workload) exposed;
         }
       );
     };
     assertions =
       map (w: util.firewallAssertion w.owner w) workloads
+      ++ map (w: {
+        assertion = w.offline -> w.isolable;
+        message = "services.llmhop: `${w.owner}` sets `offline = true`, which needs its socket${lib.optionalString native " or a loopback `host`"}, so drop `port` or set `offline = false`.";
+      }) workloads
       ++ map (w: {
         assertion = !cfg.fetch.enable && w.repositories != [ ] -> !w.offline;
         message = "services.llmhop: `${w.owner}` downloads its repositories itself without the backend's `fetch.enable`, so it needs `offline = false`.";
@@ -362,7 +366,7 @@ in
         }
       ];
     networking.firewall.allowedTCPPorts = lib.catAttrs "port" (
-      lib.filter (w: w.socket == null && w.openFirewall) workloads
+      lib.filter (w: w.exposed && w.openFirewall) workloads
     );
     # Every workload owns its own directory below the root, and every rule of
     # llmhop shares one file.

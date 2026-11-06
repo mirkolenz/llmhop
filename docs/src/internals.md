@@ -98,6 +98,8 @@ A fetcher rules this out, since its refresh unit prunes the hub cache on the hos
 Servers get `HF_HUB_OFFLINE` and llama.cpp `--offline` only with `fetch.enable`, since otherwise they download their repositories themselves, and vLLM always gets `VLLM_HOST_IP`, since it would otherwise derive its address from a route to a public host.
 A socket server gets its own network namespace, keeping `lo` for NCCL.
 A native server on a loopback port is limited to `127.0.0.1` and `::1` by the cgroup IP filter, not all of `127.0.0.0/8`, which holds the systemd-resolved stub, and cannot see `/run/nscd` and `/run/systemd/resolve`.
+The filter applies to both directions, so it cannot isolate a server that accepts clients beyond loopback, and a container's published port needs a network.
+The internal workload option `isolable` captures this, deriving the default of `offline` and the one assertion rejecting `offline = true` where it would not hold, so no runtime silently runs an `offline` server with network access.
 
 ## Gateways
 

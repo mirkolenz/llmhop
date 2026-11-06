@@ -23,12 +23,10 @@ let
       models.qwen = {
         model = "Qwen/Qwen3-8B";
         port = 8001;
-        offline = false;
         watermark.settings.algorithm = "gumbel";
       };
       detectors.detector = {
         port = 8002;
-        offline = false;
         profiles.qwen.tokenizer = "Qwen/Qwen3-8B";
       };
     };

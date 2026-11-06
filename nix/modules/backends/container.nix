@@ -147,10 +147,6 @@ let
 in
 {
   config = lib.mkIf (cfg.enable && !backend.native && workloads != [ ]) {
-    assertions = map (workload: {
-      assertion = workload.offline -> workload.socket != null;
-      message = "services.llmhop: `${workload.owner}` is a container with `offline = true`, which can only run without network while it binds its socket, so drop `port` or set `offline = false`.";
-    }) workloads;
     services.llmhop.claims = image.claims;
     virtualisation.quadlet = {
       enable = true;

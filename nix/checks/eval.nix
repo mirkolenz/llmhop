@@ -182,6 +182,22 @@ let
   socketContainer = sockets.virtualisation.quadlet.containers.llama-cpp-b;
   socketRules = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
 
+  # A native model accepting clients beyond loopback.
+  mkExposed =
+    overrides:
+    mkSystem {
+      vllm = nativeVllm // {
+        models.test = {
+          model = "example/test";
+          host = "0.0.0.0";
+          port = 26001;
+        }
+        // overrides;
+      };
+    };
+  exposed = mkExposed { };
+  exposedWorker = exposed.systemd.services.vllm-test;
+
   managed =
     (mkSystem {
       vllm = nativeVllm // {
@@ -352,14 +368,19 @@ let
       };
     };
     offlineOnPort = {
-      needle = "with `offline = true`";
+      needle = "sets `offline = true`";
       count = 1;
       system = mkQuadlet { models.test.offline = true; };
     };
     offlineOnSocket = {
-      needle = "with `offline = true`";
+      needle = "sets `offline = true`";
       count = 0;
       system = mkQuadlet { models.test.port = null; };
+    };
+    offlineBeyondLoopback = {
+      needle = "sets `offline = true`";
+      count = 1;
+      system = mkExposed { offline = true; };
     };
     offlineWithoutFetch = {
       needle = "downloads its repositories itself";
@@ -727,18 +748,51 @@ let
       expected = lib.mapAttrs (_: case: case.count) assertionCases;
     };
 
-    # A container needs the network for its published port, while a socket
-    # or a native server runs offline by default.
+    # A container's published port or a native port beyond loopback needs
+    # the network, while a socket or a native loopback port runs offline by
+    # default.
     testOfflineDefault = {
       expr = {
         container = quadlet.services.llmhop.vllm.models.test.offline;
         containerSocket = sockets.services.llmhop.llama-cpp.models.b.offline;
         native = native.services.llmhop.vllm.models.test.offline;
+        nativeExposed = exposed.services.llmhop.vllm.models.test.offline;
       };
       expected = {
         container = false;
         containerSocket = true;
         native = true;
+        nativeExposed = false;
+      };
+    };
+
+    # An offline native server is isolated and starts without the network,
+    # which an online one waits for.
+    testOfflineNetwork = {
+      expr =
+        lib.mapAttrs
+          (_: worker: {
+            online = lib.elem "network-online.target" worker.wants;
+            isolated = worker.serviceConfig ? PrivateNetwork || worker.serviceConfig ? IPAddressDeny;
+          })
+          {
+            loopback = nativeWorker;
+            socket = sockets.systemd.services.vllm-test;
+            exposed = exposedWorker;
+          };
+      expected = {
+        loopback = {
+          online = false;
+          isolated = true;
+        };
+        socket = {
+          online = false;
+          isolated = true;
+        };
+        exposed = {
+          online = true;
+          isolated = false;
+        };
       };
     };
 

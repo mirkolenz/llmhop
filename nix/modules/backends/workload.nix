@@ -127,6 +127,25 @@ rec {
           default = listener;
           description = "The `host`, `port` and `socket` the server binds, in its container if any.";
         };
+        exposed = mkOption {
+          type = types.bool;
+          internal = true;
+          readOnly = true;
+          default = config.socket == null && !util.isLoopback config.host;
+          description = "Whether the server is reachable beyond loopback.";
+        };
+        # See "Offline servers" in the module internals documentation.
+        isolable = mkOption {
+          type = types.bool;
+          internal = true;
+          readOnly = true;
+          default = config.socket != null || runtime == "native" && !config.exposed;
+          description = ''
+            Whether the server can run without network: on its socket, or
+            natively on a loopback port behind an IP address filter, while a
+            container's published port needs a network.
+          '';
+        };
         command = mkOption {
           type = with types; listOf (either str package);
           internal = true;
@@ -208,8 +227,7 @@ rec {
           example = "0.0.0.0";
           description = ''
             IP address the server binds `port` to. Any but `127.0.0.1` or
-            `::1` requires that no gateway routes it, and lifts the IP address
-            filter of an `offline` native server.
+            `::1` requires that no gateway routes it and `offline = false`.
           '';
         };
         openFirewall = mkOption {
@@ -242,15 +260,13 @@ rec {
         credentials = util.credentialsOption;
         offline = mkOption {
           type = types.bool;
-          # `Network=none` rules out a published port.
-          default = fetch && (runtime == "native" || config.socket != null);
-          defaultText = lib.literalMD "`false` without the backend's `fetch.enable`, else `true` if its `runtime` is `\"native\"`, else whether `socket` is set";
+          default = fetch && config.isolable;
+          defaultText = lib.literalMD "`false` without the backend's `fetch.enable`, else whether `socket` is set or, if its `runtime` is `\"native\"`, `host` is loopback";
           description = ''
             Whether this ${noun}'s server runs without network access. Natively,
-            a socket gets a network namespace of its own and a `port` on
-            loopback an IP address filter, while one beyond loopback stays
-            online. A container runs with `Network=none`, which requires its
-            socket.
+            a socket gets a network namespace of its own and a `port` an IP
+            address filter, which requires a loopback `host`. A container runs
+            with `Network=none`, which requires its socket.
             Disable it for features that download at runtime, such as media URLs
             in requests.
             With the backend's `fetch.enable`, the server serves only what its

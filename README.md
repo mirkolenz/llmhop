@@ -210,7 +210,8 @@ A container backend can then also set `cache.directory = null`, keeping each cac
 Together they leave one unit per model, as in the bundle `packages.x86_64-linux.vllm-bundle` of [`nix/bundles/vllm.nix`](nix/bundles/vllm.nix).
 
 With fetchers, servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
-A native server on a socket gets no network at all and on a `port` only loopback, while a container gets `Network=none`, which needs a socket, so a container workload with a `port` defaults to `offline = false` and rejects `offline = true`.
+A native server on a socket gets no network at all and on a `port` only loopback, while a container gets `Network=none`.
+Only a socket or a native loopback `host` can be isolated like this, so any other workload defaults to `offline = false` and rejects `offline = true`.
 `offline = false` lifts the network restrictions for features like media URLs in requests.
 Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`, and are otherwise only pulled while missing, so a start needs no registry.
 

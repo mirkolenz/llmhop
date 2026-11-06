@@ -49,8 +49,7 @@ rec {
   # successful download triggers, which thereby finds the server still waiting
   # rather than restarting it.
   fetchOrder =
-    workload:
-    fetchServices workload ++ lib.optional workload.fetches "${refreshUnit workload}.service";
+    workload: fetchServices workload ++ lib.optional workload.fetches "${refreshUnit workload}.service";
 
   # The file of the hub cache of `workload` and the cache `name` and
   # `revision` of each of its repositories. huggingface_hub records the

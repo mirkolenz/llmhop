@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.1.1](https://github.com/mirkolenz/llmhop/compare/v3.1.0...v3.1.1) (2026-11-09)
+
+### Bug Fixes
+
+* **nixos:** add native.devices to confine native model units ([8da0e7e](https://github.com/mirkolenz/llmhop/commit/8da0e7eee7d78776ec5234353648807ac9222961))
+
 ## [3.1.0](https://github.com/mirkolenz/llmhop/compare/v3.0.0...v3.1.0) (2026-11-06)
 
 ### ⚠ BREAKING CHANGES

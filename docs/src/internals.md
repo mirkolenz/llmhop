@@ -18,6 +18,8 @@ The baseline denies binding IP sockets with `SocketBindDeny = "any"`, which a wo
 ### GPU relaxations
 
 - `PrivateDevices = false` and the `render` and `video` groups give access to the CUDA, ROCm and Level Zero device nodes.
+  A model's `native.devices` narrows it with `DevicePolicy = "closed"` and `DeviceAllow`.
+  CUDA needs `/dev/nvidiactl` and `char-nvidia-uvm` beside each `/dev/nvidia<N>`, ROCm `/dev/kfd` beside each `/dev/dri/renderD<N>`, and Level Zero only the latter.
 - `PrivateUsers = "identity"`, since `true` would map those groups to `nobody`.
 - `MemoryDenyWriteExecute = false` for the JIT compilers of torch, triton, CUDA and SYCL.
 - `LimitMEMLOCK = "infinity"`, since every stack pins host buffers and the default 8 MiB reports OOM.

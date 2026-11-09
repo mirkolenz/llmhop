@@ -195,8 +195,24 @@ in
           Whether to start model services one at a time by ascending `name`,
           so two workers profiling memory on the same GPU do not race into an
           OOM. Disable only when each model pins itself to a dedicated device,
-          natively via `environment`, e.g. `CUDA_VISIBLE_DEVICES`, or in a
-          container via its own `container.devices`.
+          natively via its own `native.devices` or `environment`, e.g.
+          `CUDA_VISIBLE_DEVICES`, or in a container via its own
+          `container.devices`.
+        '';
+      };
+      native.devices = mkOption {
+        type = with types; nullOr (listOf str);
+        default = null;
+        example = [
+          "/dev/nvidiactl"
+          "char-nvidia-uvm"
+          "/dev/nvidia0"
+        ];
+        description = ''
+          Devices every model service may access as systemd `DeviceAllow=`
+          entries under `DevicePolicy=closed`, while `null` allows all.
+          Per-model `native.devices` replaces it.
+          Only used if `runtime` is `"native"`.
         '';
       };
       container = {
@@ -275,6 +291,13 @@ in
                       just-released architecture.
                       Only used if the backend's `runtime` is `"native"`.
                     '';
+                  };
+                  native.devices = mkOption {
+                    type = with types; nullOr (listOf str);
+                    default = cfg.native.devices;
+                    defaultText = lib.literalExpression "config.${owner}.native.devices";
+                    example = [ "/dev/nvidia0" ];
+                    description = "Devices this model's service may access, replacing the backend's `native.devices`. Only used if the backend's `runtime` is `\"native\"`.";
                   };
                   container = {
                     devices = mkOption {

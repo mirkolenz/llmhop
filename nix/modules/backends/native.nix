@@ -71,6 +71,10 @@ let
             TasksMax = 4096;
             StateDirectory = "${name}/${workload.name}";
             WorkingDirectory = "/var/lib/${name}/${workload.name}";
+          }
+          // lib.optionalAttrs (workload.native.devices != null) {
+            DevicePolicy = "closed";
+            DeviceAllow = workload.native.devices;
           };
       # Offline, a socket's own network namespace, or else loopback only, which
       # `isolable` guarantees the port is bound to. Not `localhost`, whose

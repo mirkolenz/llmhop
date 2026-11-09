@@ -130,6 +130,7 @@ let
           model = "example/test";
           revision = "v1";
           port = 21001;
+          native.devices = [ "/dev/nvidia0" ];
           credentials.api-keys = apiKeys;
           environment.API_KEY_FILE = "\${cred:api-keys}";
         };
@@ -543,6 +544,8 @@ let
         state = nativeDetector.serviceConfig ? StateDirectory;
         devices = nativeDetector.serviceConfig.PrivateDevices;
         modelDevices = nativeWorker.serviceConfig.PrivateDevices;
+        modelDeviceAllow = nativeWorker.serviceConfig.DeviceAllow;
+        localDevicePolicy = native.systemd.services.vllm-local.serviceConfig ? DevicePolicy;
         containerModelDevices = quadletWorker.containerConfig.AddDevice;
         containerDetectorDevices = quadletDetector.containerConfig ? AddDevice;
         detectorAfterModel = lib.elem "vllm-marked.service" nativeDetector.after;
@@ -566,6 +569,8 @@ let
         state = false;
         devices = true;
         modelDevices = false;
+        modelDeviceAllow = [ "/dev/nvidia0" ];
+        localDevicePolicy = false;
         containerModelDevices = [ "nvidia.com/gpu=0" ];
         containerDetectorDevices = false;
         detectorAfterModel = false;

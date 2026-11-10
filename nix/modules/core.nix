@@ -17,10 +17,7 @@ let
   };
 in
 {
-  meta = {
-    maintainers = with lib.maintainers; [ mirkolenz ];
-    doc = ../../docs/src/internals.md;
-  };
+  meta.maintainers = with lib.maintainers; [ mirkolenz ];
 
   options.services.llmhop = {
     version = lib.mkOption {

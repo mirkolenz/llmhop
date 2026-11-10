@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.1.2](https://github.com/mirkolenz/llmhop/compare/v3.1.1...v3.1.2) (2026-11-10)
+
+### Bug Fixes
+
+* **nixos:** keep module docs out of the manual ([e2ae20e](https://github.com/mirkolenz/llmhop/commit/e2ae20ea26332a4ac85e0456ed07bf86b0c8bb28))
+
 ## [3.1.1](https://github.com/mirkolenz/llmhop/compare/v3.1.0...v3.1.1) (2026-11-09)
 
 ### Bug Fixes

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httptrace"
 	"net/http/httputil"
@@ -22,6 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 	"github.com/mirkolenz/llmhop/internal/upstream"
@@ -54,7 +57,7 @@ func New(cfg *config.Config) (*Router, error) {
 
 	mux := http.NewServeMux()
 	registerModels(mux, listed)
-	proxy := proxyHandler(backends, cfg.MaxBodyBytes, newBudget(cfg.MaxBufferedBytes))
+	proxy := proxyHandler(backends, cfg.MaxBodyBytes, newSemaphore(cfg.MaxBufferedBytes))
 	mux.Handle("/", proxy)
 
 	// Health and readiness sit outside the auth middleware: probes and
@@ -94,8 +97,8 @@ type backend struct {
 	// outside the header map.
 	host   string
 	health string
-	// slots bounds the active proxied requests, nil means unlimited.
-	slots chan struct{}
+	// slots bounds the active proxied requests.
+	slots *semaphore.Weighted
 	proxy *httputil.ReverseProxy
 }
 
@@ -115,7 +118,7 @@ func newBackend(m config.Model) (*backend, error) {
 		headers: headers,
 		host:    headers.Get("Host"),
 		health:  m.HealthPath,
-		slots:   newSlots(m.MaxConcurrentRequests),
+		slots:   newSemaphore(int64(m.MaxConcurrentRequests)),
 	}
 	headers.Del("Host")
 
@@ -154,30 +157,22 @@ const routePrefix = "/route/"
 // so a slow client cannot hold buffered bytes for long.
 const bodyTimeout = time.Minute
 
-// newSlots returns a semaphore of n slots, nil for unlimited.
-func newSlots(n uint) chan struct{} {
-	if n == 0 {
-		return nil
-	}
-
-	return make(chan struct{}, n)
+// newSemaphore returns a semaphore of size n, where zero means unlimited.
+func newSemaphore(n int64) *semaphore.Weighted {
+	return semaphore.NewWeighted(cmp.Or(n, math.MaxInt64))
 }
 
-// acquire takes a slot and returns its release, or rejects the request with
-// 429 and reports false once all are taken.
-func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
-	if slots == nil {
-		return func() {}, true
+// acquire takes a slot, or rejects the request with 429 and reports false
+// once all are taken.
+func acquire(w http.ResponseWriter, slots *semaphore.Weighted) bool {
+	if slots.TryAcquire(1) {
+		return true
 	}
 
-	select {
-	case slots <- struct{}{}:
-		return func() { <-slots }, true
-	default:
-		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusTooManyRequests, "too_many_requests", "too many concurrent requests for this model")
-		return nil, false
-	}
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusTooManyRequests, "too_many_requests", "too many concurrent requests for this model")
+
+	return false
 }
 
 // proxyHandler forwards each request to the backend named by its
@@ -186,7 +181,7 @@ func acquire(w http.ResponseWriter, slots chan struct{}) (func(), bool) {
 // the `buffered` budget until the backend starts its response.
 // The per-model concurrency limit applies only once the backend is resolved,
 // so a saturated model never blocks requests to another.
-func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *budget) http.HandlerFunc {
+func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *semaphore.Weighted) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 {
 			if req.ContentLength > maxBytes {
@@ -219,12 +214,11 @@ func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *budget
 			return
 		}
 
-		release, ok := acquire(w, b.slots)
-		if !ok {
+		if !acquire(w, b.slots) {
 			return
 		}
 
-		defer release()
+		defer b.slots.Release(1)
 
 		b.proxy.ServeHTTP(w, req)
 	}
@@ -257,11 +251,11 @@ func routeModel(backends map[string]*backend, u *url.URL) (string, *backend, boo
 // of its budget, or writes an error response and reports false.
 //
 // Full buffering validates the entire JSON body before forwarding.
-func bodyModel(w http.ResponseWriter, req *http.Request, buffered *budget) (_ *http.Request, model string, release func(), ok bool) {
+func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted) (_ *http.Request, model string, release func(), ok bool) {
 	charged := &chargedReader{r: req.Body, budget: buffered}
 	defer func() {
 		if !ok {
-			buffered.give(charged.n)
+			buffered.Release(charged.n)
 		}
 	}()
 
@@ -295,7 +289,7 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *budget) (_ *h
 		return nil, "", nil, false
 	}
 
-	rb := newReplayBody(body, func() { buffered.give(charged.n) })
+	rb := newReplayBody(body, func() { buffered.Release(charged.n) })
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotFirstResponseByte: rb.drop,
 	}))
@@ -325,62 +319,21 @@ func readBody(w http.ResponseWriter, body io.Reader) ([]byte, error) {
 	return data, err
 }
 
-// budget bounds the bytes of buffered bodies held at once, so any number of
-// small requests buffer in parallel while large ones cannot exhaust memory.
-// A nil budget is unlimited.
-type budget struct {
-	free atomic.Int64
-}
-
-func newBudget(n int64) *budget {
-	if n == 0 {
-		return nil
-	}
-
-	b := &budget{}
-	b.free.Store(n)
-
-	return b
-}
-
-// take reserves n bytes, or reports false if fewer are free.
-func (b *budget) take(n int64) bool {
-	if b == nil {
-		return true
-	}
-
-	for {
-		free := b.free.Load()
-		if free < n {
-			return false
-		}
-
-		if b.free.CompareAndSwap(free, free-n) {
-			return true
-		}
-	}
-}
-
-func (b *budget) give(n int64) {
-	if b != nil {
-		b.free.Add(n)
-	}
-}
-
 var errBudgetExceeded = errors.New("buffered request bodies exceed their budget")
 
-// chargedReader takes every byte it reads from the budget, so a body is
-// charged only for the data that has arrived.
+// chargedReader takes every byte it reads from the budget of buffered bytes,
+// which bounds the bodies held at once, so a body is charged only for the
+// data that has arrived.
 type chargedReader struct {
 	r      io.Reader
-	budget *budget
+	budget *semaphore.Weighted
 	// n counts the bytes charged so far.
 	n int64
 }
 
 func (c *chargedReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	if !c.budget.take(int64(n)) {
+	if !c.budget.TryAcquire(int64(n)) {
 		return 0, errBudgetExceeded
 	}
 

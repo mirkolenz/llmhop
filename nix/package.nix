@@ -11,11 +11,15 @@ buildGoModule (finalAttrs: {
     root = ../.;
     fileset = lib.fileset.unions [
       ../go.mod
+      ../go.sum
       ../cmd
       ../internal
     ];
   };
-  vendorHash = null;
+  vendorHash = "sha256-RS6bdLfMwkITLwBANNIlhbt1XZ8cDTjYc8D3WzsZiRg=";
+  # Renames the module derivation per go.sum, so a stale vendorHash fails
+  # instead of silently reusing the cached modules of the old go.sum.
+  goSum = ../go.sum;
   ldflags = [ "-X main.version=${finalAttrs.version}" ];
   # Static, so a bundle runs it on any host.
   env.CGO_ENABLED = 0;
@@ -27,7 +31,7 @@ buildGoModule (finalAttrs: {
   # The router tests bind loopback listeners.
   __darwinAllowLocalNetworking = true;
   meta = {
-    description = "Tiny, stateless Go router that dispatches OpenAI-compatible requests to single-model vLLM and sglang backends with zero external dependencies";
+    description = "Tiny, stateless Go router that dispatches OpenAI-compatible requests to single-model vLLM and sglang backends";
     license = lib.licenses.mit;
     maintainers = with lib.maintainers; [ mirkolenz ];
     homepage = "https://github.com/mirkolenz/llmhop";

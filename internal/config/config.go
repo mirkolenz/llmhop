@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/mirkolenz/llmhop/internal/secrets"
 )
 
@@ -204,36 +206,46 @@ func (cfg *Config) validate(load bool) error {
 			return fmt.Errorf("models.%s: name must be non-empty without leading, trailing or empty path segments", name)
 		}
 
-		// Probes join the path onto the backend URL, so only a path works.
-		if model.HealthPath != "" && !validPath(model.HealthPath) {
-			return fmt.Errorf("models.%s.healthPath: %q must be an absolute path", name, model.HealthPath)
+		if err := model.validate(load); err != nil {
+			return fmt.Errorf("models.%s.%w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// validate checks m like Config.validate, expanding its header values in
+// place. Errors start with the field they concern.
+func (m Model) validate(load bool) error {
+	// Probes join the path onto the backend URL, so only a path works.
+	if m.HealthPath != "" && !validPath(m.HealthPath) {
+		return fmt.Errorf("healthPath: %q must be an absolute path", m.HealthPath)
+	}
+
+	seen := make(map[string]bool, len(m.Headers))
+
+	for header, value := range m.Headers {
+		if !httpguts.ValidHeaderFieldName(header) {
+			return fmt.Errorf("headers: invalid header name %q", header)
 		}
 
-		seen := make(map[string]bool, len(model.Headers))
-
-		for header, value := range model.Headers {
-			if !validHeaderName(header) {
-				return fmt.Errorf("models.%s.headers: invalid header name %q", name, header)
-			}
-
-			key := http.CanonicalHeaderKey(header)
-			if seen[key] {
-				return fmt.Errorf("models.%s.headers: duplicate header %q", name, key)
-			}
-
-			seen[key] = true
-
-			v, err := secrets.Expand(value, load)
-			if err == nil && !validHeaderValue(v) {
-				err = errors.New("invalid header value")
-			}
-
-			if err != nil {
-				return fmt.Errorf("models.%s.headers.%s: %w", name, header, err)
-			}
-
-			model.Headers[header] = v
+		key := http.CanonicalHeaderKey(header)
+		if seen[key] {
+			return fmt.Errorf("headers: duplicate header %q", key)
 		}
+
+		seen[key] = true
+
+		v, err := secrets.Expand(value, load)
+		if err == nil && !httpguts.ValidHeaderFieldValue(v) {
+			err = errors.New("invalid header value")
+		}
+
+		if err != nil {
+			return fmt.Errorf("headers.%s: %w", header, err)
+		}
+
+		m.Headers[header] = v
 	}
 
 	return nil
@@ -287,7 +299,7 @@ func (cfg *Config) loadAuthTokenCredentials(load bool) error {
 // validToken rejects an empty token, which would authenticate
 // `Authorization: Bearer `, and one that is no valid header value.
 func validToken(v string) bool {
-	return v != "" && validHeaderValue(v)
+	return v != "" && httpguts.ValidHeaderFieldValue(v)
 }
 
 // validModelName allows `/` for names such as `org/name`, but no empty segment.
@@ -299,32 +311,4 @@ func validPath(p string) bool {
 	u, err := url.Parse(p)
 
 	return err == nil && u.Scheme == "" && u.Host == "" && strings.HasPrefix(u.Path, "/")
-}
-
-func validHeaderName(name string) bool {
-	if name == "" {
-		return false
-	}
-
-	for i := range len(name) {
-		c := name[i]
-		if c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)) {
-			continue
-		}
-
-		return false
-	}
-
-	return true
-}
-
-func validHeaderValue(value string) bool {
-	for i := range len(value) {
-		c := value[i]
-		if c < ' ' && c != '\t' || c == 0x7f {
-			return false
-		}
-	}
-
-	return true
 }

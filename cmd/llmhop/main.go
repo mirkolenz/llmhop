@@ -11,12 +11,15 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"syscall"
+	"slices"
 	"time"
+
+	"github.com/coreos/go-systemd/v22/activation"
+	"github.com/coreos/go-systemd/v22/daemon"
+	"golang.org/x/sys/unix"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 	"github.com/mirkolenz/llmhop/internal/router"
-	"github.com/mirkolenz/llmhop/internal/systemd"
 )
 
 // version is set at build time through `-ldflags "-X main.version=..."`.
@@ -113,9 +116,14 @@ func load(args []string, expand bool) (*config.Config, *router.Router, error) {
 // listeners returns the sockets systemd passes, or else binds the `listen`
 // entries of the config. Exactly one of them must be present.
 func listeners(cfg *config.Config) ([]net.Listener, error) {
-	activated, err := systemd.Listeners()
+	activated, err := activation.Listeners()
 	if err != nil {
 		return nil, fmt.Errorf("socket activation: %w", err)
+	}
+
+	// Activation leaves nil in place of a descriptor that is no listener.
+	if slices.Contains(activated, nil) {
+		return nil, errors.New("socket activation: passed a descriptor that is no listening socket")
 	}
 
 	switch {
@@ -179,13 +187,13 @@ func serve(args []string) error {
 		log.Printf("listening on %s with %d model(s)", ln.Addr(), len(cfg.Models))
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), unix.SIGTERM, os.Interrupt)
 	defer stop()
 
 	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
+	signal.Notify(hup, unix.SIGHUP)
 
-	if err := systemd.Ready(); err != nil {
+	if err := notify(daemon.SdNotifyReady); err != nil {
 		return fmt.Errorf("sd_notify: %w", err)
 	}
 
@@ -219,11 +227,23 @@ func serve(args []string) error {
 	return nil
 }
 
+// notify sends state to systemd, a no-op outside it.
+func notify(state string) error {
+	_, err := daemon.SdNotify(false, state)
+
+	return err
+}
+
 // reload replaces the auth tokens of rt with those of the config at path,
 // keeping the current ones if it fails, between the RELOADING=1 and READY=1
 // a `Type=notify-reload` unit waits for. The other settings take a restart.
 func reload(path string, rt *router.Router) {
-	if err := systemd.Reloading(); err != nil {
+	// systemd ignores RELOADING=1 unless stamped no earlier than its request.
+	// Reading CLOCK_MONOTONIC cannot fail.
+	var now unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &now)
+
+	if err := notify(fmt.Sprintf("%s\nMONOTONIC_USEC=%d", daemon.SdNotifyReloading, now.Nano()/1_000)); err != nil {
 		log.Printf("sd_notify: %v", err)
 	}
 
@@ -234,7 +254,7 @@ func reload(path string, rt *router.Router) {
 		log.Printf("reload: %d auth token(s)", len(cfg.AuthTokens))
 	}
 
-	if err := systemd.Ready(); err != nil {
+	if err := notify(daemon.SdNotifyReady); err != nil {
 		log.Printf("sd_notify: %v", err)
 	}
 }

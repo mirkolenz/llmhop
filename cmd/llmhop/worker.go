@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 	"github.com/mirkolenz/llmhop/internal/hubcache"
@@ -52,7 +53,7 @@ func waitHealthy(args []string) error {
 		return err
 	}
 
-	for syscall.Kill(pid, 0) == nil {
+	for unix.Kill(pid, 0) == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := up.Probe(req.WithContext(ctx))
 		cancel()

@@ -356,7 +356,7 @@ func TestBodyLimit(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", c.body)
 			req.ContentLength = c.contentLength
 			rec := httptest.NewRecorder()
-			proxyHandler(nil, c.maxBytes, nil)(rec, req)
+			proxyHandler(nil, c.maxBytes, newSemaphore(0))(rec, req)
 
 			if rec.Code != c.wantCode {
 				t.Fatalf("got status %d, want %d", rec.Code, c.wantCode)

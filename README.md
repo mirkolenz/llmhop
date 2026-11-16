@@ -362,7 +362,7 @@ services.llmhop.vllm = {
 A key is an unsigned 64-bit integer credential, never entering the Nix store or a command line:
 
 ```sh
-(umask 077; printf '%u' "0x$(openssl rand -hex 8)" > /etc/credstore/vllm.watermark-key.2026-10)
+(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key.2026-10)
 ```
 
 A detector reports the most significant profile with its Bonferroni-corrected `p_value`, `score`, `num_scored_tokens` and `is_watermarked`.

@@ -61,7 +61,12 @@ func New(cfg *config.Config) (http.Handler, error) {
 	root := http.NewServeMux()
 	registerHealth(root, len(listed))
 	registerReadiness(root, backends)
-	root.Handle("/", authMiddleware(tokens, mux))
+	var handler http.Handler = mux
+	if cfg.RequiresAuth() {
+		handler = authMiddleware(tokens, mux)
+	}
+
+	root.Handle("/", handler)
 
 	return root, nil
 }
@@ -437,13 +442,8 @@ func proxyError(w http.ResponseWriter, _ *http.Request, err error) {
 }
 
 // authMiddleware gates next with the configured bearer tokens and strips the
-// client Authorization header before it reaches any backend. With no tokens
-// configured it is a no-op and the header is forwarded verbatim.
+// client Authorization header before it reaches any backend.
 func authMiddleware(tokens [][]byte, next http.Handler) http.Handler {
-	if len(tokens) == 0 {
-		return next
-	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if !checkBearer(req.Header.Get("Authorization"), tokens) {
 			w.Header().Set("WWW-Authenticate", "Bearer")

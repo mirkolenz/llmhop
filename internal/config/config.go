@@ -44,7 +44,11 @@ type Config struct {
 	MaxBufferedBytes int64 `json:"maxBufferedBytes,omitempty"`
 	// AuthTokens maps a token name to its secret.
 	AuthTokens map[string]string `json:"authTokens,omitempty"`
-	Models     map[string]Model  `json:"models"`
+	// AuthTokenCredentials is a systemd credential glob with a single trailing
+	// `*`, as in ImportCredential=, whose matches join AuthTokens at startup,
+	// each named by the part the `*` matched.
+	AuthTokenCredentials string           `json:"authTokenCredentials,omitempty"`
+	Models               map[string]Model `json:"models"`
 }
 
 // DefaultMaxBodyBytes bounds the size of a request body the router will buffer
@@ -70,6 +74,13 @@ func (cfg *Config) Listed() []string {
 	slices.Sort(names)
 
 	return names
+}
+
+// RequiresAuth reports whether every route but health and readiness needs a
+// bearer token. A credential glob requires one even while no credential
+// matches, so removing the last client locks the gateway instead of opening it.
+func (cfg *Config) RequiresAuth() bool {
+	return len(cfg.AuthTokens) > 0 || cfg.AuthTokenCredentials != ""
 }
 
 // ParseListen splits a `listen` entry into the network and address that
@@ -173,8 +184,7 @@ func (cfg *Config) validate(load bool) error {
 		}
 
 		v, err := secrets.Expand(token, load)
-		// An empty token would authenticate `Authorization: Bearer `.
-		if err == nil && (v == "" || !validHeaderValue(v)) {
+		if err == nil && !validToken(v) {
 			err = errors.New("empty or invalid token")
 		}
 
@@ -183,6 +193,10 @@ func (cfg *Config) validate(load bool) error {
 		}
 
 		cfg.AuthTokens[name] = v
+	}
+
+	if err := cfg.loadAuthTokenCredentials(load); err != nil {
+		return fmt.Errorf("authTokenCredentials: %w", err)
 	}
 
 	for name, model := range cfg.Models {
@@ -223,6 +237,57 @@ func (cfg *Config) validate(load bool) error {
 	}
 
 	return nil
+}
+
+// loadAuthTokenCredentials checks AuthTokenCredentials and, with load set,
+// adds the tokens of the credentials it matches to AuthTokens.
+func (cfg *Config) loadAuthTokenCredentials(load bool) error {
+	glob := cfg.AuthTokenCredentials
+	if glob == "" {
+		return nil
+	}
+
+	prefix, ok := strings.CutSuffix(glob, "*")
+	if !ok || strings.Contains(prefix, "*") {
+		return fmt.Errorf("%q must end with a single *", glob)
+	}
+
+	if err := secrets.CheckCredentialName(prefix); err != nil {
+		return err
+	}
+
+	if !load {
+		return nil
+	}
+
+	creds, err := secrets.Credentials(prefix)
+	if err != nil {
+		return err
+	}
+
+	if cfg.AuthTokens == nil {
+		cfg.AuthTokens = make(map[string]string, len(creds))
+	}
+
+	for name, token := range creds {
+		if _, ok := cfg.AuthTokens[name]; ok {
+			return fmt.Errorf("token %q is also in authTokens", name)
+		}
+
+		if !validToken(token) {
+			return fmt.Errorf("credential %q: empty or invalid token", prefix+name)
+		}
+
+		cfg.AuthTokens[name] = token
+	}
+
+	return nil
+}
+
+// validToken rejects an empty token, which would authenticate
+// `Authorization: Bearer `, and one that is no valid header value.
+func validToken(v string) bool {
+	return v != "" && validHeaderValue(v)
 }
 
 // validModelName allows `/` for names such as `org/name`, but no empty segment.

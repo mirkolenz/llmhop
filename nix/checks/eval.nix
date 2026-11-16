@@ -114,6 +114,28 @@ let
   quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-watermark;
   quadletFetcher = quadlet.virtualisation.quadlet.containers.vllm-test-fetch;
 
+  # Client tokens imported by glob, one clashing with another credential, and
+  # a gateway without endpoints to route.
+  tokenGateway =
+    credentials:
+    mkSystem {
+      gateway = {
+        type = "llmhop";
+        llmhop = {
+          inherit credentials;
+          settings.authTokenCredentials = "llmhop.token.*";
+        };
+      };
+      vllm = nativeVllm // {
+        models.test = {
+          model = "example/test";
+          port = 21101;
+        };
+      };
+    };
+  tokens = tokenGateway { };
+  idleGateway = mkSystem { gateway.type = "llmhop"; };
+
   # The VM test covers the native llama.cpp path end to end.
   native = mkSystem {
     gateway.type = "llmhop";
@@ -798,6 +820,21 @@ let
           online = true;
           isolated = false;
         };
+      };
+    };
+
+    testAuthTokenCredentials = {
+      expr = {
+        inherit (tokens.systemd.services.llmhop.serviceConfig) ImportCredential;
+        clash = failing "client token" (tokenGateway {
+          "llmhop.token.backend" = apiKeys;
+        });
+        idle = idleGateway.systemd.services ? llmhop;
+      };
+      expected = {
+        ImportCredential = [ "llmhop.token.*" ];
+        clash = 1;
+        idle = false;
       };
     };
 

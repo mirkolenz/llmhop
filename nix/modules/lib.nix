@@ -100,13 +100,16 @@ rec {
     default = { };
     # A credential name becomes a systemd credential ID, a plain file name
     # under `$CREDENTIALS_DIRECTORY`, so anything systemd would reject is
-    # caught here.
+    # caught here. An imported name may end in `*`, which systemd globs.
     apply = lib.mapAttrs (
       name: source:
-      if lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}" name != null then
+      if
+        lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}${lib.optionalString (source == null) "[*]?"}" name
+        != null
+      then
         source
       else
-        throw "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters."
+        throw "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters. Only an imported one may end in `*`."
     );
     example = lib.literalExpression ''
       {
@@ -118,7 +121,8 @@ rec {
       Credentials granted exclusively to this service. A path outside the
       Nix store is loaded with `LoadCredential=`, while `null` imports the
       credential of the same name from the system credential store with
-      `ImportCredential=`. Reference the read-only file from `settings` as
+      `ImportCredential=`, where a trailing `*` imports every credential
+      starting with the rest. Reference the read-only file from `settings` as
       `''${cred:<name>}`.
     '';
   };

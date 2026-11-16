@@ -52,8 +52,8 @@ func resolve(key string, load bool) (string, error) {
 
 	switch scheme {
 	case "cred":
-		if !filepath.IsLocal(arg) || filepath.Base(arg) != arg {
-			return "", fmt.Errorf("invalid credential name %q", arg)
+		if err := CheckCredentialName(arg); err != nil {
+			return "", err
 		}
 
 		read = readCredential
@@ -88,16 +88,69 @@ func lookupEnv(name string) (string, error) {
 	return v, nil
 }
 
+// CheckCredentialName rejects a credential name, or a prefix of one, that is
+// not a plain file name inside the credentials directory.
+func CheckCredentialName(name string) error {
+	if !filepath.IsLocal(name) || filepath.Base(name) != name {
+		return fmt.Errorf("invalid credential name %q", name)
+	}
+
+	return nil
+}
+
+// Credentials reads every systemd credential whose name starts with prefix,
+// keyed by the rest of its name.
+func Credentials(prefix string) (map[string]string, error) {
+	dir, err := credentialsDir()
+	if err != nil {
+		return nil, fmt.Errorf("credentials %q*: %w", prefix, err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read credentials: %w", err)
+	}
+
+	creds := make(map[string]string)
+
+	for _, entry := range entries {
+		name, ok := strings.CutPrefix(entry.Name(), prefix)
+		if !ok || name == "" || entry.IsDir() {
+			continue
+		}
+
+		v, err := readFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+
+		creds[name] = v
+	}
+
+	return creds, nil
+}
+
 // readCredential resolves the systemd credential called name. This is the same
 // reference the NixOS module rewrites at eval time for the model servers, which
 // receive a path because they read the file themselves; llmhop reads its own
 // config, so here the reference expands to the credential's contents.
 func readCredential(name string) (string, error) {
+	dir, err := credentialsDir()
+	if err != nil {
+		return "", fmt.Errorf("credential %q: %w", name, err)
+	}
+
+	return readFile(filepath.Join(dir, name))
+}
+
+// credentialsDir is the directory systemd exposes the unit's credentials in.
+func credentialsDir() (string, error) {
 	dir := os.Getenv(credentialsDirectory)
 	if dir == "" {
-		return "", fmt.Errorf("credential %q requested but $%s is not set", name, credentialsDirectory)
+		return "", fmt.Errorf("$%s is not set", credentialsDirectory)
 	}
-	return readFile(filepath.Join(dir, name))
+
+	return dir, nil
 }
 
 // readFile reads a secret from an absolute path and trims trailing line

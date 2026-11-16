@@ -231,6 +231,20 @@ func TestRouterRequests(t *testing.T) {
 	}
 }
 
+// A credential glob matching no credential locks the gateway instead of
+// opening it.
+func TestAuthRequiredWithoutTokens(t *testing.T) {
+	backend, _ := startBackend(t)
+	h := newRouter(t, &config.Config{
+		AuthTokenCredentials: "llmhop.token.*",
+		Models:               map[string]config.Model{"m": {URL: backend.URL}},
+	})
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model": "m"}`, "Bearer anything"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got status %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestProxyPreservesHostAndQuery(t *testing.T) {
 	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{Models: map[string]config.Model{

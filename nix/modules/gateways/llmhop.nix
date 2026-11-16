@@ -27,6 +27,10 @@ let
 
   containerConfigFile = "${util.containerRuntimeDirectory}/llmhop.json";
 
+  # The glob of credentials loaded as auth tokens, imported from the system
+  # credential store.
+  tokenCredentials = cfg.settings.authTokenCredentials or null;
+
   # The socket unit of the listener `listenerName`.
   socketUnit = listenerName: "llmhop-${listenerName}";
 
@@ -291,6 +295,19 @@ in
         ]
       ))
       (lib.mkIf (!native) { virtualisation.quadlet.bundle.sockets = socketUnits; })
+      (lib.mkIf (tokenCredentials != null) {
+        assertions = [
+          {
+            # Any other credential matching the glob would become a client token.
+            assertion = lib.all (
+              credential:
+              credential == tokenCredentials || !lib.hasPrefix (lib.removeSuffix "*" tokenCredentials) credential
+            ) (lib.attrNames cfg.credentials);
+            message = "services.llmhop: `${owner}.credentials` names a credential matching `settings.authTokenCredentials`, which would make it a client token.";
+          }
+        ];
+        services.llmhop.gateway.${name}.credentials.${tokenCredentials} = lib.mkDefault null;
+      })
     ]
   );
 }

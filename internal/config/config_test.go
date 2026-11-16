@@ -43,6 +43,29 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadAuthTokenCredentials(t *testing.T) {
+	dir := t.TempDir()
+	for name, token := range map[string]string{"llmhop.token.a": "secret-a\n", "other": "unrelated"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(token), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+
+	cfg, err := Load(writeConfig(t, `{
+		"authTokens": {"b": "plain-token"},
+		"authTokenCredentials": "llmhop.token.*",
+		"models": {"m": {"url": "http://x"}}
+	}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !maps.Equal(cfg.AuthTokens, map[string]string{"a": "secret-a", "b": "plain-token"}) {
+		t.Errorf("AuthTokens = %#v", cfg.AuthTokens)
+	}
+}
+
 // Loading without expansion backs `llmhop check`, which validates configs in
 // environments where the referenced secrets do not exist.
 func TestLoadKeepsSecretReferences(t *testing.T) {
@@ -73,6 +96,7 @@ func TestLoadErrors(t *testing.T) {
 		{"out of range port", `{"listen": [":65536"], "models": {"m": {"url": "http://x"}}}`, "listen"},
 		{"missing port", `{"listen": ["localhost"], "models": {"m": {"url": "http://x"}}}`, "listen"},
 		{"relative socket", `{"listen": ["unix://run/x.sock"], "models": {"m": {"url": "http://x"}}}`, "listen"},
+		{"inner glob", `{"authTokenCredentials": "llmhop.token.**", "models": {"m": {"url": "http://x"}}}`, "single *"},
 		{"empty token name", `{"authTokens": {"": "x"}, "models": {"m": {"url": "http://x"}}}`, "name must not be empty"},
 		{"trailing slash model", `{"models": {"org/": {"url": "http://x"}}}`, "models.org/"},
 		{"empty model segment", `{"models": {"a//b": {"url": "http://x"}}}`, "models.a//b"},

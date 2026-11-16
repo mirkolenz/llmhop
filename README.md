@@ -138,7 +138,8 @@ SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`
   The `default` listener serves `127.0.0.1:8080` and `environment` and `environmentFile` are forwarded to the service.
   Its generated config is validated at build time with `llmhop check`.
   Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
-  `settings.authTokenCredentials = "llmhop.token.*"` imports the tokens of `/etc/credstore/llmhop.token.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file and restarting llmhop.
+  `settings.authTokenCredentials = "llmhop.token.*"` imports the tokens of `/etc/credstore/llmhop.token.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file.
+  Natively, `systemctl reload llmhop` then re-imports the credentials and swaps the tokens without a restart, while a container needs `systemctl restart llmhop`, whose sockets hold new connections meanwhile.
 - **SMG** reads its workers from a generated discovery file. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
 - **Bifrost** gets every model as a key of its `vllm` provider, or `sgl` for SGLang. `settings` is its `config.json`, with secrets as `env.NAME` references loaded from `environmentFile`. The native `package` comes from Bifrost's own flake.
 

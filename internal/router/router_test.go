@@ -42,7 +42,7 @@ func startBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
 	return srv, captured
 }
 
-func newRouter(t *testing.T, cfg *config.Config) http.Handler {
+func newRouter(t *testing.T, cfg *config.Config) *Router {
 	t.Helper()
 	h, err := New(cfg)
 	if err != nil {
@@ -242,6 +242,24 @@ func TestAuthRequiredWithoutTokens(t *testing.T) {
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model": "m"}`, "Bearer anything"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("got status %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestSetTokens(t *testing.T) {
+	backend, _ := startBackend(t)
+	cfg := &config.Config{
+		AuthTokens: map[string]string{"old": "alpha"},
+		Models:     map[string]config.Model{"m": {URL: backend.URL}},
+	}
+	r := newRouter(t, cfg)
+
+	cfg.AuthTokens = map[string]string{"new": "beta"}
+	r.SetTokens(cfg)
+
+	for token, want := range map[string]int{"alpha": http.StatusUnauthorized, "beta": http.StatusOK} {
+		if rec := send(t, r, http.MethodPost, "/", `{"model": "m"}`, "Bearer "+token); rec.Code != want {
+			t.Errorf("token %s: got status %d, want %d", token, rec.Code, want)
+		}
 	}
 }
 

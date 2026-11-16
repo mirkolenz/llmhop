@@ -27,12 +27,18 @@ import (
 	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
-// New returns an http.Handler that serves the OpenAI models API from the
-// configured models and proxies every other request to the backend named by
-// its /route/{model} path prefix or else its JSON "model" field, all guarded
-// by the configured auth tokens. Only GET /health and GET /readiness are
+// Router serves the OpenAI models API from the configured models and proxies
+// every other request to the backend named by its /route/{model} path prefix
+// or else its JSON "model" field, all guarded by the auth tokens, which
+// SetTokens swaps while serving. Only GET /health and GET /readiness are
 // served unauthenticated.
-func New(cfg *config.Config) (http.Handler, error) {
+type Router struct {
+	http.Handler
+	tokens atomic.Pointer[[][]byte]
+}
+
+// New returns the Router of cfg.
+func New(cfg *config.Config) (*Router, error) {
 	backends := make(map[string]*backend, len(cfg.Models))
 	for name, m := range cfg.Models {
 		b, err := newBackend(m)
@@ -41,11 +47,6 @@ func New(cfg *config.Config) (http.Handler, error) {
 		}
 
 		backends[name] = b
-	}
-
-	tokens := make([][]byte, 0, len(cfg.AuthTokens))
-	for _, t := range cfg.AuthTokens {
-		tokens = append(tokens, []byte(t))
 	}
 
 	// Shared, so both endpoints reporting the catalog agree on it.
@@ -61,14 +62,28 @@ func New(cfg *config.Config) (http.Handler, error) {
 	root := http.NewServeMux()
 	registerHealth(root, len(listed))
 	registerReadiness(root, backends)
-	var handler http.Handler = mux
+
+	r := &Router{Handler: root}
+	r.SetTokens(cfg)
+
+	// Whether tokens are required depends on settings only a restart changes.
 	if cfg.RequiresAuth() {
-		handler = authMiddleware(tokens, mux)
+		root.Handle("/", r.authenticate(mux))
+	} else {
+		root.Handle("/", mux)
 	}
 
-	root.Handle("/", handler)
+	return r, nil
+}
 
-	return root, nil
+// SetTokens replaces the auth tokens with those of cfg, also while serving.
+func (r *Router) SetTokens(cfg *config.Config) {
+	tokens := make([][]byte, 0, len(cfg.AuthTokens))
+	for _, t := range cfg.AuthTokens {
+		tokens = append(tokens, []byte(t))
+	}
+
+	r.tokens.Store(&tokens)
 }
 
 // backend is a resolved model with the proxy and limits serving it.
@@ -441,11 +456,11 @@ func proxyError(w http.ResponseWriter, _ *http.Request, err error) {
 	writeError(w, http.StatusBadGateway, "bad_gateway", "backend unreachable")
 }
 
-// authMiddleware gates next with the configured bearer tokens and strips the
+// authenticate gates next with the current bearer tokens and strips the
 // client Authorization header before it reaches any backend.
-func authMiddleware(tokens [][]byte, next http.Handler) http.Handler {
+func (r *Router) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if !checkBearer(req.Header.Get("Authorization"), tokens) {
+		if !checkBearer(req.Header.Get("Authorization"), *r.tokens.Load()) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid bearer token")
 			return

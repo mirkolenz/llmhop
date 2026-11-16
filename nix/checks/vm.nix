@@ -194,7 +194,10 @@ testers.nixosTest {
           # Two sockets, so llmhop serves every descriptor systemd hands over.
           listen.local = { };
           credentials."llmhop.client-token" = null;
-          settings.authTokens.client = "\${cred:llmhop.client-token}";
+          settings = {
+            authTokens.client = "\${cred:llmhop.client-token}";
+            authTokenCredentials = "llmhop.token.*";
+          };
         };
       };
     };
@@ -202,6 +205,7 @@ testers.nixosTest {
 
   nodes.containers = {
     imports = [ self.nixosModules.default ];
+    environment.etc."credstore/llmhop.token.client" = secretFile "client-secret";
     virtualisation = {
       diskSize = 4096;
       quadlet.images.llama-cpp.imageConfig.ImageTag = "localhost/fake-llama:test";
@@ -218,7 +222,10 @@ testers.nixosTest {
           port = 18081;
         };
       };
-      gateway.type = "llmhop";
+      gateway = {
+        type = "llmhop";
+        llmhop.settings.authTokenCredentials = "llmhop.token.*";
+      };
     };
   };
 
@@ -228,6 +235,11 @@ testers.nixosTest {
     def curl(token=None):
         auth = f"-H 'Authorization: Bearer {token}'" if token else ""
         return f"""curl -fsS {auth} --json '{{"model": "fake-model"}}' http://127.0.0.1:8080/"""
+
+    def reload_tokens(node, script):
+        pid = node.get_unit_property("llmhop", "MainPID")
+        node.succeed(f"{script}; systemctl reload llmhop")
+        assert node.get_unit_property("llmhop", "MainPID") == pid
 
     def wait_restarted(node, unit, pid):
         node.wait_until_succeeds(f"systemctl is-active --quiet {unit} && test $(systemctl show -P MainPID {unit}) != {pid}")
@@ -267,12 +279,20 @@ testers.nixosTest {
     with subtest("llmhop reaches the worker through its socket"):
         assert machine.succeed(curl("client-secret")) == "socket ok"
 
+    with subtest("reloading llmhop imports added token credentials and drops deleted ones"):
+        machine.fail(curl("added-secret"))
+        reload_tokens(machine, "printf added-secret > /etc/credstore/llmhop.token.added")
+        assert machine.succeed(curl("added-secret")) == "socket ok"
+        reload_tokens(machine, "rm /etc/credstore/llmhop.token.added")
+        machine.fail(curl("added-secret"))
+        assert machine.succeed(curl("client-secret")) == "socket ok"
+
     containers.wait_for_unit("llmhop.service")
     containers.wait_for_unit("llama-cpp-fake-model.service")
 
     for node, request, backend in [
         (machine, curl("client-secret"), "llama-cpp"),
-        (containers, curl(), "llama-cpp"),
+        (containers, curl("client-secret"), "llama-cpp"),
     ]:
         worker = "llama-cpp-fake-model"
         cache = "/var/cache/llama-cpp/fake-model"
@@ -305,7 +325,7 @@ testers.nixosTest {
             pid = containers.get_unit_property(unit, "MainPID")
             containers.succeed(f"systemctl restart {image}")
             wait_restarted(containers, unit, pid)
-            assert containers.succeed(curl()) == "socket ok"
+            assert containers.succeed(curl("client-secret")) == "socket ok"
 
     with subtest("restarting images leaves explicitly stopped workers and gateways stopped"):
         containers.succeed("systemctl stop llama-cpp-fake-model llmhop")

@@ -92,7 +92,7 @@ func internal(args []string) error {
 // load builds the router of the config at the only argument, expanding its
 // secrets unless only checking. Checking builds the exact same router as
 // serving, so every startup error short of binding surfaces.
-func load(args []string, expand bool) (*config.Config, http.Handler, error) {
+func load(args []string, expand bool) (*config.Config, *router.Router, error) {
 	if len(args) != 1 {
 		return nil, nil, errors.New("expected exactly one argument: <config>")
 	}
@@ -102,12 +102,12 @@ func load(args []string, expand bool) (*config.Config, http.Handler, error) {
 		return nil, nil, fmt.Errorf("config: %w", err)
 	}
 
-	handler, err := router.New(cfg)
+	rt, err := router.New(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("router: %w", err)
 	}
 
-	return cfg, handler, nil
+	return cfg, rt, nil
 }
 
 // listeners returns the sockets systemd passes, or else binds the `listen`
@@ -154,9 +154,10 @@ func listeners(cfg *config.Config) ([]net.Listener, error) {
 	return lns, nil
 }
 
-// serve serves the router on its listeners until SIGTERM or an interrupt.
+// serve serves the router on its listeners until SIGTERM or an interrupt,
+// reloading the auth tokens on SIGHUP.
 func serve(args []string) error {
-	cfg, handler, err := load(args, true)
+	cfg, rt, err := load(args, true)
 	if err != nil {
 		return err
 	}
@@ -167,7 +168,7 @@ func serve(args []string) error {
 	}
 
 	srv := &http.Server{
-		Handler:           handler,
+		Handler:           rt,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Closes idle keep-alive connections, which would otherwise pin a
 		// goroutine and a file descriptor each indefinitely.
@@ -181,6 +182,9 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+
 	if err := systemd.Ready(); err != nil {
 		return fmt.Errorf("sd_notify: %w", err)
 	}
@@ -191,14 +195,20 @@ func serve(args []string) error {
 		go func() { errs <- srv.Serve(ln) }()
 	}
 
-	select {
-	case err := <-errs:
-		return err
-	case <-ctx.Done():
+	for ctx.Err() == nil {
+		select {
+		case err := <-errs:
+			return err
+		case <-hup:
+			reload(args[0], rt)
+		case <-ctx.Done():
+		}
 	}
 
-	// Restores default signal handling, so a second signal aborts the drain.
+	// Restores default signal handling, so a second signal aborts the drain,
+	// and ignores reloads meanwhile.
 	stop()
+	signal.Stop(hup)
 	log.Print("shutting down, draining in-flight requests")
 
 	// Unbounded on purpose, systemd's TimeoutStopSec caps the drain.
@@ -207,4 +217,24 @@ func serve(args []string) error {
 	}
 
 	return nil
+}
+
+// reload replaces the auth tokens of rt with those of the config at path,
+// keeping the current ones if it fails, between the RELOADING=1 and READY=1
+// a `Type=notify-reload` unit waits for. The other settings take a restart.
+func reload(path string, rt *router.Router) {
+	if err := systemd.Reloading(); err != nil {
+		log.Printf("sd_notify: %v", err)
+	}
+
+	if cfg, err := config.Load(path, true); err != nil {
+		log.Printf("reload: keeping the current auth tokens: config: %v", err)
+	} else {
+		rt.SetTokens(cfg)
+		log.Printf("reload: %d auth token(s)", len(cfg.AuthTokens))
+	}
+
+	if err := systemd.Ready(); err != nil {
+		log.Printf("sd_notify: %v", err)
+	}
 }

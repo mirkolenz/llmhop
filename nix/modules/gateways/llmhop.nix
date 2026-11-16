@@ -259,14 +259,16 @@ in
         # baseline for the sd_notify datagram and the worker sockets. Named,
         # not `DynamicUser`, so the sockets' ACL can grant this user alone.
         # Never give it a `RuntimeDirectory=` of `socketDirectory`: stopping
-        # llmhop would delete every socket. Its `Type=notify` pairs with the
-        # binary's sd_notify call: the unit reaches `active` only once llmhop
-        # serves, so anything ordered after it can assume it answers. The
-        # listeners arrive from `llmhop-<name>.socket`, so nothing is bound
-        # here.
+        # llmhop would delete every socket. Its `Type=notify-reload` pairs with
+        # the binary's sd_notify calls: the unit reaches `active` only once
+        # llmhop serves, so anything ordered after it can assume it answers,
+        # and a reload re-imports the credentials, then waits until llmhop
+        # reloaded its auth tokens. The listeners arrive from
+        # `llmhop-<name>.socket`, so nothing is bound here.
         serviceConfig = baseServiceConfig // {
           DynamicUser = false;
-          Type = "notify";
+          Type = "notify-reload";
+          RefreshOnReload = "credentials";
           Sockets = sockets;
           SystemCallFilter = baseServiceConfig.SystemCallFilter ++ [ "~@resources" ];
         };
@@ -280,7 +282,8 @@ in
           ];
           volumes = [ "${file}:${containerConfigFile}:ro" ];
           # Podman hands the sockets to the container, which pairs with the
-          # binary's sd_notify call as natively.
+          # binary's sd_notify call as natively. Its credential mount keeps the
+          # credentials of the start, so only a restart picks up new tokens.
           serviceConfig.Sockets = sockets;
           containerConfig.Notify = true;
         };

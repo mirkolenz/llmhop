@@ -7,10 +7,26 @@ import (
 	"strings"
 )
 
-// Ready sends READY=1 to the notification socket named by $NOTIFY_SOCKET,
-// telling a `Type=notify` unit that the listener is bound and the proxy is
-// servable. It is a no-op outside systemd, where the variable is unset.
+// Ready tells systemd that the listener is bound and the proxy is servable,
+// at startup and once a reload finished.
 func Ready() error {
+	return notify("READY=1")
+}
+
+// Reloading tells a `Type=notify-reload` unit that a reload started, stamped
+// with the monotonic clock systemd compares to the time it requested it.
+func Reloading() error {
+	state := "RELOADING=1"
+	if usec := monotonicUsec(); usec != 0 {
+		state += fmt.Sprintf("\nMONOTONIC_USEC=%d", usec)
+	}
+
+	return notify(state)
+}
+
+// notify sends state to the notification socket named by $NOTIFY_SOCKET.
+// It is a no-op outside systemd, where the variable is unset.
+func notify(state string) error {
 	addr := os.Getenv("NOTIFY_SOCKET")
 	if addr == "" {
 		return nil
@@ -27,7 +43,7 @@ func Ready() error {
 	}
 	defer func() { _ = conn.Close() }()
 
-	if _, err := conn.Write([]byte("READY=1")); err != nil {
+	if _, err := conn.Write([]byte(state)); err != nil {
 		return fmt.Errorf("write to %q: %w", addr, err)
 	}
 

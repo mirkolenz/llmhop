@@ -29,7 +29,6 @@
     ExposedPorts."8080/tcp" = { };
     Labels = {
       "org.opencontainers.image.source" = "https://github.com/mirkolenz/llmhop";
-      "org.opencontainers.image.licenses" = "MIT";
       "org.opencontainers.image.title" = "llmhop";
       "org.opencontainers.image.description" = llmhop.meta.description;
     };

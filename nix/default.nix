@@ -81,9 +81,12 @@ in
         llmhop = pkgs.callPackage ./package.nix { inherit version; };
         release-env = pkgs.buildEnv {
           name = "release-env";
-          paths = with pkgs; [
-            go
-            goreleaser
+          # The Go of the package, whose source holds the license of its
+          # standard library.
+          paths = [
+            config.packages.llmhop.go
+            pkgs.go-licenses
+            pkgs.goreleaser
           ];
         };
       }

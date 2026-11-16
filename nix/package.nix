@@ -1,5 +1,6 @@
 {
   buildGoLatestModule,
+  go-licenses,
   lib,
   nukeReferences,
   version ? "dev",
@@ -30,8 +31,20 @@ buildGoLatestModule (finalAttrs: {
   };
   # Nixpkgs' Go embeds store paths of optional data files such as tzdata,
   # which llmhop never reads, so a static binary may reference nothing.
-  nativeBuildInputs = [ nukeReferences ];
+  nativeBuildInputs = [
+    go-licenses
+    nukeReferences
+  ];
   postFixup = "nuke-refs $out/bin/llmhop";
+  # Saves what the licenses of the linked dependencies require alongside the
+  # binary, failing on a forbidden or unknown license, like .goreleaser.yaml.
+  # go-licenses skips the standard library, whose license is in the Go source.
+  postInstall = ''
+    licenses=$out/share/licenses/llmhop
+    go-licenses save ./cmd/llmhop --save_path $licenses --ignore github.com/mirkolenz/llmhop
+    mkdir $licenses/go
+    tar -xzf ${finalAttrs.passthru.go.src} -C $licenses/go --strip-components=1 go/LICENSE go/PATENTS
+  '';
   allowedReferences = [ ];
   # The router tests bind loopback listeners.
   __darwinAllowLocalNetworking = true;

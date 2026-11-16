@@ -5,6 +5,23 @@ env:
   - CGO_ENABLED=0
   # encoding/json/v2 is still behind an experiment.
   - GOEXPERIMENT=jsonv2
+before:
+  hooks:
+    # What the licenses of the linked dependencies require alongside the
+    # binary, like nix/package.nix.
+    - go-licenses save ./cmd/llmhop --save_path build/licenses --ignore github.com/mirkolenz/llmhop --force
+    # go-licenses skips the standard library, whose license is in the source
+    # of the Go that release-env provides.
+    - nix build .#llmhop.go.src --out-link build/go.tar.gz
+    - mkdir build/licenses/go
+    - tar -xzf build/go.tar.gz -C build/licenses/go --strip-components=1 go/LICENSE go/PATENTS
+archives:
+  - files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+      - src: build/licenses
+        dst: licenses
 builds:
   - main: ./cmd/llmhop
     binary: llmhop

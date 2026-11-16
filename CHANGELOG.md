@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.4](https://github.com/mirkolenz/llmhop/compare/v3.1.3...v3.1.4) (2026-11-16)
+
+### Bug Fixes
+
+* parse json strictly with encoding/json/v2 ([3c608e3](https://github.com/mirkolenz/llmhop/commit/3c608e31c9c017724ef310dedd48231c11fc92e6))
+* reload auth tokens on sighup ([1c35691](https://github.com/mirkolenz/llmhop/commit/1c35691f14bf237802b2f92389e56ab888dedd4b))
+
 ## [3.1.3](https://github.com/mirkolenz/llmhop/compare/v3.1.2...v3.1.3) (2026-11-16)
 
 ### Bug Fixes

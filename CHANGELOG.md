@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.3](https://github.com/mirkolenz/llmhop/compare/v3.1.2...v3.1.3) (2026-11-16)
+
+### Bug Fixes
+
+* load auth tokens from systemd credential glob ([780e3b9](https://github.com/mirkolenz/llmhop/commit/780e3b9a78369d9c3f9803345a8e24d088ef3bf6))
+* **nixos:** run gateway only with endpoints to route ([7f5e6c9](https://github.com/mirkolenz/llmhop/commit/7f5e6c9d8478987fe76d657a345ea01b9d3730f3))
+
 ## [3.1.2](https://github.com/mirkolenz/llmhop/compare/v3.1.1...v3.1.2) (2026-11-10)
 
 ### Bug Fixes

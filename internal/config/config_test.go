@@ -91,8 +91,8 @@ func TestLoadErrors(t *testing.T) {
 
 	cases := []struct{ name, body, wantErr string }{
 		{"requires models", `{"listen": [":8080"]}`, "no models"},
-		{"unknown field", `{"maxBodyByes": 4096, "models": {"m": {"url": "http://x"}}}`, "unknown field"},
-		{"trailing JSON", `{"models": {"m": {"url": "http://x"}}} {}`, "multiple JSON values"},
+		{"unknown field", `{"maxBodyByes": 4096, "models": {"m": {"url": "http://x"}}}`, "unknown object member name"},
+		{"trailing JSON", `{"models": {"m": {"url": "http://x"}}} {}`, "after top-level value"},
 		{"out of range port", `{"listen": [":65536"], "models": {"m": {"url": "http://x"}}}`, "listen"},
 		{"missing port", `{"listen": ["localhost"], "models": {"m": {"url": "http://x"}}}`, "listen"},
 		{"relative socket", `{"listen": ["unix://run/x.sock"], "models": {"m": {"url": "http://x"}}}`, "listen"},

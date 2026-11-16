@@ -1,10 +1,11 @@
 {
-  buildGoModule,
+  buildGoLatestModule,
   lib,
   nukeReferences,
   version ? "dev",
 }:
-buildGoModule (finalAttrs: {
+# The latest Go, since the default of a stable nixpkgs may predate go.mod.
+buildGoLatestModule (finalAttrs: {
   pname = "llmhop";
   inherit version;
   src = lib.fileset.toSource {
@@ -21,8 +22,12 @@ buildGoModule (finalAttrs: {
   # instead of silently reusing the cached modules of the old go.sum.
   goSum = ../go.sum;
   ldflags = [ "-X main.version=${finalAttrs.version}" ];
-  # Static, so a bundle runs it on any host.
-  env.CGO_ENABLED = 0;
+  env = {
+    # Static, so a bundle runs it on any host.
+    CGO_ENABLED = 0;
+    # encoding/json/v2 is still behind an experiment.
+    GOEXPERIMENT = "jsonv2";
+  };
   # Nixpkgs' Go embeds store paths of optional data files such as tzdata,
   # which llmhop never reads, so a static binary may reference nothing.
   nativeBuildInputs = [ nukeReferences ];

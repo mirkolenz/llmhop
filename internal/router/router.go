@@ -8,7 +8,7 @@ package router
 import (
 	"cmp"
 	"crypto/subtle"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -250,7 +250,8 @@ func routeModel(backends map[string]*backend, u *url.URL) (string, *backend, boo
 // field and returns the request carrying it as a replayBody with the release
 // of its budget, or writes an error response and reports false.
 //
-// Full buffering validates the entire JSON body before forwarding.
+// Full buffering validates the entire JSON body before forwarding, which
+// also rejects a duplicate "model" that a backend might resolve differently.
 func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted) (_ *http.Request, model string, release func(), ok bool) {
 	charged := &chargedReader{r: req.Body, budget: buffered}
 	defer func() {

@@ -1,11 +1,13 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 release:
   prerelease: auto
+env:
+  - CGO_ENABLED=0
+  # encoding/json/v2 is still behind an experiment.
+  - GOEXPERIMENT=jsonv2
 builds:
   - main: ./cmd/llmhop
     binary: llmhop
-    env:
-      - CGO_ENABLED=0
     # The hub cache and process checks rely on Unix APIs.
     goos:
       - linux

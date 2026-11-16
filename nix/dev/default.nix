@@ -71,6 +71,8 @@
         ];
       };
       devShells.default = pkgs.mkShell {
+        # encoding/json/v2 is still behind an experiment.
+        env.GOEXPERIMENT = "jsonv2";
         packages = with pkgs; [
           go
           goreleaser

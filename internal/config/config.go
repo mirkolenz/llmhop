@@ -3,10 +3,9 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -118,22 +117,7 @@ func DecodeFile(path string, v any) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	dec := json.NewDecoder(f)
-	dec.DisallowUnknownFields()
-
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-
-		return err
-	}
-
-	return nil
+	return json.UnmarshalRead(f, v, json.RejectUnknownMembers(true))
 }
 
 // Load reads, parses and validates the config at path. With expandSecrets it

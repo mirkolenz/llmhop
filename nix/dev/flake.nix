@@ -1,23 +1,26 @@
 {
   description = "Development inputs of llmhop, which stay out of consumers' lock files.";
   inputs = {
-    # Inputs named like those of the parent flake would replace them in the partition.
-    nixpkgs-lib.url = "github:nix-community/nixpkgs.lib";
+    # Replaces the nixpkgs of the parent flake in the partition, since `follows`
+    # cannot reach the parent's inputs. Keep it at the revision of ../../flake.lock.
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "";
     };
-    # With its own nixpkgs, which its fork of userborn needs.
+    # Its fork of userborn follows its nixpkgs, and with it ours.
     system-manager = {
       url = "github:numtide/system-manager";
-      inputs.flake-compat.follows = "";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        flake-compat.follows = "";
+      };
     };
-    # The overlay of flocken builds from our nixpkgs, so its own only needs `lib`.
     flocken = {
       url = "github:mirkolenz/flocken/v2";
       inputs = {
-        nixpkgs.follows = "nixpkgs-lib";
-        flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs-lib";
+        nixpkgs.follows = "nixpkgs";
+        flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
       };
     };
   };

@@ -3,7 +3,7 @@
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
-          "nixpkgs-lib"
+          "nixpkgs"
         ]
       },
       "locked": {
@@ -46,7 +46,7 @@
       "inputs": {
         "flake-parts": "flake-parts",
         "nixpkgs": [
-          "nixpkgs-lib"
+          "nixpkgs"
         ],
         "systems": "systems"
       },
@@ -90,32 +90,17 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1791048980,
-        "narHash": "sha256-KgItSKML8Xvte0B7/uGnBDsYzSnnKHcOaiUbgWBXLXw=",
-        "owner": "NixOS",
+        "lastModified": 1794537146,
+        "narHash": "sha256-Wpz/7x/YWnDIBu7yj6ixe8j6fIMsidd9Y+o1PqPF3iM=",
+        "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "a7868a727837f3c09cee2ce0ca671c76b1589fed",
+        "rev": "d5cc6833999746cffdfe0598f7bc801a57b887a9",
         "type": "github"
       },
       "original": {
-        "owner": "NixOS",
+        "owner": "nixos",
         "ref": "nixos-unstable",
         "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "nixpkgs-lib": {
-      "locked": {
-        "lastModified": 1794109015,
-        "narHash": "sha256-+yRdJkdTgJGZS9tpW4Tq8G40vBIcDL4Yvj/LlxffXzQ=",
-        "owner": "nix-community",
-        "repo": "nixpkgs.lib",
-        "rev": "ab7155c4be187820a150cc1762e0e5f1a8df90f1",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nix-community",
-        "repo": "nixpkgs.lib",
         "type": "github"
       }
     },
@@ -150,7 +135,7 @@
     "root": {
       "inputs": {
         "flocken": "flocken",
-        "nixpkgs-lib": "nixpkgs-lib",
+        "nixpkgs": "nixpkgs",
         "system-manager": "system-manager",
         "treefmt-nix": "treefmt-nix"
       }
@@ -158,15 +143,17 @@
     "system-manager": {
       "inputs": {
         "flake-compat": [],
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
         "userborn": "userborn"
       },
       "locked": {
-        "lastModified": 1793917754,
-        "narHash": "sha256-Gaaoat8QN6fa/Y/n7SV7vjHQjGJDDa4G92Rco8/xl8E=",
+        "lastModified": 1794675770,
+        "narHash": "sha256-CSYQ71PDu1ba18yrGo1XtxXUI5X1lR1M4fpqEPyVgWI=",
         "owner": "numtide",
         "repo": "system-manager",
-        "rev": "7dc61e113afa23d51ceb92feb186dc708297efb3",
+        "rev": "d6acd046a24810781d447346149fcf5f8a6a4813",
         "type": "github"
       },
       "original": {

@@ -87,6 +87,20 @@ in
           stay on loopback and leave authentication to the gateway.
         '';
       };
+
+      active = lib.mkOption {
+        type = lib.types.bool;
+        readOnly = true;
+        default = cfg.gateway.type != null && cfg.endpoints != { };
+        defaultText = lib.literalExpression "config.services.llmhop.gateway.type != null && config.services.llmhop.endpoints != { }";
+        description = ''
+          Whether the gateway of `type` runs, which needs at least one
+          endpoint, so a host whose backends are all disabled, such as a test
+          VM without GPUs, keeps its gateway config without running it. Units
+          relying on the gateway, such as clients joining its socket group,
+          can follow it.
+        '';
+      };
     };
 
     endpoints = lib.mkOption {

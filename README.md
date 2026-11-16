@@ -119,6 +119,7 @@ See the [options reference](https://mirkolenz.github.io/llmhop/) for every optio
 ### Gateways
 
 `services.llmhop.gateway.type` selects at most one gateway, configured by the option set of the same name, which routes every model of every backend by its `name`.
+The gateway runs only while some backend serves a model, which the read-only `services.llmhop.gateway.active` reports.
 
 | `type`      | Gateway                                                          | Unix sockets | Detectors |
 | ----------- | ---------------------------------------------------------------- | ------------ | --------- |

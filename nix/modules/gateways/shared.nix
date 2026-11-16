@@ -10,6 +10,10 @@ rec {
   # Option path of the gateway `name`, naming it in `services.llmhop.claims`.
   owner = name: "services.llmhop.gateway.${name}";
 
+  # Whether the gateway `name` is selected and has endpoints to route.
+  enabled =
+    config: name: config.services.llmhop.gateway.type == name && config.services.llmhop.gateway.active;
+
   # The endpoints an external gateway routes, in a stable order.
   listedEndpoints =
     config:

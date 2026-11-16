@@ -87,7 +87,7 @@ in
       };
     };
 
-  config = lib.mkIf (config.services.llmhop.gateway.type == name) (
+  config = lib.mkIf (gateway.enabled config name) (
     lib.mkMerge [
       (gateway.tcpConfig { inherit name cfg endpoints; })
       {

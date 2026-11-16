@@ -298,7 +298,7 @@ Native vLLM and SGLang run from upstream's wheels, pinned in a small [uv](https:
 [project]
 name = "vllm-env"
 requires-python = "==3.12.*"
-dependencies = [ "vllm==0.16.2" ]
+dependencies = ["vllm==0.16.2"]
 ```
 
 `mkUvEnv` builds against the lowest admitted Python and bakes the GPU driver runpath into the wheels, while the driver itself comes from `hardware.graphics` and your vendor configuration.
@@ -361,7 +361,7 @@ services.llmhop.vllm = {
 A key is an unsigned 64-bit integer credential, never entering the Nix store or a command line:
 
 ```sh
-(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key.2026-10)
+(umask 077; printf '%u' "0x$(openssl rand -hex 8)" > /etc/credstore/vllm.watermark-key.2026-10)
 ```
 
 A detector reports the most significant profile with its Bonferroni-corrected `p_value`, `score`, `num_scored_tokens` and `is_watermarked`.

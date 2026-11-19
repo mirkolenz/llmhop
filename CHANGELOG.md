@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.2.0](https://github.com/mirkolenz/llmhop/compare/v3.1.4...v3.2.0) (2026-11-19)
+
+### ⚠ BREAKING CHANGES
+
+* The string `url` changed to an array `urls`
+
+### Features
+
+* balance models over several urls and add aliases, limits and full reloads ([676e37b](https://github.com/mirkolenz/llmhop/commit/676e37b239f1c3d7fcd3d8c8a0275f7b86b0e4a8))
+* **nixos:** add llmhopctl to manage client tokens ([a1f9b4c](https://github.com/mirkolenz/llmhop/commit/a1f9b4cb173911d28c07e6b2110eea7cee77cc44))
+* **nixos:** add lora adapters and data-parallel size to models ([f138469](https://github.com/mirkolenz/llmhop/commit/f13846949f5444e64a8c7a33424aa8a2d4cac693))
+* **nixos:** reload native llmhop gateway when its config changes ([f9bbbdc](https://github.com/mirkolenz/llmhop/commit/f9bbbdc541400551bb919ba5072840314e5db374))
+
+### Bug Fixes
+
+* **nixos:** reject settings that override derived flags ([6b2e9be](https://github.com/mirkolenz/llmhop/commit/6b2e9be8c58eb3d998fc837edb084c5eddd19bbf))
+
 ## [3.1.4](https://github.com/mirkolenz/llmhop/compare/v3.1.3...v3.1.4) (2026-11-16)
 
 ### Bug Fixes

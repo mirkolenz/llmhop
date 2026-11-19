@@ -85,6 +85,7 @@ func lookupEnv(name string) (string, error) {
 	if !present {
 		return "", fmt.Errorf("env var %q not set", name)
 	}
+
 	return v, nil
 }
 

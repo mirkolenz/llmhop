@@ -17,6 +17,7 @@ func TestExpand(t *testing.T) {
 		if err := os.WriteFile(p, []byte(contents), 0o400); err != nil {
 			t.Fatal(err)
 		}
+
 		return "${file:" + p + "}"
 	}
 

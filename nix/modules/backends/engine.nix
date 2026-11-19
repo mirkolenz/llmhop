@@ -195,22 +195,36 @@ in
           Whether to start model services one at a time by ascending `name`,
           so two workers profiling memory on the same GPU do not race into an
           OOM. Disable only when each model pins itself to a dedicated device,
-          natively via its own `native.devices` or `environment`, e.g.
-          `CUDA_VISIBLE_DEVICES`, or in a container via its own
-          `container.devices`.
+          natively via its own `environment`, e.g. `CUDA_VISIBLE_DEVICES` with
+          GPU UUIDs, or in a container via its own `container.devices`.
         '';
       };
       native.devices = mkOption {
         type = with types; nullOr (listOf str);
-        default = null;
+        default =
+          if config.hardware.nvidia.enabled or false then
+            [
+              "char-nvidia"
+              "char-nvidiactl"
+              "char-nvidia-uvm"
+            ]
+          else
+            null;
+        defaultText = lib.literalExpression ''
+          if config.hardware.nvidia.enabled then [ "char-nvidia" "char-nvidiactl" "char-nvidia-uvm" ] else null
+        '';
         example = [
-          "/dev/nvidiactl"
-          "char-nvidia-uvm"
-          "/dev/nvidia0"
+          "/dev/kfd"
+          "char-drm"
         ];
         description = ''
           Devices every model service may access as systemd `DeviceAllow=`
           entries under `DevicePolicy=closed`, while `null` allows all.
+          Prefer device groups of `/proc/devices` such as `char-nvidia` over
+          nodes such as `/dev/nvidia0`, whose minor numbers follow probe order
+          and may change between boots.
+          A model's `environment`, e.g. `CUDA_VISIBLE_DEVICES` with GPU UUIDs,
+          then picks its GPUs.
           Per-model `native.devices` replaces it.
           Only used if `runtime` is `"native"`.
         '';
@@ -295,7 +309,10 @@ in
                     type = with types; nullOr (listOf str);
                     default = cfg.native.devices;
                     defaultText = lib.literalExpression "config.${owner}.native.devices";
-                    example = [ "/dev/nvidia0" ];
+                    example = [
+                      "/dev/kfd"
+                      "char-drm"
+                    ];
                     description = "Devices this model's service may access, replacing the backend's `native.devices`. Only used if the backend's `runtime` is `\"native\"`.";
                   };
                   container = {
@@ -303,8 +320,8 @@ in
                       type = with types; listOf str;
                       default = cfg.container.devices;
                       defaultText = lib.literalExpression "config.${owner}.container.devices";
-                      example = [ "nvidia.com/gpu=0" ];
-                      description = "Devices exposed to this model's container, replacing the backend's `container.devices`. Only used if the backend's `runtime` is `\"quadlet\"`.";
+                      example = [ "nvidia.com/gpu=GPU-8932f937-d72c-4106-c12f-20bd9faed9f6" ];
+                      description = "Devices exposed to this model's container, replacing the backend's `container.devices`. Prefer the UUID names of `hardware.nvidia-container-toolkit.device-name-strategy = \"uuid\"` over indices, which may change between boots. Only used if the backend's `runtime` is `\"quadlet\"`.";
                     };
                     shmSize = mkOption {
                       type = types.str;

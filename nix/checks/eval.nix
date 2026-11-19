@@ -45,15 +45,16 @@ let
       ];
     }).config.credentials;
 
-  # A minimal system with Quadlet and llmhop's modules.
-  mkSystem =
-    llmhopConfig:
+  # A minimal system with Quadlet, llmhop's modules and `module`.
+  mkSystemWith =
+    module:
     (mkBundleSystem {
       modules = [
         self.nixosModules.default
-        { services.llmhop = llmhopConfig; }
+        module
       ];
     }).config;
+  mkSystem = llmhopConfig: mkSystemWith { services.llmhop = llmhopConfig; };
 
   mkQuadlet =
     overrides:
@@ -152,7 +153,7 @@ let
           model = "example/test";
           revision = "v1";
           port = 21001;
-          native.devices = [ "/dev/nvidia0" ];
+          native.devices = [ "char-nvidia" ];
           credentials.api-keys = apiKeys;
           environment.API_KEY_FILE = "\${cred:api-keys}";
         };
@@ -179,6 +180,17 @@ let
   nativeRefresh = native.systemd.services.vllm-test-refresh;
   systemctl = lib.getExe' native.systemd.package "systemctl";
   nativeDetector = native.systemd.services.vllm-watermark;
+
+  # With the NVIDIA driver, models default to its device groups.
+  nvidia = mkSystemWith {
+    services.xserver.videoDrivers = [ "nvidia" ];
+    services.llmhop.vllm = nativeVllm // {
+      models.test = {
+        model = "example/test";
+        port = 21001;
+      };
+    };
+  };
 
   # Without a `port`, workers bind a unix socket below a custom root. `b`
   # sorts after `a` despite being declared first, so it is the one chained on
@@ -677,7 +689,7 @@ let
         state = false;
         devices = true;
         modelDevices = false;
-        modelDeviceAllow = [ "/dev/nvidia0" ];
+        modelDeviceAllow = [ "char-nvidia" ];
         localDevicePolicy = false;
         containerModelDevices = [ "nvidia.com/gpu=0" ];
         containerDetectorDevices = false;
@@ -973,6 +985,15 @@ let
         max-model-len = 4096;
         max-num-seqs = 8;
       };
+    };
+
+    testNvidiaDevices = {
+      expr = nvidia.systemd.services.vllm-test.serviceConfig.DeviceAllow;
+      expected = [
+        "char-nvidia"
+        "char-nvidiactl"
+        "char-nvidia-uvm"
+      ];
     };
   };
 

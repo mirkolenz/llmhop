@@ -197,10 +197,16 @@ rec {
   fetchers = lib.concatMap fetchServices workloads;
 
   # The routing key, the units and the port of a workload.
+  # Further names the server of `workload` serves, its LoRA adapters.
+  aliases = workload: lib.attrNames (workload.loras or { });
+
   workloadClaims =
     workload:
     {
-      model.${workload.name} = [ workload.owner ];
+      # Every LoRA adapter is a served name as well.
+      model = lib.genAttrs ([ workload.name ] ++ aliases workload) (_: [
+        workload.owner
+      ]);
       unit = {
         ${workload.unit} = [ workload.owner ];
       }

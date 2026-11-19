@@ -366,6 +366,9 @@ in
           unlisted = workload.kind == "detector";
           engine = name;
           url = util.probeUrl workload;
+          aliases = backend.aliases workload;
+          # Only ranks a request can be pinned to matter to a gateway.
+          dataParallelSize = if engine.rankHeader then workload.dataParallelSize or 1 else 1;
           # Reachable beyond loopback.
           inherit (workload) exposed;
         }
@@ -388,6 +391,10 @@ in
           }, which llmhop derives from the other options.";
         }
       ) workloads
+      ++ map (w: {
+        assertion = !lib.elem w.name (backend.aliases w);
+        message = "services.llmhop: `${w.owner}.loras` names an adapter `${w.name}` like the model itself.";
+      }) workloads
       ++ map (w: {
         assertion = w.offline -> w.isolable;
         message = "services.llmhop: `${w.owner}` sets `offline = true`, which needs its socket${lib.optionalString native " or a loopback `host`"}, so drop `port` or set `offline = false`.";

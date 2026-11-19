@@ -346,6 +346,31 @@ rec {
           '';
         };
       }
+      // lib.optionalAttrs (engine.dataParallelFlag != null) {
+        dataParallelSize = mkOption {
+          type = types.ints.between 1 256;
+          default = 1;
+          example = 2;
+          description = ''
+            Number of data-parallel ranks of the server, each a full copy of
+            the model on its own GPUs, rendered as `--${engine.dataParallelFlag}`
+            so that `settings` must not set it.
+            The server balances requests over its ranks${lib.optionalString engine.rankHeader ", while the llmhop gateway pins those of a conversation to one rank for its prefix cache"}.
+          '';
+        };
+      }
+      // lib.optionalAttrs engine.loras {
+        loras = mkOption {
+          type = with types; attrsOf str;
+          default = { };
+          example."qwen3-8b-sql" = "org/qwen3-8b-sql-lora";
+          description = ''
+            LoRA adapters served beside `model`, each a Hugging Face repository
+            by the model name clients request it under, which the fetcher
+            downloads and the llmhop and Bifrost gateways route to this model.
+          '';
+        };
+      }
       // lib.optionalAttrs engine.revisions {
         revision = mkOption {
           type = with types; nullOr str;
@@ -358,12 +383,22 @@ rec {
           '';
         };
       };
-      config.repositories =
-        lib.optional (util.isRepository config.model) {
-          repo = config.model;
-          revision = config.revision or null;
-        }
-        ++ map (repo: { inherit repo; }) config.extraRepositories
-        ++ requiredRepositories;
+      config = {
+        repositories =
+          lib.optional (util.isRepository config.model) {
+            repo = config.model;
+            revision = config.revision or null;
+          }
+          ++ map (repo: { inherit repo; }) (
+            config.extraRepositories ++ lib.optionals engine.loras (lib.attrValues config.loras)
+          )
+          ++ requiredRepositories;
+        # The default size of one stays off the command line, since SGLang
+        # may derive its size where none is given, but `settings` must not
+        # set it either way.
+        forcedSettings = lib.optionalAttrs (engine.dataParallelFlag != null) {
+          ${engine.dataParallelFlag} = if config.dataParallelSize > 1 then config.dataParallelSize else null;
+        };
+      };
     };
 }

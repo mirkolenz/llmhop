@@ -108,10 +108,11 @@ in
       default = { };
       internal = true;
       description = ''
-        Every workload by its `owner`, which gateways route by its `name`,
-        with its `engine`, its `url` on its port or socket, its `socket` or
-        null, whether it is `unlisted` and whether it is `exposed` beyond
-        loopback.
+        Every workload by its `owner`, which gateways route by its `name`
+        and its `aliases`, with its `engine`, its `url` on its port or socket,
+        its `socket` or null, the `dataParallelSize` ranks its server pins
+        a request to by the `X-data-parallel-rank` header, whether it is
+        `unlisted` and whether it is `exposed` beyond loopback.
       '';
     };
 

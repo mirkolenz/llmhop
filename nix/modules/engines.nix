@@ -2,7 +2,11 @@
 #
 # `negateBools` and `listStyle` describe how its parser reads booleans and
 # lists, see `renderCliArgs`. `socketSettings` renders the flags binding a unix
-# socket, or is null for a server that only listens on TCP. `fetch` renders the
+# socket, or is null for a server that only listens on TCP. `loras` tells
+# whether a model serves LoRA adapters under their own names, and
+# `dataParallelFlag` names the flag of the data-parallel size, or is null
+# without data parallelism, and `rankHeader` tells whether the server pins a
+# request to a rank by the `X-data-parallel-rank` header. `fetch` renders the
 # argv downloading one repository with the given `fetcher` into the hub cache
 # below `HF_HOME`. `modelSettings` are the flags derived from a model,
 # `offlineSettings` those of a server whose fetcher downloads for it, and
@@ -45,6 +49,9 @@ lib.mapAttrs (name: engine: engine // { inherit name; }) {
       port = null;
     };
     revisions = false;
+    loras = false;
+    dataParallelFlag = null;
+    rankHeader = false;
     environment = { };
     offlineSettings.offline = true;
     modelSettings =
@@ -92,14 +99,25 @@ lib.mapAttrs (name: engine: engine // { inherit name; }) {
       port = null;
     };
     revisions = true;
+    loras = true;
+    dataParallelFlag = "data-parallel-size";
+    rankHeader = true;
     # vLLM otherwise derives the address of its distributed workers from
     # the route to a public one, which an offline server lacks.
     environment.VLLM_HOST_IP = "127.0.0.1";
     offlineSettings = { };
-    modelSettings = model: {
-      served-model-name = model.name;
-      inherit (model) revision;
-    };
+    # vLLM resolves an adapter's repository in the hub cache, as the model.
+    modelSettings =
+      model:
+      {
+        served-model-name = model.name;
+        inherit (model) revision;
+      }
+      // lib.optionalAttrs (model.loras != { }) {
+        enable-lora = true;
+        # The JSON form takes any name, unlike `<name>=<path>`.
+        lora-modules = lib.mapAttrsToList (name: path: { inherit name path; }) model.loras;
+      };
     modelDescription = "Hugging Face repository passed to `vllm serve`, or an absolute path.";
     modelExample = "Qwen/Qwen2.5-7B-Instruct";
     fetch = hfDownload;
@@ -134,6 +152,9 @@ lib.mapAttrs (name: engine: engine // { inherit name; }) {
     listStyle = "values";
     socketSettings = null;
     revisions = true;
+    loras = false;
+    dataParallelFlag = "dp-size";
+    rankHeader = false;
     environment = { };
     offlineSettings = { };
     modelSettings = model: {

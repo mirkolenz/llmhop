@@ -242,6 +242,8 @@ let
           models.qwen = {
             model = "example/qwen";
             port = 24001;
+            loras.qwen-sql = "example/sql-lora";
+            dataParallelSize = 2;
           };
         };
         sglang = {
@@ -398,6 +400,78 @@ let
             model = "example/test";
             port = 25001;
             settings.served-model-name = "other";
+          };
+        };
+      };
+    };
+    # Nor do they under another spelling or at their default.
+    flagSpelling = {
+      needle = "`data_parallel_size`";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            settings.data_parallel_size = 2;
+          };
+        };
+      };
+    };
+    # Nor as the negation of a derived boolean, on every negating parser.
+    negatedVllmFlag = {
+      needle = "`no-enable-lora`";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            loras.sql = "example/sql-lora";
+            settings.no-enable-lora = true;
+          };
+        };
+      };
+    };
+    negatedLlamaCppFlag = {
+      needle = "`no-offline`";
+      count = 1;
+      system = mkSystem {
+        llama-cpp = {
+          enable = true;
+          runtime = "quadlet";
+          container.image = "ghcr.io/ggml-org/llama.cpp:server";
+          models.test = {
+            model = "example/test";
+            settings.no-offline = true;
+          };
+        };
+      };
+    };
+    # Without any gateway, an adapter clashing with another model fails.
+    loraClash = {
+      needle = "model `other` is claimed";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models = {
+            test = {
+              model = "example/test";
+              loras.other = "example/lora";
+            };
+            other.model = "example/other";
+          };
+        };
+      };
+    };
+    loraSelf = {
+      needle = "like the model itself";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.test = {
+            model = "example/test";
+            loras.test = "example/lora";
           };
         };
       };
@@ -732,11 +806,45 @@ let
       expected = {
         smg = true;
         bifrost = {
-          vllm = [ "qwen" ];
+          vllm = [
+            "qwen"
+            "qwen-sql"
+          ];
           sgl = [ "llama" ];
         };
       };
     };
+
+    # LoRA adapters are fetched, served by name and routed as aliases, and
+    # llmhop pins keyed requests to the data-parallel ranks.
+    testLora =
+      let
+        routed = mkRoutable { gateway.type = "llmhop"; };
+        qwen = routed.services.llmhop.vllm.models.qwen;
+      in
+      {
+        expr = {
+          inherit (qwen.effectiveSettings) enable-lora lora-modules data-parallel-size;
+          repositories = map (r: r.repo) qwen.repositories;
+          inherit (routed.services.llmhop.gateway.llmhop.settings.models.qwen) aliases dataParallelSize;
+        };
+        expected = {
+          enable-lora = true;
+          lora-modules = [
+            {
+              name = "qwen-sql";
+              path = "example/sql-lora";
+            }
+          ];
+          repositories = [
+            "example/qwen"
+            "example/sql-lora"
+          ];
+          aliases = [ "qwen-sql" ];
+          data-parallel-size = 2;
+          dataParallelSize = 2;
+        };
+      };
 
     # Both llmhop gateways receive their listeners as sockets, which is why
     # `settings` cannot bind any.

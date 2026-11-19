@@ -168,13 +168,13 @@ SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`
 
 - **llmhop** runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
   The `default` listener serves `127.0.0.1:8080` and `environment` and `environmentFile` are forwarded to the service.
-  Its generated config is validated at build time with `llmhop check`.
+  Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a vLLM model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
   Natively, a changed config reloads the gateway in place, without dropping a request.
   Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
   `settings.authTokenCredentials = "llmhop.token.*"` imports the tokens of `/etc/credstore/llmhop.token.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file.
   Natively, `systemctl reload llmhop` then re-imports the credentials and reloads the config without a restart, while a container needs `systemctl restart llmhop`, whose sockets hold new connections meanwhile.
-- **SMG** reads its workers from a generated discovery file. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
-- **Bifrost** gets every model as a key of its `vllm` provider, or `sgl` for SGLang. `settings` is its `config.json`, with secrets as `env.NAME` references loaded from `environmentFile`. The native `package` comes from Bifrost's own flake.
+- **SMG** reads its workers from a generated discovery file, which lists no LoRA adapters. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
+- **Bifrost** gets every model and LoRA adapter as a key of its `vllm` provider, or `sgl` for SGLang. `settings` is its `config.json`, with secrets as `env.NAME` references loaded from `environmentFile`. The native `package` comes from Bifrost's own flake.
 
 Without a gateway, each model serves clients on its own socket or `port`, and `socketClients` lists the users, such as a reverse proxy, that may connect to every model socket.
 
@@ -208,6 +208,19 @@ services.llmhop = {
   };
 };
 ```
+
+A vLLM model serves `loras`, LoRA adapters by the name clients request them under, which its fetcher downloads like `model`:
+
+```nix
+services.llmhop.vllm.models."qwen3-8b" = {
+  model = "Qwen/Qwen3-8B";
+  loras."qwen3-8b-sql" = "org/qwen3-8b-sql-lora";
+  settings.max-lora-rank = 64;
+};
+```
+
+Several GPUs serve one model faster as data-parallel ranks of one server, set by `dataParallelSize = 2` on a vLLM or SGLang model, than as separate models, since the server balances requests by its own load and cache state.
+vLLM then runs several API frontends by default, each storing the responses of the Responses API on its own, so stored responses need `settings.api-server-count = 1`.
 
 Each model runs as the unit `<engine>-<name>`.
 Native workers are hardened services running as the backend's `user`, which defaults to the engine name, while container workers run rootful, with `user` defaulting to `root`, through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) with the backend's `container.image`, managed with `quadletctl`.
@@ -254,7 +267,7 @@ Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.qu
 
 #### Settings rendering
 
-`settings`, over the backend's `modelSettings`, becomes the server's CLI flags beside those llmhop derives from the other options, such as the listener, the served name and `revision`, which `settings` must not set.
+`settings`, over the backend's `modelSettings`, becomes the server's CLI flags beside those llmhop derives from the other options, such as the listener, the served name, `revision`, `loras` and `dataParallelSize`, which `settings` must not set.
 Strings and paths are passed verbatim and everything else as JSON, so attribute sets work for options like `--speculative-config`.
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.

@@ -195,7 +195,7 @@ in
               endpoint:
               lib.nameValuePair endpoint.name {
                 urls = [ endpoint.url ];
-                inherit (endpoint) unlisted;
+                inherit (endpoint) unlisted aliases dataParallelSize;
                 inherit (util) healthPath;
               }
             );

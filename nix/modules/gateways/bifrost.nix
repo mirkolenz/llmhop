@@ -20,27 +20,31 @@ let
 
   # Bifrost has no llama.cpp provider, but its vLLM one serves any
   # OpenAI-compatible server and, like SGLang's, takes a URL per key, so each
-  # endpoint becomes one key of its engine's provider.
+  # name of an endpoint, its aliases included, becomes one key of its
+  # engine's provider.
   provider = e: if e.engine == "sglang" then "sgl" else "vllm";
-  key =
+  keys =
     e:
-    {
-      inherit (e) name;
-      value = "";
-      models = [ e.name ];
-      weight = 1;
-    }
-    // (
-      if provider e == "sgl" then
-        { sgl_key_config.url = e.url; }
-      else
-        {
-          vllm_key_config = {
-            inherit (e) url;
-            model_name = e.name;
-          };
-        }
-    );
+    map (
+      model:
+      {
+        name = model;
+        value = "";
+        models = [ model ];
+        weight = 1;
+      }
+      // (
+        if provider e == "sgl" then
+          { sgl_key_config.url = e.url; }
+        else
+          {
+            vllm_key_config = {
+              inherit (e) url;
+              model_name = model;
+            };
+          }
+      )
+    ) ([ e.name ] ++ e.aliases);
 
   configFile = (pkgs.formats.json { }).generate "bifrost-config.json" cfg.settings;
 in
@@ -93,7 +97,7 @@ in
       {
         services.llmhop.gateway.${name}.settings = {
           "$schema" = lib.mkDefault "https://www.getbifrost.ai/schema";
-          providers = lib.mapAttrs (_: endpoints: { keys = map key endpoints; }) (
+          providers = lib.mapAttrs (_: endpoints: { keys = lib.concatMap keys endpoints; }) (
             lib.groupBy provider endpoints
           );
         };

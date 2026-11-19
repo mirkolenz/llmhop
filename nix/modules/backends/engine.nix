@@ -270,7 +270,6 @@ in
               inherit (llmhop) socketDirectory;
               fetch = cfg.fetch.enable;
               kind = "model";
-              derivedSettings = engine.modelSettings;
               defaults = cfg.modelSettings;
             })
             (wl.modelModule {
@@ -319,6 +318,7 @@ in
                     };
                   };
                 };
+                config.forcedSettings = engine.modelSettings config;
                 config.command = lib.mkDefault (
                   if native then
                     engine.native.command config
@@ -373,6 +373,21 @@ in
     };
     assertions =
       map (w: util.firewallAssertion w.owner w) workloads
+      ++ map (
+        w:
+        let
+          # vLLM reads `_` in a flag name as `-`, and `no-<key>` negates `<key>`.
+          flag = key: lib.removePrefix "no-" (lib.replaceStrings [ "_" ] [ "-" ] key);
+          forced = map flag (lib.attrNames w.forcedSettings);
+          clash = lib.filter (key: lib.elem (flag key) forced) (lib.attrNames w.settings);
+        in
+        {
+          assertion = clash == [ ];
+          message = "services.llmhop: `${w.owner}.settings` or the backend's `modelSettings` set ${
+            lib.concatMapStringsSep ", " (k: "`${k}`") clash
+          }, which llmhop derives from the other options.";
+        }
+      ) workloads
       ++ map (w: {
         assertion = w.offline -> w.isolable;
         message = "services.llmhop: `${w.owner}` sets `offline = true`, which needs its socket${lib.optionalString native " or a loopback `host`"}, so drop `port` or set `offline = false`.";

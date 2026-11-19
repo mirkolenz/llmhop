@@ -254,7 +254,7 @@ Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.qu
 
 #### Settings rendering
 
-`settings`, over the backend's `modelSettings`, becomes the server's CLI flags while the listener and the served name always win.
+`settings`, over the backend's `modelSettings`, becomes the server's CLI flags beside those llmhop derives from the other options, such as the listener, the served name and `revision`, which `settings` must not set.
 Strings and paths are passed verbatim and everything else as JSON, so attribute sets work for options like `--speculative-config`.
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.

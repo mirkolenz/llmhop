@@ -106,7 +106,7 @@ let
               // util.credentialEnvironment workload.credentials;
             Exec = lib.escapeShellArgs (
               util.renderCliArgs engine (
-                util.resolveCredentialRefs credentialDirectory workload.credentials workload.settings
+                util.resolveCredentialRefs credentialDirectory workload.credentials workload.effectiveSettings
               )
             );
           }

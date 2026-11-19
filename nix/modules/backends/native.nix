@@ -138,7 +138,7 @@ let
           // {
             Type = "exec";
             ExecStart = util.execStart utils workload.credentials (
-              workload.command ++ util.renderCliArgs engine workload.settings
+              workload.command ++ util.renderCliArgs engine workload.effectiveSettings
             );
             # Holds the unit in `activating` until the server answers its health
             # path, and fails it once the server exits before that. systemd

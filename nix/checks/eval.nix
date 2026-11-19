@@ -224,14 +224,11 @@ let
   managed =
     (mkSystem {
       vllm = nativeVllm // {
-        modelSettings.host = "0.0.0.0";
+        modelSettings.max-model-len = 4096;
         models.test = {
           model = "example/test";
           port = 25001;
-          settings = {
-            port = 25002;
-            served-model-name = "other";
-          };
+          settings.max-num-seqs = 8;
         };
       };
     }).services.llmhop.vllm.models.test;
@@ -390,6 +387,21 @@ let
         };
       };
     };
+    # Settings never silently lose to the flags llmhop derives.
+    forcedSettings = {
+      needle = "`served-model-name`";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          modelSettings.host = "0.0.0.0";
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            settings.served-model-name = "other";
+          };
+        };
+      };
+    };
     offlineOnPort = {
       needle = "sets `offline = true`";
       count = 1;
@@ -508,7 +520,7 @@ let
       expr = {
         quadlet = {
           inherit (quadlet.services.llmhop.vllm.models.marked) command mounts;
-          key = quadlet.services.llmhop.vllm.models.marked.settings.watermark-key-file;
+          key = quadlet.services.llmhop.vllm.models.marked.effectiveSettings.watermark-key-file;
           # The reference resolves to the credential mount.
           exec = lib.hasInfix "--watermark-key-file /run/llmhop/credentials/vllm.watermark-key" quadletMarked.containerConfig.Exec;
         };
@@ -548,7 +560,7 @@ let
         command = quadlet.services.llmhop.vllm.detectors.watermark.command;
         keys = lib.mapAttrs (
           _: profile: profile.key_file
-        ) quadlet.services.llmhop.vllm.detectors.watermark.settings.profiles;
+        ) quadlet.services.llmhop.vllm.detectors.watermark.effectiveSettings.profiles;
         import = quadletDetector.serviceConfig.ImportCredential;
         # Only the tokenizer files, not the weights, once for both profiles.
         fetch =
@@ -681,7 +693,7 @@ let
           inherit (socketRules.d) mode;
           inherit (socketRules.a) argument;
         };
-        uds = sockets.services.llmhop.vllm.models.test.settings.uds;
+        uds = sockets.services.llmhop.vllm.models.test.effectiveSettings.uds;
         routed = sockets.services.llmhop.gateway.llmhop.settings.models.test.urls;
         inherit (socketContainer.containerConfig) PodmanArgs Network;
         mount = lib.elem "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U" socketContainer.containerConfig.Volume;
@@ -839,11 +851,19 @@ let
     };
 
     testManagedSettings = {
-      expr = lib.getAttrs [ "host" "port" "served-model-name" ] managed.settings;
+      expr = lib.getAttrs [
+        "host"
+        "port"
+        "served-model-name"
+        "max-model-len"
+        "max-num-seqs"
+      ] managed.effectiveSettings;
       expected = {
         host = "127.0.0.1";
         port = 25001;
         served-model-name = "test";
+        max-model-len = 4096;
+        max-num-seqs = 8;
       };
     };
   };

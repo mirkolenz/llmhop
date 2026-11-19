@@ -100,8 +100,8 @@ let
           mounts
           ;
         credentials = keyCredentials [ config.watermark ];
-        # Flags `mkVllmWatermark`'s script reads, which win like derived ones.
-        settings = lib.mapAttrs (_: lib.mkForce) {
+        # Flags `mkVllmWatermark`'s script reads, forced like derived ones.
+        forcedSettings = {
           watermark-config = config.watermark.settings;
           watermark-key-file = keyReference config.watermark;
         };
@@ -151,13 +151,6 @@ let
           inherit socketDirectory;
           fetch = cfg.fetch.enable;
           kind = "detector";
-          derivedSettings = detector: {
-            profiles = lib.mapAttrs (_: profile: {
-              inherit (profile) tokenizer revision;
-              key_file = keyReference profile.watermark;
-              config = profile.watermark.settings;
-            }) detector.profiles;
-          };
         })
       ];
       options = {
@@ -199,6 +192,11 @@ let
       };
       config = {
         inherit (scriptInvocation config.package config.script [ "detect" ]) command mounts;
+        forcedSettings.profiles = lib.mapAttrs (_: profile: {
+          inherit (profile) tokenizer revision;
+          key_file = keyReference profile.watermark;
+          config = profile.watermark.settings;
+        }) config.profiles;
         credentials = keyCredentials (profileWatermarks config);
         # Only the files of a repository that a tokenizer may need.
         repositories = lib.pipe config.profiles [
@@ -226,7 +224,7 @@ let
   inlineKeyAssertion = path: workload: watermarks: {
     assertion =
       !lib.any (config: lib.isAttrs config && config ? key) (
-        lib.catAttrs "settings" watermarks ++ [ (workload.settings.watermark-config or null) ]
+        lib.catAttrs "settings" watermarks ++ [ (workload.effectiveSettings.watermark-config or null) ]
       )
       && !lib.any (lib.hasPrefix "watermark-config.") (lib.attrNames workload.settings);
     message = "services.llmhop.vllm: `${path}` configures the watermark key inline, which its `credential` provides.";

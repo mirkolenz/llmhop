@@ -35,10 +35,11 @@ rec {
 
   # Submodule of every workload of a backend of `engine` with `runtime`, served
   # as the unit `<engine>-<name>` by its internal `command`, followed by its
-  # settings, and while `fetch` from what its fetcher downloaded. Its listener,
-  # `derivedSettings` and, while `fetch`, the engine's `offlineSettings`
-  # override `settings`, so the gateways, the health probe and the fetcher
-  # always agree with the server, while `defaults` only provide defaults.
+  # effective settings, and while `fetch` from what its fetcher downloaded.
+  # Its listener and, while `fetch`, the engine's `offlineSettings` are forced
+  # settings beside those other modules derive, which `settings` must not
+  # set, so the gateways, the health probe and the fetcher always agree with
+  # the server, while `defaults` only provide defaults.
   workloadModule =
     {
       engine,
@@ -46,7 +47,6 @@ rec {
       fetch,
       kind,
       socketDirectory,
-      derivedSettings,
       defaults ? { },
     }:
     {
@@ -286,25 +286,36 @@ rec {
           default = { };
           description = ''
             CLI flags of this ${noun}'s server, over the backend's
-            `modelSettings`. The listener and the flags derived from the other
-            options, such as the served name, always win.
+            `modelSettings`. They must not set the listener or the flags
+            derived from the other options, such as the served name.
             ${settingsRendering engine}
           '';
         };
+        forcedSettings = mkOption {
+          type = with types; attrsOf json;
+          default = { };
+          internal = true;
+          description = "CLI flags derived from the other options, which `settings` must not set.";
+        };
+        effectiveSettings = mkOption {
+          type = with types; attrsOf json;
+          internal = true;
+          readOnly = true;
+          description = "CLI flags the server receives, `settings` with `forcedSettings`.";
+        };
       };
-      config.settings = lib.mkMerge [
-        (lib.mapAttrs (_: lib.mkForce) (
+      config = {
+        forcedSettings =
           (
             if listener.socket == null then
               { inherit (listener) host port; }
             else
               engine.socketSettings listener.socket
           )
-          // derivedSettings config
-          // lib.optionalAttrs fetch engine.offlineSettings
-        ))
-        (lib.mapAttrs (_: lib.mkDefault) defaults)
-      ];
+          // lib.optionalAttrs fetch engine.offlineSettings;
+        settings = lib.mapAttrs (_: lib.mkDefault) defaults;
+        effectiveSettings = config.settings // config.forcedSettings;
+      };
     };
 
   # Submodule of a model, a workload whose `model` and `extraRepositories` the

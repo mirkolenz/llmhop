@@ -1,24 +1,27 @@
 // Package router builds the HTTP handler that authenticates incoming
 // requests, serves the OpenAI models API from the configured models and
 // forwards every other request through a per-model reverse proxy with
-// injected headers, selected by the /route/{model} path prefix or the JSON
-// "model" field.
+// injected headers, selected by the /route/{model} path prefix or the
+// "model" field of a JSON or multipart body, and balanced over the servers
+// of the model.
 package router
 
 import (
+	"bytes"
 	"cmp"
-	"crypto/subtle"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
-	"log"
-	"math"
+	"log/slog"
+	"mime"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptrace"
-	"net/http/httputil"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,165 +30,116 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/mirkolenz/llmhop/internal/config"
-	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
-// Router serves the OpenAI models API from the configured models and proxies
-// every other request to the backend named by its /route/{model} path prefix
-// or else its JSON "model" field, all guarded by the auth tokens, which
-// SetTokens swaps while serving. Only GET /health and GET /readiness are
-// served unauthenticated.
-type Router struct {
-	http.Handler
-	tokens atomic.Pointer[[][]byte]
-}
+// New returns the handler of cfg, which serves the OpenAI models API from
+// the configured models and proxies every other request to the model named
+// by its /route/{model} path prefix or else its body, all guarded by the
+// auth tokens. Only GET /health and GET /readiness are served
+// unauthenticated and unlogged. It is immutable, so a reload replaces it,
+// sharing the limits with the router it replaces.
+func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
+	rt := &routes{exact: make(map[string]*model), affinity: cfg.Affinity}
+	var models []*model
 
-// New returns the Router of cfg.
-func New(cfg *config.Config) (*Router, error) {
-	backends := make(map[string]*backend, len(cfg.Models))
 	for name, m := range cfg.Models {
-		b, err := newBackend(m)
+		md, err := newModel(m, limits.semaphore("models."+name, int64(m.MaxConcurrentRequests)))
 		if err != nil {
 			return nil, fmt.Errorf("models.%s: %w", name, err)
 		}
 
-		backends[name] = b
+		if prefix, ok := config.Pattern(name); ok {
+			rt.patterns = append(rt.patterns, pattern{prefix, md})
+		} else {
+			rt.exact[name] = md
+		}
+
+		for _, alias := range m.Aliases {
+			rt.exact[alias] = md
+		}
+
+		for _, n := range append([]string{name}, m.Aliases...) {
+			rt.segments = max(rt.segments, strings.Count(n, "/")+1)
+		}
+
+		models = append(models, md)
 	}
 
-	// Shared, so both endpoints reporting the catalog agree on it.
-	listed := cfg.Listed()
+	// The longest prefix wins.
+	slices.SortFunc(rt.patterns, func(a, b pattern) int { return cmp.Compare(len(b.prefix), len(a.prefix)) })
 
+	objects := catalog(cfg.Models)
 	mux := http.NewServeMux()
-	registerModels(mux, listed)
-	proxy := proxyHandler(backends, cfg.MaxBodyBytes, newSemaphore(cfg.MaxBufferedBytes))
-	mux.Handle("/", proxy)
+	registerModels(mux, objects)
+	mux.Handle("/", rt.proxyHandler(cfg.MaxBodyBytes, limits.semaphore("maxBufferedBytes", cfg.MaxBufferedBytes)))
+
+	var api http.Handler = mux
+	if cfg.RequiresAuth() {
+		api = newAuthenticator(cfg).wrap(api)
+	}
 
 	// Health and readiness sit outside the auth middleware: probes and
 	// downstream load balancers must be able to check the proxy without a token.
 	root := http.NewServeMux()
-	registerHealth(root, len(listed))
-	registerReadiness(root, backends)
+	registerHealth(root, len(objects))
+	registerReadiness(root, models)
+	root.Handle("/", logRequests(api))
 
-	r := &Router{Handler: root}
-	r.SetTokens(cfg)
-
-	// Whether tokens are required depends on settings only a restart changes.
-	if cfg.RequiresAuth() {
-		root.Handle("/", r.authenticate(mux))
-	} else {
-		root.Handle("/", mux)
-	}
-
-	return r, nil
+	return root, nil
 }
 
-// SetTokens replaces the auth tokens with those of cfg, also while serving.
-func (r *Router) SetTokens(cfg *config.Config) {
-	tokens := make([][]byte, 0, len(cfg.AuthTokens))
-	for _, t := range cfg.AuthTokens {
-		tokens = append(tokens, []byte(t))
-	}
-
-	r.tokens.Store(&tokens)
+// routes resolves a model name to its model.
+type routes struct {
+	// exact holds every model name and alias.
+	exact map[string]*model
+	// patterns holds the wildcards, the longest prefix first.
+	patterns []pattern
+	// segments is the most path segments of an exact name, which bounds
+	// the prefixes of a path that may name a model.
+	segments int
+	affinity []string
 }
 
-// backend is a resolved model with the proxy and limits serving it.
-type backend struct {
-	up      *upstream.Upstream
-	headers http.Header
-	// host overrides the outgoing Host when set, since Go carries Host
-	// outside the header map.
-	host   string
-	health string
-	// slots bounds the active proxied requests.
-	slots *semaphore.Weighted
-	proxy *httputil.ReverseProxy
+type pattern struct {
+	prefix string
+	model  *model
 }
 
-func newBackend(m config.Model) (*backend, error) {
-	up, err := upstream.Parse(m.URL)
-	if err != nil {
-		return nil, err
+// lookup resolves a model name, else the longest wildcard prefixing it.
+func (rt *routes) lookup(name string) *model {
+	if m, ok := rt.exact[name]; ok {
+		return m
 	}
 
-	headers := make(http.Header, len(m.Headers))
-	for k, v := range m.Headers {
-		headers.Set(k, v)
+	for _, p := range rt.patterns {
+		if strings.HasPrefix(name, p.prefix) {
+			return p.model
+		}
 	}
 
-	b := &backend{
-		up:      up,
-		headers: headers,
-		host:    headers.Get("Host"),
-		health:  m.HealthPath,
-		slots:   newSemaphore(int64(m.MaxConcurrentRequests)),
-	}
-	headers.Del("Host")
-
-	b.proxy = &httputil.ReverseProxy{
-		Rewrite: func(r *httputil.ProxyRequest) {
-			// ReverseProxy drops unparsable queries, forward them verbatim instead.
-			r.Out.URL.RawQuery = r.In.URL.RawQuery
-			r.SetXForwarded()
-			b.rewrite(r)
-		},
-		Transport:    up.Transport,
-		ErrorHandler: proxyError,
-	}
-
-	return b, nil
-}
-
-// rewrite addresses r.Out to the backend, shared by proxied requests and
-// readiness probes so both reach the same target: the path joins onto the
-// base URL, the configured Host replaces the incoming one and the configured
-// headers are injected.
-func (b *backend) rewrite(r *httputil.ProxyRequest) {
-	r.SetURL(b.up.URL)
-	r.Out.Host = cmp.Or(b.host, r.In.Host)
-
-	for k, v := range b.headers {
-		r.Out.Header[k] = v
-	}
+	return nil
 }
 
 // routePrefix starts path-routed requests, chosen so it cannot collide with
 // OpenAI paths such as GET /v1/models/{model}.
 const routePrefix = "/route/"
 
-// bodyTimeout bounds reading a body buffered for its JSON "model" field,
+// bodyTimeout bounds reading a body buffered for its "model" field,
 // so a slow client cannot hold buffered bytes for long.
 const bodyTimeout = time.Minute
 
-// newSemaphore returns a semaphore of size n, where zero means unlimited.
-func newSemaphore(n int64) *semaphore.Weighted {
-	return semaphore.NewWeighted(cmp.Or(n, math.MaxInt64))
-}
-
-// acquire takes a slot, or rejects the request with 429 and reports false
-// once all are taken.
-func acquire(w http.ResponseWriter, slots *semaphore.Weighted) bool {
-	if slots.TryAcquire(1) {
-		return true
-	}
-
-	w.Header().Set("Retry-After", "1")
-	writeError(w, http.StatusTooManyRequests, "too_many_requests", "too many concurrent requests for this model")
-
-	return false
-}
-
-// proxyHandler forwards each request to the backend named by its
+// proxyHandler forwards each request to the model named by its
 // /route/{model} path prefix, which is stripped and the body streamed,
-// or else by its JSON "model" field, for which the body is buffered within
-// the `buffered` budget until the backend starts its response.
-// The per-model concurrency limit applies only once the backend is resolved,
-// so a saturated model never blocks requests to another.
-func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *semaphore.Weighted) http.HandlerFunc {
+// or else by the "model" field of its body, which is buffered within the
+// `buffered` budget until the backend starts its response. The concurrency
+// limit applies only once the model is resolved, so a saturated model never
+// blocks requests to another.
+func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 {
 			if req.ContentLength > maxBytes {
 				bodyTooLarge(w)
+
 				return
 			}
 
@@ -193,75 +147,87 @@ func proxyHandler(backends map[string]*backend, maxBytes int64, buffered *semaph
 		}
 
 		var name string
-		var b *backend
-		var ok bool
+		var m *model
+		var body []byte
 
 		if strings.HasPrefix(req.URL.Path, routePrefix) {
-			name, b, ok = routeModel(backends, req.URL)
+			name, m = rt.routeModel(req.URL)
 		} else {
-			var release func()
-			if req, name, release, ok = bodyModel(w, req, buffered); !ok {
+			b := bodyModel(w, req, buffered)
+			if b == nil {
 				return
 			}
 
-			defer release()
+			defer b.release()
 
-			b, ok = backends[name]
+			req, name, body = b.req, b.model, b.body
+			m = rt.lookup(name)
 		}
 
-		if !ok {
+		entryOf(req).model = name
+
+		if m == nil {
 			unknownModel(w, name)
+
 			return
 		}
 
-		if !acquire(w, b.slots) {
-			return
+		// Computed before queueing, so a large body holds no slot meanwhile.
+		var aff affinity
+		if len(m.targets) > 1 {
+			aff = affinityOf(req, rt.affinity, body)
 		}
 
-		defer b.slots.Release(1)
-
-		b.proxy.ServeHTTP(w, req)
+		m.serve(w, req, aff)
 	}
 }
 
-// routeModel resolves the backend of a /route/<model>/<path> URL and strips
+// routeModel resolves the model of a /route/<model>/<path> URL and strips
 // the prefix and model from it. The longest model name wins, and a name with
 // `/` may be written raw or with `%2F`. The remainder keeps its escapes. An
-// unknown model is reported as its first segment.
-func routeModel(backends map[string]*backend, u *url.URL) (string, *backend, bool) {
+// unknown model is reported as its first segment. Wildcards do not apply,
+// since they leave the end of the name open.
+func (rt *routes) routeModel(u *url.URL) (string, *model) {
 	segments := strings.Split(strings.TrimPrefix(u.EscapedPath(), routePrefix), "/")
 
-	for n := len(segments); n > 0; n-- {
+	for n := min(len(segments), rt.segments); n > 0; n-- {
 		name, err := url.PathUnescape(strings.Join(segments[:n], "/"))
-		if b, ok := backends[name]; ok && err == nil {
+		if m, ok := rt.exact[name]; ok && err == nil {
 			u.RawPath = "/" + strings.Join(segments[n:], "/")
 			u.Path, _ = url.PathUnescape(u.RawPath)
 
-			return name, b, true
+			return name, m
 		}
 	}
 
 	name, _ := url.PathUnescape(segments[0])
 
-	return name, nil, false
+	return name, nil
 }
 
-// bodyModel buffers the body, charged to buffered, to read its JSON "model"
-// field and returns the request carrying it as a replayBody with the release
-// of its budget, or writes an error response and reports false.
+// bufferedRequest is a request whose body was read for its "model" field.
+type bufferedRequest struct {
+	req   *http.Request
+	model string
+	body  []byte
+	// release drops the body and its budget, which also happens once the
+	// backend starts its response.
+	release func()
+}
+
+// bodyModel buffers the body, charged to buffered, to read its "model"
+// field and returns the request carrying it as a replayBody, or writes an
+// error response and returns nil.
 //
 // Full buffering validates the entire JSON body before forwarding, which
 // also rejects a duplicate "model" that a backend might resolve differently.
-func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted) (_ *http.Request, model string, release func(), ok bool) {
+func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted) *bufferedRequest {
 	charged := &chargedReader{r: req.Body, budget: buffered}
-	defer func() {
-		if !ok {
-			buffered.Release(charged.n)
-		}
-	}()
 
 	body, err := readBody(w, charged)
 	if err != nil {
+		charged.release()
+
 		switch _, tooLarge := errors.AsType[*http.MaxBytesError](err); {
 		case tooLarge:
 			bodyTooLarge(w)
@@ -274,23 +240,18 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Wei
 			writeError(w, http.StatusBadRequest, "invalid_request_body", "failed to read request body")
 		}
 
-		return nil, "", nil, false
+		return nil
 	}
 
-	var request struct {
-		Model *string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request body")
-		return nil, "", nil, false
+	name, invalid := modelField(req.Header.Get("Content-Type"), body)
+	if invalid != nil {
+		charged.release()
+		writeError(w, http.StatusBadRequest, invalid.Code, invalid.Message)
+
+		return nil
 	}
 
-	if request.Model == nil {
-		writeError(w, http.StatusBadRequest, "missing_model", "missing model")
-		return nil, "", nil, false
-	}
-
-	rb := newReplayBody(body, func() { buffered.Release(charged.n) })
+	rb := newReplayBody(body, charged.release)
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotFirstResponseByte: rb.drop,
 	}))
@@ -303,8 +264,73 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Wei
 		req.ContentLength = -1
 	}
 
-	return req, *request.Model, rb.drop, true
+	return &bufferedRequest{req: req, model: name, body: body, release: rb.drop}
 }
+
+// maxModelField bounds the "model" field of a multipart body.
+const maxModelField = 4 << 10
+
+// modelField reads the "model" field of a JSON body, or of a multipart one
+// as uploads such as /v1/audio/transcriptions send, or describes why a body
+// lacks one.
+func modelField(contentType string, body []byte) (string, *apiErrorBody) {
+	if mediaType, params, err := mime.ParseMediaType(contentType); err == nil && mediaType == "multipart/form-data" {
+		return multipartModel(multipart.NewReader(bytes.NewReader(body), params["boundary"]))
+	}
+
+	var request struct {
+		Model *string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return "", &apiErrorBody{Code: "invalid_json", Message: "invalid JSON request body"}
+	}
+
+	if request.Model == nil {
+		return "", errMissingModel
+	}
+
+	return *request.Model, nil
+}
+
+// multipartModel reads the only "model" field of a form, which the whole
+// form must hold exactly once and in full, since the backend reads the
+// form itself and must not see another model than the one routed by.
+func multipartModel(r *multipart.Reader) (string, *apiErrorBody) {
+	var model *string
+
+	for {
+		part, err := r.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return "", errInvalidMultipart
+		}
+
+		if part.FormName() != "model" {
+			continue
+		}
+
+		value, err := io.ReadAll(io.LimitReader(part, maxModelField+1))
+		if err != nil || model != nil || len(value) > maxModelField {
+			return "", errInvalidMultipart
+		}
+
+		model = new(string(value))
+	}
+
+	if model == nil {
+		return "", errMissingModel
+	}
+
+	return *model, nil
+}
+
+var (
+	errMissingModel     = &apiErrorBody{Code: "missing_model", Message: "missing model"}
+	errInvalidMultipart = &apiErrorBody{Code: "invalid_multipart", Message: "invalid multipart request body or model field"}
+)
 
 // readBody reads the whole body within bodyTimeout, growing the buffer as
 // data arrives rather than by the declared length, so a stalled client holds
@@ -330,6 +356,11 @@ type chargedReader struct {
 	budget *semaphore.Weighted
 	// n counts the bytes charged so far.
 	n int64
+}
+
+// release returns the bytes charged so far to the budget.
+func (c *chargedReader) release() {
+	c.budget.Release(c.n)
 }
 
 func (c *chargedReader) Read(p []byte) (int, error) {
@@ -382,6 +413,7 @@ type dropReader struct {
 func (r *dropReader) Read(p []byte) (int, error) {
 	if len(r.buf) == 0 {
 		r.buf = nil
+
 		return 0, io.EOF
 	}
 
@@ -398,48 +430,23 @@ func bodyTooLarge(w http.ResponseWriter) {
 	writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
 }
 
-// proxyError maps a streamed body exceeding the size limit to 413, and every
-// other upstream failure to 502 like the default ReverseProxy handler.
-func proxyError(w http.ResponseWriter, _ *http.Request, err error) {
+// proxyError maps a streamed body exceeding the size limit to 413, a backend
+// exceeding its response timeout to 504, and every other upstream failure to
+// 502 like the default ReverseProxy handler.
+func proxyError(w http.ResponseWriter, req *http.Request, err error) {
 	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		bodyTooLarge(w)
+
 		return
 	}
 
-	log.Printf("http: proxy error: %v", err)
+	slog.Error("proxy", "id", req.Header.Get(requestIDHeader), "err", err)
+
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		writeError(w, http.StatusGatewayTimeout, "backend_timeout", "backend response timeout")
+
+		return
+	}
+
 	writeError(w, http.StatusBadGateway, "bad_gateway", "backend unreachable")
-}
-
-// authenticate gates next with the current bearer tokens and strips the
-// client Authorization header before it reaches any backend.
-func (r *Router) authenticate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if !checkBearer(req.Header.Get("Authorization"), *r.tokens.Load()) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid bearer token")
-			return
-		}
-		req.Header.Del("Authorization")
-		next.ServeHTTP(w, req)
-	})
-}
-
-// checkBearer reports whether header carries a "Bearer <token>" matching any
-// of the configured tokens. The scheme is case-insensitive (RFC 9110, 11.1).
-// Comparison is constant-time to avoid leaking token contents via timing.
-func checkBearer(header string, tokens [][]byte) bool {
-	scheme, got, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return false
-	}
-
-	gotB := []byte(got)
-
-	for _, t := range tokens {
-		if subtle.ConstantTimeCompare(gotB, t) == 1 {
-			return true
-		}
-	}
-
-	return false
 }

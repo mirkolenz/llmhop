@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -18,18 +19,42 @@ import (
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/mirkolenz/llmhop/internal/secrets"
+	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 type Model struct {
-	// URL is an absolute http(s) URL or `unix:///<socket path>`.
-	URL     string            `json:"url"`
+	// URLs are the servers of the model, each an absolute http(s) URL or
+	// `unix:///<socket path>`, between which requests are balanced.
+	URLs []string `json:"urls"`
+	// Aliases are further names routed to the model and forwarded verbatim,
+	// such as the LoRA adapters a vLLM server serves under their own names.
+	Aliases []string          `json:"aliases,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+	// Metadata adds members to the model's object in the models API,
+	// such as `max_model_len`, or replaces `created` and `owned_by`,
+	// while `id` and `object` are always llmhop's.
+	Metadata map[string]jsontext.Value `json:"metadata,omitempty"`
 	// Unlisted keeps a backend routable but hides it from the model catalog,
 	// for services that are not inference models, such as a watermark detector.
 	Unlisted bool `json:"unlisted,omitempty"`
-	// MaxConcurrentRequests bounds the active proxied requests per model,
-	// so one busy backend never starves another. Zero means unlimited.
-	MaxConcurrentRequests uint `json:"maxConcurrentRequests,omitempty"`
+	// MaxConcurrentRequests bounds the active proxied requests of the model
+	// over all its URLs, so one busy model never starves another.
+	// Zero means unlimited.
+	// Like the timeouts, it is a uint32 to fit an int64 without overflowing.
+	MaxConcurrentRequests uint32 `json:"maxConcurrentRequests,omitempty"`
+	// QueueTimeoutSeconds is how long a request waits for a free slot of
+	// MaxConcurrentRequests before it is rejected. Zero rejects it at once.
+	QueueTimeoutSeconds uint32 `json:"queueTimeoutSeconds,omitempty"`
+	// ResponseTimeoutSeconds bounds the wait for the response headers of a
+	// backend. Zero means unlimited.
+	ResponseTimeoutSeconds uint32 `json:"responseTimeoutSeconds,omitempty"`
+	// DataParallelSize is the number of data-parallel ranks of every URL,
+	// which requests with an affinity key are pinned to through vLLM's
+	// `X-data-parallel-rank` header, one by default.
+	DataParallelSize uint `json:"dataParallelSize,omitempty"`
+	// FailoverSeconds is how long a server that refused a connection is
+	// avoided.
+	FailoverSeconds uint32 `json:"failoverSeconds"`
 	// HealthPath is the backend path GET /readiness probes. Empty skips the model.
 	HealthPath string `json:"healthPath,omitempty"`
 }
@@ -48,9 +73,23 @@ type Config struct {
 	// AuthTokenCredentials is a systemd credential glob with a single trailing
 	// `*`, as in ImportCredential=, whose matches join AuthTokens at startup,
 	// each named by the part the `*` matched.
-	AuthTokenCredentials string           `json:"authTokenCredentials,omitempty"`
-	Models               map[string]Model `json:"models"`
+	AuthTokenCredentials string `json:"authTokenCredentials,omitempty"`
+	// Affinity lists the sources of the key keeping the requests of a
+	// conversation on one server, tried in order: `header:<name>` or the
+	// body's `prompt_cache_key`.
+	Affinity []string         `json:"affinity,omitempty"`
+	Models   map[string]Model `json:"models"`
 }
+
+// DefaultAffinity tries the session header of vLLM's router and SMG, then
+// the key of OpenAI's prompt caching.
+var DefaultAffinity = []string{"header:X-Session-Id", promptCacheKey}
+
+// promptCacheKey is the affinity source of the body member of that name.
+const promptCacheKey = "prompt_cache_key"
+
+// maxDataParallelSize bounds the ranks of a URL, far beyond any GPU count.
+const maxDataParallelSize = 256
 
 // DefaultMaxBodyBytes bounds the size of a request body the router will buffer
 // before forwarding. 100 MiB comfortably covers text completions and single
@@ -61,20 +100,10 @@ const DefaultMaxBodyBytes = 100 * 1024 * 1024
 // thousands of typical requests or ten at the body size limit.
 const DefaultMaxBufferedBytes = 1024 * 1024 * 1024
 
-// Listed returns the sorted names of the models advertised in the catalog.
-// Unlisted backends are omitted, but stay routable by name.
-func (cfg *Config) Listed() []string {
-	names := make([]string, 0, len(cfg.Models))
-
-	for name, model := range cfg.Models {
-		if !model.Unlisted {
-			names = append(names, name)
-		}
-	}
-
-	slices.Sort(names)
-
-	return names
+// Pattern reports whether a model name is a wildcard such as `openai/*`,
+// which matches every name starting with the returned prefix.
+func Pattern(name string) (prefix string, ok bool) {
+	return strings.CutSuffix(name, "*")
 }
 
 // RequiresAuth reports whether every route but health and readiness needs a
@@ -125,9 +154,11 @@ func DecodeFile(path string, v any) error {
 // headers; without it those are left verbatim, so a config can be validated
 // where the environment variables and credential files it names do not exist.
 func Load(path string, expandSecrets bool) (*Config, error) {
+	// Defaults that the decoded members replace, a list even when set to `[]`.
 	cfg := &Config{
 		MaxBodyBytes:     DefaultMaxBodyBytes,
 		MaxBufferedBytes: DefaultMaxBufferedBytes,
+		Affinity:         slices.Clone(DefaultAffinity),
 	}
 
 	if err := DecodeFile(path, cfg); err != nil {
@@ -139,6 +170,21 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// UnmarshalJSONFrom decodes a model over its defaults, so that a member left
+// out keeps its default while an explicit zero stays zero.
+func (m *Model) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	type plain Model
+
+	p := plain{FailoverSeconds: 5}
+	if err := json.UnmarshalDecode(dec, &p); err != nil {
+		return err
+	}
+
+	*m = Model(p)
+
+	return nil
 }
 
 // validate checks every invariant and expands auth tokens and per-model
@@ -165,10 +211,6 @@ func (cfg *Config) validate(load bool) error {
 	}
 
 	for name, token := range cfg.AuthTokens {
-		if name == "" {
-			return errors.New("authTokens: name must not be empty")
-		}
-
 		v, err := secrets.Expand(token, load)
 		if err == nil && !validToken(v) {
 			err = errors.New("empty or invalid token")
@@ -185,13 +227,51 @@ func (cfg *Config) validate(load bool) error {
 		return fmt.Errorf("authTokenCredentials: %w", err)
 	}
 
+	// A token names one client, so that its requests always log the same.
+	names := make(map[string]string, len(cfg.AuthTokens))
+
+	for name, token := range cfg.AuthTokens {
+		// The name reaches backends in the X-Llmhop-Client header.
+		if name == "" || !httpguts.ValidHeaderFieldValue(name) {
+			return fmt.Errorf("authTokens: invalid name %q", name)
+		}
+
+		if other, ok := names[token]; ok {
+			return fmt.Errorf("authTokens: %s and %s share a token", min(name, other), max(name, other))
+		}
+
+		names[token] = name
+	}
+
+	for _, source := range cfg.Affinity {
+		header, isHeader := strings.CutPrefix(source, "header:")
+		if isHeader && !httpguts.ValidHeaderFieldName(header) || !isHeader && source != promptCacheKey {
+			return fmt.Errorf("affinity: %q must be header:<name> or %s", source, promptCacheKey)
+		}
+	}
+
+	aliased := make(map[string]string)
+
 	for name, model := range cfg.Models {
 		if !validModelName(name) {
-			return fmt.Errorf("models.%s: name must be non-empty without leading, trailing or empty path segments", name)
+			return fmt.Errorf("models.%s: name must be non-empty without leading, trailing or empty path segments, with * only at its end", name)
 		}
 
 		if err := model.validate(load); err != nil {
 			return fmt.Errorf("models.%s.%w", name, err)
+		}
+
+		// Every name and alias routes to one model.
+		for _, alias := range model.Aliases {
+			if _, ok := cfg.Models[alias]; ok {
+				return fmt.Errorf("models.%s.aliases: %q is already a model", name, alias)
+			}
+
+			if owner, ok := aliased[alias]; ok {
+				return fmt.Errorf("models.%s.aliases: %q is already an alias of models.%s", name, alias, owner)
+			}
+
+			aliased[alias] = name
 		}
 	}
 
@@ -201,6 +281,26 @@ func (cfg *Config) validate(load bool) error {
 // validate checks m like Config.validate, expanding its header values in
 // place. Errors start with the field they concern.
 func (m Model) validate(load bool) error {
+	if len(m.URLs) == 0 {
+		return errors.New("urls: must not be empty")
+	}
+
+	if m.DataParallelSize > maxDataParallelSize {
+		return fmt.Errorf("dataParallelSize: must not exceed %d", maxDataParallelSize)
+	}
+
+	for _, raw := range m.URLs {
+		if _, err := upstream.Parse(raw, 0); err != nil {
+			return fmt.Errorf("urls: %w", err)
+		}
+	}
+
+	for _, alias := range m.Aliases {
+		if _, wildcard := Pattern(alias); wildcard || !validModelName(alias) {
+			return fmt.Errorf("aliases: %q must be a model name without *", alias)
+		}
+	}
+
 	// Probes join the path onto the backend URL, so only a path works.
 	if m.HealthPath != "" && !validPath(m.HealthPath) {
 		return fmt.Errorf("healthPath: %q must be an absolute path", m.HealthPath)
@@ -286,9 +386,15 @@ func validToken(v string) bool {
 	return v != "" && httpguts.ValidHeaderFieldValue(v)
 }
 
-// validModelName allows `/` for names such as `org/name`, but no empty segment.
+// validModelName allows `/` for names such as `org/name`, but no empty
+// segment, and `*` only to end a wildcard, whose prefix may end with `/`.
 func validModelName(name string) bool {
-	return name != "" && !strings.HasPrefix(name, "/") && !strings.HasSuffix(name, "/") && !strings.Contains(name, "//")
+	prefix, wildcard := Pattern(name)
+	if strings.Contains(prefix, "*") || strings.HasPrefix(prefix, "/") || strings.Contains(prefix, "//") {
+		return false
+	}
+
+	return wildcard || prefix != "" && !strings.HasSuffix(prefix, "/")
 }
 
 func validPath(p string) bool {

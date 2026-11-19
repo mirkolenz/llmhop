@@ -1,18 +1,22 @@
 package router
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 )
@@ -42,9 +46,9 @@ func startBackend(t *testing.T) (*httptest.Server, *capturedRequest) {
 	return srv, captured
 }
 
-func newRouter(t *testing.T, cfg *config.Config) *Router {
+func newRouter(t *testing.T, cfg *config.Config) http.Handler {
 	t.Helper()
-	h, err := New(cfg)
+	h, err := New(cfg, &Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,22 +70,27 @@ func send(t *testing.T, handler http.Handler, method, path, body, authHeader str
 	return rec
 }
 
-func TestCheckBearer(t *testing.T) {
-	tokens := [][]byte{[]byte("alpha"), []byte("beta")}
+func TestBearer(t *testing.T) {
+	a := &authenticator{tokens: map[string][]byte{"a": []byte("alpha"), "b": []byte("beta")}}
 	cases := []struct {
 		header string
-		want   bool
+		want   string
 	}{
-		{"Bearer beta", true},
-		{"bearer alpha", true},
-		{"Bearer alph", false},
-		{"Basic alpha", false},
-		{"alpha", false},
+		{"Bearer beta", "b"},
+		{"bearer alpha", "a"},
+		{"Bearer alph", ""},
+		{"Basic alpha", ""},
+		{"alpha", ""},
 	}
 
 	for _, c := range cases {
-		if got := checkBearer(c.header, tokens); got != c.want {
-			t.Errorf("checkBearer(%q) = %v, want %v", c.header, got, c.want)
+		got := ""
+		if token, ok := bearer(c.header); ok {
+			got, _ = a.lookup(token)
+		}
+
+		if got != c.want {
+			t.Errorf("header %q named %q, want %q", c.header, got, c.want)
 		}
 	}
 }
@@ -89,9 +98,10 @@ func TestCheckBearer(t *testing.T) {
 func TestCatalog(t *testing.T) {
 	backend, _ := startBackend(t)
 	h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: map[string]config.Model{
-		"b":        {URL: backend.URL},
-		"a":        {URL: backend.URL},
-		"detector": {URL: backend.URL, Unlisted: true},
+		"b":        {URLs: []string{backend.URL}},
+		"a":        {URLs: []string{backend.URL}},
+		"detector": {URLs: []string{backend.URL}, Unlisted: true},
+		"openai/*": {URLs: []string{backend.URL}, Aliases: []string{"c"}},
 	}})
 
 	t.Run("health needs no token and counts listed models", func(t *testing.T) {
@@ -100,25 +110,32 @@ func TestCatalog(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if got.Status != "ok" || got.Models != 2 {
+		if got.Status != "ok" || got.Models != 3 {
 			t.Fatalf("got %+v", got)
 		}
 	})
 
-	t.Run("list is sorted and omits unlisted models", func(t *testing.T) {
+	t.Run("list is sorted and omits unlisted models and wildcards", func(t *testing.T) {
 		var got modelList
 		if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer secret").Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
 
-		if len(got.Data) != 2 || got.Data[0].ID != "a" || got.Data[1].ID != "b" {
+		ids := make([]string, len(got.Data))
+		for i, obj := range got.Data {
+			ids[i] = string(obj["id"])
+		}
+
+		if !slices.Equal(ids, []string{`"a"`, `"b"`, `"c"`}) {
 			t.Fatalf("got models %+v", got.Data)
 		}
 	})
 
 	t.Run("retrieve", func(t *testing.T) {
-		if rec := send(t, h, http.MethodGet, "/v1/models/a", "", "Bearer secret"); rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
+		for _, name := range []string{"a", "c"} {
+			if rec := send(t, h, http.MethodGet, "/v1/models/"+name, "", "Bearer secret"); rec.Code != http.StatusOK {
+				t.Fatalf("%s got status %d", name, rec.Code)
+			}
 		}
 
 		if rec := send(t, h, http.MethodGet, "/v1/models/detector", "", "Bearer secret"); rec.Code != http.StatusNotFound {
@@ -216,7 +233,7 @@ func TestRouterRequests(t *testing.T) {
 			h := newRouter(t, &config.Config{
 				AuthTokens:   c.auth,
 				MaxBodyBytes: c.maxBody,
-				Models:       map[string]config.Model{"m": {URL: backend.URL, Headers: c.headers}},
+				Models:       map[string]config.Model{"m": {URLs: []string{backend.URL}, Headers: c.headers}},
 			})
 			rec := send(t, h, http.MethodPost, "/", c.body, c.authHeader)
 
@@ -237,7 +254,7 @@ func TestAuthRequiredWithoutTokens(t *testing.T) {
 	backend, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
 		AuthTokenCredentials: "llmhop.token.*",
-		Models:               map[string]config.Model{"m": {URL: backend.URL}},
+		Models:               map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model": "m"}`, "Bearer anything"); rec.Code != http.StatusUnauthorized {
@@ -245,28 +262,10 @@ func TestAuthRequiredWithoutTokens(t *testing.T) {
 	}
 }
 
-func TestSetTokens(t *testing.T) {
-	backend, _ := startBackend(t)
-	cfg := &config.Config{
-		AuthTokens: map[string]string{"old": "alpha"},
-		Models:     map[string]config.Model{"m": {URL: backend.URL}},
-	}
-	r := newRouter(t, cfg)
-
-	cfg.AuthTokens = map[string]string{"new": "beta"}
-	r.SetTokens(cfg)
-
-	for token, want := range map[string]int{"alpha": http.StatusUnauthorized, "beta": http.StatusOK} {
-		if rec := send(t, r, http.MethodPost, "/", `{"model": "m"}`, "Bearer "+token); rec.Code != want {
-			t.Errorf("token %s: got status %d, want %d", token, rec.Code, want)
-		}
-	}
-}
-
 func TestProxyPreservesHostAndQuery(t *testing.T) {
 	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{Models: map[string]config.Model{
-		"m": {URL: backend.URL + "/base?backend=1"},
+		"m": {URLs: []string{backend.URL + "/base?backend=1"}},
 	}})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?valid=1&semi=one;two", strings.NewReader(`{"model":"m"}`))
@@ -292,7 +291,7 @@ func TestProxyPreservesHostAndQuery(t *testing.T) {
 func TestPathRouting(t *testing.T) {
 	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: map[string]config.Model{
-		"detector": {URL: backend.URL + "/base", Unlisted: true},
+		"detector": {URLs: []string{backend.URL + "/base"}, Unlisted: true},
 	}})
 
 	if rec := send(t, h, http.MethodPost, "/route/detector/detect?x=1", `{"text":"candidate"}`, "Bearer secret"); rec.Code != http.StatusOK {
@@ -311,8 +310,8 @@ func TestPathRouting(t *testing.T) {
 func TestSlashModelNames(t *testing.T) {
 	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{Models: map[string]config.Model{
-		"org/name": {URL: backend.URL},
-		"org":      {URL: backend.URL + "/short"},
+		"org/name": {URLs: []string{backend.URL}},
+		"org":      {URLs: []string{backend.URL + "/short"}},
 	}})
 
 	if rec := send(t, h, http.MethodGet, "/v1/models/org/name", "", ""); rec.Code != http.StatusOK {
@@ -356,7 +355,7 @@ func TestBodyLimit(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", c.body)
 			req.ContentLength = c.contentLength
 			rec := httptest.NewRecorder()
-			proxyHandler(nil, c.maxBytes, newSemaphore(0))(rec, req)
+			(&routes{}).proxyHandler(c.maxBytes, newSemaphore(0))(rec, req)
 
 			if rec.Code != c.wantCode {
 				t.Fatalf("got status %d, want %d", rec.Code, c.wantCode)
@@ -374,8 +373,8 @@ func TestConcurrentRequestLimit(t *testing.T) {
 	t.Cleanup(slow.Close)
 	fast, _ := startBackend(t)
 	h := newRouter(t, &config.Config{Models: map[string]config.Model{
-		"a": {URL: slow.URL, MaxConcurrentRequests: 1},
-		"b": {URL: fast.URL, MaxConcurrentRequests: 1},
+		"a": {URLs: []string{slow.URL}, MaxConcurrentRequests: 1},
+		"b": {URLs: []string{fast.URL}, MaxConcurrentRequests: 1},
 	}})
 
 	done := make(chan struct{})
@@ -424,9 +423,9 @@ func TestReadiness(t *testing.T) {
 	t.Cleanup(unix.Close)
 
 	models := map[string]config.Model{
-		"tcp":      {URL: tcp.URL, HealthPath: "/health", Headers: map[string]string{"X-Key": "k", "Host": "probe.example"}},
-		"unix":     {URL: "unix://" + socket, HealthPath: "/health", Headers: map[string]string{"X-Key": "k"}},
-		"unprobed": {URL: tcp.URL},
+		"tcp":      {URLs: []string{tcp.URL}, HealthPath: "/health", Headers: map[string]string{"X-Key": "k", "Host": "probe.example"}},
+		"unix":     {URLs: []string{"unix://" + socket}, HealthPath: "/health", Headers: map[string]string{"X-Key": "k"}},
+		"unprobed": {URLs: []string{tcp.URL}},
 	}
 
 	check := func(wantCode int, want readiness) {
@@ -445,15 +444,26 @@ func TestReadiness(t *testing.T) {
 	}
 
 	check(http.StatusOK, readiness{Status: "ok", Ready: 2, Probed: 2})
-	models["broken"] = config.Model{URL: tcp.URL, HealthPath: "/missing"}
-	check(http.StatusServiceUnavailable, readiness{Status: "unavailable", Ready: 2, Probed: 3})
+	// One answering server keeps a model ready, without waiting for a stalled one.
+	stalled := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(stalled.Close)
+	models["replicas"] = config.Model{URLs: []string{"unix://" + filepath.Join(t.TempDir(), "down.sock"), stalled.URL, tcp.URL}, HealthPath: "/health", Headers: map[string]string{"Host": "probe.example", "X-Key": "k"}}
+	start := time.Now()
+	check(http.StatusOK, readiness{Status: "ok", Ready: 3, Probed: 3})
+
+	if time.Since(start) >= probeTimeout {
+		t.Errorf("a stalled replica delayed readiness")
+	}
+
+	models["broken"] = config.Model{URLs: []string{tcp.URL}, HealthPath: "/missing"}
+	check(http.StatusServiceUnavailable, readiness{Status: "unavailable", Ready: 3, Probed: 4})
 }
 
 func TestBufferedBytesLimit(t *testing.T) {
 	srv, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
 		MaxBufferedBytes: 16,
-		Models:           map[string]config.Model{"m": {URL: srv.URL}},
+		Models:           map[string]config.Model{"m": {URLs: []string{srv.URL}}},
 	})
 
 	// The first body arrives slowly, so its partial body holds 10 bytes.
@@ -504,7 +514,7 @@ func TestBufferedBytesReleasedOnceResponding(t *testing.T) {
 	fast, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
 		MaxBufferedBytes: 16,
-		Models:           map[string]config.Model{"slow": {URL: streaming.URL}, "fast": {URL: fast.URL}},
+		Models:           map[string]config.Model{"slow": {URLs: []string{streaming.URL}}, "fast": {URLs: []string{fast.URL}}},
 	})
 
 	// The router's own hook, which releases the bytes, runs before this outer one.
@@ -537,7 +547,7 @@ func TestProxyPreservesRequestTrailer(t *testing.T) {
 		trailer = req.Trailer.Get("X-Check")
 	}))
 	t.Cleanup(srv.Close)
-	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URL: srv.URL}}})
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: []string{srv.URL}}}})
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
 	req.ContentLength = -1
@@ -562,7 +572,7 @@ func TestBufferedIdempotentRetry(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URL: srv.URL}}})
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: []string{srv.URL}}}})
 
 	for range 2 {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
@@ -577,5 +587,288 @@ func TestBufferedIdempotentRetry(t *testing.T) {
 
 	if n := calls.Load(); n != 3 {
 		t.Errorf("backend got %d requests, want 3", n)
+	}
+}
+
+func TestNames(t *testing.T) {
+	base, captured := startBackend(t)
+	remote, remoteCaptured := startBackend(t)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{
+		"base":     {URLs: []string{base.URL}, Aliases: []string{"base:lora"}, Metadata: map[string]jsontext.Value{"max_model_len": jsontext.Value("4096")}},
+		"openai/*": {URLs: []string{remote.URL}},
+	}})
+
+	var got modelList
+	if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "").Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got.Data) != 2 || string(got.Data[1]["id"]) != `"base:lora"` || string(got.Data[1]["max_model_len"]) != "4096" {
+		t.Fatalf("got models %v", got.Data)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"base:lora"}`, ""); rec.Code != http.StatusOK || captured.body != `{"model":"base:lora"}` {
+		t.Fatalf("alias got status %d, backend saw %+v", rec.Code, captured)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"openai/gpt-5"}`, ""); rec.Code != http.StatusOK || remoteCaptured.body != `{"model":"openai/gpt-5"}` {
+		t.Fatalf("wildcard got status %d, backend saw %+v", rec.Code, remoteCaptured)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/route/openai/gpt-5/x", "", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("path-routed wildcard got status %d", rec.Code)
+	}
+}
+
+func TestMultipartModel(t *testing.T) {
+	backend, captured := startBackend(t)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"whisper": {URLs: []string{backend.URL}}}})
+
+	var body strings.Builder
+	form := multipart.NewWriter(&body)
+	_ = form.WriteField("model", "whisper")
+	_ = form.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", strings.NewReader(body.String()))
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || captured.body != body.String() {
+		t.Fatalf("got status %d, backend saw %q", rec.Code, captured.body)
+	}
+
+	// The backend would read another model than the one routed by.
+	body.Reset()
+	form = multipart.NewWriter(&body)
+	_ = form.WriteField("model", "whisper")
+	_ = form.WriteField("model", "other")
+	_ = form.Close()
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", strings.NewReader(body.String()))
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate model got status %d", rec.Code)
+	}
+}
+
+// Turns of one conversation stick to a server.
+func TestAffinity(t *testing.T) {
+	var hits [2]atomic.Int32
+	servers := make([]string, 2)
+
+	for i := range servers {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits[i].Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+		}))
+		t.Cleanup(srv.Close)
+		servers[i] = srv.URL
+	}
+
+	h := newRouter(t, &config.Config{Affinity: config.DefaultAffinity, Models: map[string]config.Model{
+		"m": {URLs: servers},
+	}})
+
+	for range 6 {
+		if rec := send(t, h, http.MethodPost, "/", `{"model":"m","prompt_cache_key":"c"}`, ""); rec.Code != http.StatusOK {
+			t.Fatalf("got status %d", rec.Code)
+		}
+	}
+
+	if a, b := hits[0].Load(), hits[1].Load(); a+b != 6 || a != 0 && b != 0 {
+		t.Fatalf("servers got %d and %d requests, want all on one", a, b)
+	}
+}
+
+// A refused connection fails over to the next server. A keyless request
+// takes the first of equally idle servers, so it tries the dead one first.
+func TestFailover(t *testing.T) {
+	backend, captured := startBackend(t)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{
+		"m": {URLs: []string{"unix://" + filepath.Join(t.TempDir(), "down.sock"), backend.URL}},
+	}})
+
+	body := `{"model":"m"}`
+	if rec := send(t, h, http.MethodPost, "/", body, ""); rec.Code != http.StatusOK || captured.body != body {
+		t.Fatalf("got status %d, backend saw %q", rec.Code, captured.body)
+	}
+}
+
+func TestDataParallelRanks(t *testing.T) {
+	backend, captured := startBackend(t)
+	h := newRouter(t, &config.Config{
+		Affinity: []string{"header:X-Session-Id"},
+		Models: map[string]config.Model{
+			"m": {URLs: []string{backend.URL}, DataParallelSize: 2},
+			"u": {URLs: []string{backend.URL}},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("X-Session-Id", "s")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if rank := captured.header.Get(rankHeader); rank != "0" && rank != "1" {
+		t.Fatalf("keyed request got rank %q", rank)
+	}
+
+	// The server balances keyless requests over its ranks itself, which a
+	// client cannot pin either.
+	req = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set(rankHeader, "7")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if rank := captured.header.Get(rankHeader); rank != "" {
+		t.Fatalf("keyless request got rank %q", rank)
+	}
+
+	// Nor can it pin one on a model without ranks.
+	req = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"u"}`))
+	req.Header.Set(rankHeader, "7")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if rank := captured.header.Get(rankHeader); rank != "" {
+		t.Fatalf("unranked model got rank %q", rank)
+	}
+}
+
+func TestQueueAndResponseTimeout(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		entered <- struct{}{}
+		<-release
+	}))
+	t.Cleanup(slow.Close)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{
+		"m": {URLs: []string{slow.URL}, MaxConcurrentRequests: 1, QueueTimeoutSeconds: 10, ResponseTimeoutSeconds: 1},
+	}})
+
+	first := make(chan int)
+
+	go func() { first <- send(t, h, http.MethodPost, "/", `{"model":"m"}`, "").Code }()
+
+	<-entered
+
+	// The second request waits for the slot of the first, which times out.
+	second := make(chan int)
+
+	go func() { second <- send(t, h, http.MethodPost, "/", `{"model":"m"}`, "").Code }()
+
+	if code := <-first; code != http.StatusGatewayTimeout {
+		t.Errorf("first request got status %d, want 504", code)
+	}
+
+	<-entered
+	release <- struct{}{}
+	close(release)
+
+	if code := <-second; code != http.StatusOK && code != http.StatusGatewayTimeout {
+		t.Errorf("queued request got status %d", code)
+	}
+}
+
+func TestClientHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(requestIDHeader, r.Header.Get(requestIDHeader))
+		_, _ = w.Write([]byte(r.Header.Get(clientHeader) + " " + r.Header.Get(requestIDHeader)))
+	}))
+	t.Cleanup(backend.Close)
+	h := newRouter(t, &config.Config{
+		AuthTokens: map[string]string{"alice": "secret"},
+		Models:     map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set(requestIDHeader, "r1")
+	req.Header.Set(clientHeader, "mallory")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if ids := rec.Header().Values(requestIDHeader); rec.Body.String() != "alice r1" || len(ids) != 1 || ids[0] != "r1" {
+		t.Errorf("backend saw %q, response IDs %q", rec.Body.String(), ids)
+	}
+}
+
+func TestAffinityOf(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("X-Session-Id", "s")
+	key := func(sources []string, body string) affinity { return affinityOf(req, sources, []byte(body)) }
+
+	if a, b := key(config.DefaultAffinity, `{"prompt_cache_key":"k"}`), key([]string{"prompt_cache_key"}, `{"prompt_cache_key":"k"}`); !a.keyed || !b.keyed || a.key == b.key {
+		t.Errorf("the header did not take precedence: %+v, %+v", a, b)
+	}
+
+	if a := key([]string{"prompt_cache_key"}, `{"messages":[]}`); a.keyed {
+		t.Errorf("keyless body got %+v", a)
+	}
+}
+
+// A reload shares the limits, so requests of the previous router count.
+func TestLimitsSharedAcrossRouters(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		entered <- struct{}{}
+		<-release
+	}))
+	t.Cleanup(slow.Close)
+
+	limits := &Limits{}
+	cfg := &config.Config{Models: map[string]config.Model{"m": {URLs: []string{slow.URL}, MaxConcurrentRequests: 1}}}
+
+	old, err := New(cfg, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := New(cfg, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		send(t, old, http.MethodPost, "/", `{"model":"m"}`, "")
+		close(done)
+	}()
+
+	<-entered
+
+	if rec := send(t, reloaded, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("reloaded router got status %d, want 429", rec.Code)
+	}
+
+	close(release)
+	<-done
+}
+
+// Informational responses keep the request ID of the final one.
+func TestEarlyHintsKeepHeaders(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Link", "</style.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(backend.Close)
+	gateway := httptest.NewServer(newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: []string{backend.URL}}}}))
+	t.Cleanup(gateway.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, gateway.URL, strings.NewReader(`{"model":"m"}`))
+	req.Header.Set(requestIDHeader, "r1")
+
+	resp, err := gateway.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || resp.Header.Get(requestIDHeader) != "r1" {
+		t.Fatalf("got status %d and headers %v", resp.StatusCode, resp.Header)
 	}
 }

@@ -93,7 +93,7 @@ in
         default = { };
         example = {
           authTokens.client = "\${cred:llmhop.client-token}";
-          models."openai/gpt-4".url = "https://api.openai.com";
+          models."openai/*".urls = [ "https://api.openai.com" ];
         };
         description = ''
           llmhop's JSON config, validated at build time by the binary itself,
@@ -191,7 +191,8 @@ in
             settings.models = lib.genAttrs' endpoints (
               endpoint:
               lib.nameValuePair endpoint.name {
-                inherit (endpoint) url unlisted;
+                urls = [ endpoint.url ];
+                inherit (endpoint) unlisted;
                 inherit (util) healthPath;
               }
             );

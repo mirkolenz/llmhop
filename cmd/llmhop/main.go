@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/activation"
@@ -33,7 +34,17 @@ const usage = `usage:
 `
 
 func main() {
-	log.SetFlags(0)
+	// journald stamps every line itself. The standard logger, which
+	// net/http writes to, forwards to this handler too.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+
+			return a
+		},
+	})))
 
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -50,7 +61,7 @@ func main() {
 	case "serve":
 		err = serve(args)
 	case "check":
-		_, _, err = load(args, false)
+		err = check(args)
 	case "internal":
 		err = internal(args)
 	default:
@@ -59,7 +70,8 @@ func main() {
 	}
 
 	if err != nil {
-		log.Fatalf("%s: %v", os.Args[1], err)
+		slog.Error(os.Args[1], "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -92,20 +104,36 @@ func internal(args []string) error {
 	return fmt.Errorf("unknown command %q", args[0])
 }
 
-// load builds the router of the config at the only argument, expanding its
-// secrets unless only checking. Checking builds the exact same router as
-// serving, so every startup error short of binding surfaces.
-func load(args []string, expand bool) (*config.Config, *router.Router, error) {
+// configPath returns the only argument, the path of the config.
+func configPath(args []string) (string, error) {
 	if len(args) != 1 {
-		return nil, nil, errors.New("expected exactly one argument: <config>")
+		return "", errors.New("expected exactly one argument: <config>")
 	}
 
-	cfg, err := config.Load(args[0], expand)
+	return args[0], nil
+}
+
+// check builds the router of the config at the only argument without
+// expanding its secrets, the exact same router as serving, so every startup
+// error short of binding surfaces.
+func check(args []string) error {
+	path, err := configPath(args)
+	if err == nil {
+		_, _, err = load(path, false, &router.Limits{})
+	}
+
+	return err
+}
+
+// load builds the router of the config at path with limits, expanding its
+// secrets unless only checking.
+func load(path string, expand bool, limits *router.Limits) (*config.Config, http.Handler, error) {
+	cfg, err := config.Load(path, expand)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config: %w", err)
 	}
 
-	rt, err := router.New(cfg)
+	rt, err := router.New(cfg, limits)
 	if err != nil {
 		return nil, nil, fmt.Errorf("router: %w", err)
 	}
@@ -163,9 +191,16 @@ func listeners(cfg *config.Config) ([]net.Listener, error) {
 }
 
 // serve serves the router on its listeners until SIGTERM or an interrupt,
-// reloading the auth tokens on SIGHUP.
+// reloading the config on SIGHUP.
 func serve(args []string) error {
-	cfg, rt, err := load(args, true)
+	path, err := configPath(args)
+	if err != nil {
+		return err
+	}
+
+	current := &swappable{}
+
+	cfg, err := current.load(path)
 	if err != nil {
 		return err
 	}
@@ -176,7 +211,7 @@ func serve(args []string) error {
 	}
 
 	srv := &http.Server{
-		Handler:           rt,
+		Handler:           current,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Closes idle keep-alive connections, which would otherwise pin a
 		// goroutine and a file descriptor each indefinitely.
@@ -184,7 +219,7 @@ func serve(args []string) error {
 	}
 
 	for _, ln := range lns {
-		log.Printf("listening on %s with %d model(s)", ln.Addr(), len(cfg.Models))
+		slog.Info("listening", "addr", ln.Addr(), "models", len(cfg.Models))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), unix.SIGTERM, os.Interrupt)
@@ -208,7 +243,7 @@ func serve(args []string) error {
 		case err := <-errs:
 			return err
 		case <-hup:
-			reload(args[0], rt)
+			reload(path, current)
 		case <-ctx.Done():
 		}
 	}
@@ -217,7 +252,7 @@ func serve(args []string) error {
 	// and ignores reloads meanwhile.
 	stop()
 	signal.Stop(hup)
-	log.Print("shutting down, draining in-flight requests")
+	slog.Info("shutting down, draining in-flight requests")
 
 	// Unbounded on purpose, systemd's TimeoutStopSec caps the drain.
 	if err := srv.Shutdown(context.Background()); err != nil {
@@ -234,27 +269,48 @@ func notify(state string) error {
 	return err
 }
 
-// reload replaces the auth tokens of rt with those of the config at path,
-// keeping the current ones if it fails, between the RELOADING=1 and READY=1
-// a `Type=notify-reload` unit waits for. The other settings take a restart.
-func reload(path string, rt *router.Router) {
+// reload replaces the router with one of the config at path, keeping the
+// current one if it fails, between the RELOADING=1 and READY=1 a
+// `Type=notify-reload` unit waits for. Only the listeners take a restart.
+func reload(path string, current *swappable) {
 	// systemd ignores RELOADING=1 unless stamped no earlier than its request.
 	// Reading CLOCK_MONOTONIC cannot fail.
 	var now unix.Timespec
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &now)
 
 	if err := notify(fmt.Sprintf("%s\nMONOTONIC_USEC=%d", daemon.SdNotifyReloading, now.Nano()/1_000)); err != nil {
-		log.Printf("sd_notify: %v", err)
+		slog.Warn("sd_notify", "err", err)
 	}
 
-	if cfg, err := config.Load(path, true); err != nil {
-		log.Printf("reload: keeping the current auth tokens: config: %v", err)
+	if cfg, err := current.load(path); err != nil {
+		slog.Error("reload, keeping the current config", "err", err)
 	} else {
-		rt.SetTokens(cfg)
-		log.Printf("reload: %d auth token(s)", len(cfg.AuthTokens))
+		slog.Info("reload", "models", len(cfg.Models), "tokens", len(cfg.AuthTokens))
 	}
 
 	if err := notify(daemon.SdNotifyReady); err != nil {
-		log.Printf("sd_notify: %v", err)
+		slog.Warn("sd_notify", "err", err)
 	}
+}
+
+// swappable serves with the latest router, while requests in flight keep
+// the one they started on, sharing its limits.
+type swappable struct {
+	atomic.Pointer[http.Handler]
+	limits router.Limits
+}
+
+func (s *swappable) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	(*s.Load()).ServeHTTP(w, req)
+}
+
+// load swaps in the router of the config at path, sharing the limits with
+// the router it replaces, or keeps the current one if it fails.
+func (s *swappable) load(path string) (*config.Config, error) {
+	cfg, rt, err := load(path, true, &s.limits)
+	if err == nil {
+		s.Store(&rt)
+	}
+
+	return cfg, err
 }

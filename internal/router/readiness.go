@@ -2,9 +2,7 @@ package router
 
 import (
 	"context"
-	"log"
 	"net/http"
-	"net/http/httputil"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,9 +24,9 @@ type readiness struct {
 	Probed int    `json:"probed"`
 }
 
-// prober runs and caches probe rounds over the backends with a health path.
+// prober runs and caches probe rounds over the models with a health path.
 type prober struct {
-	backends map[string]*backend
+	models []*model
 
 	mu     sync.Mutex
 	at     time.Time
@@ -36,13 +34,16 @@ type prober struct {
 	body   []byte
 }
 
-// registerReadiness wires GET /readiness, which concurrently probes the health
-// path of every backend that configures one and succeeds only if all answer.
-func registerReadiness(mux *http.ServeMux, backends map[string]*backend) {
-	p := &prober{backends: make(map[string]*backend)}
-	for name, b := range backends {
-		if b.health != "" {
-			p.backends[name] = b
+// registerReadiness wires GET /readiness, which concurrently probes every
+// server of every model with a health path and succeeds only if every such
+// model has a server answering, so that a restarting replica leaves llmhop
+// ready.
+func registerReadiness(mux *http.ServeMux, models []*model) {
+	p := &prober{}
+
+	for _, m := range models {
+		if m.health != "" {
+			p.models = append(p.models, m)
 		}
 	}
 
@@ -54,6 +55,8 @@ func registerReadiness(mux *http.ServeMux, backends map[string]*backend) {
 
 // result returns the latest probe round, running a new one once it expired.
 // Callers arriving during a round wait for it instead of starting their own.
+// The round is shared by every waiting caller, so no single caller's context
+// bounds it.
 func (p *prober) result() (int, []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -62,23 +65,23 @@ func (p *prober) result() (int, []byte) {
 		return p.status, p.body
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
 	var ready atomic.Int64
 	var wg sync.WaitGroup
 
-	for name, b := range p.backends {
+	for _, m := range p.models {
 		wg.Go(func() {
-			if err := b.probe(); err != nil {
-				log.Printf("readiness: models.%s: %v", name, err)
-				return
+			if m.ready(ctx) {
+				ready.Add(1)
 			}
-
-			ready.Add(1)
 		})
 	}
 
 	wg.Wait()
 
-	body := readiness{Status: "ok", Ready: int(ready.Load()), Probed: len(p.backends)}
+	body := readiness{Status: "ok", Ready: int(ready.Load()), Probed: len(p.models)}
 	p.status = http.StatusOK
 
 	if body.Ready < body.Probed {
@@ -90,22 +93,4 @@ func (p *prober) result() (int, []byte) {
 	p.body = jsonBody(body)
 
 	return p.status, p.body
-}
-
-// probe sends GET to the health path of the backend. The round is shared by
-// every waiting caller, so no single caller's context bounds it.
-func (b *backend) probe() error {
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.health, nil)
-	if err != nil {
-		return err
-	}
-
-	// A probe has no client request, so it stands in for its own, whose empty
-	// Host lets the backend URL host apply unless one is configured.
-	b.rewrite(&httputil.ProxyRequest{In: req, Out: req})
-
-	return b.up.Probe(req)
 }

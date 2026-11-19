@@ -43,7 +43,7 @@ func waitHealthy(args []string) error {
 		return fmt.Errorf("pid: %w", err)
 	}
 
-	up, err := upstream.Parse(args[1])
+	up, err := upstream.Parse(args[1], 0)
 	if err != nil {
 		return err
 	}

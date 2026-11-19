@@ -12,10 +12,14 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sync"
+	"time"
 )
 
 // Upstream is a parsed backend address.
 type Upstream struct {
+	// Label names the address in logs, without its query, which may hold a key.
+	Label string
 	// URL is the base every request is sent to.
 	URL *url.URL
 	// Transport reaches URL, dialing the socket of a `unix://` address.
@@ -26,20 +30,52 @@ type Upstream struct {
 // requests open, where the default of 2 would redial all others after each.
 const idleConnsPerHost = 64
 
-// sharedTransport reaches every http(s) backend.
-var sharedTransport = newTransport()
+// transportKey identifies a transport by its unix socket, empty for TCP,
+// and its response timeout.
+type transportKey struct {
+	socket  string
+	timeout time.Duration
+}
 
-func newTransport() *http.Transport {
+// transports holds one transport per key, shared by every backend and every
+// router, so that a reload keeps the pooled connections.
+var transports = struct {
+	sync.Mutex
+	byKey map[transportKey]*http.Transport
+}{byKey: make(map[transportKey]*http.Transport)}
+
+// transportOf returns the transport of key, creating it on first use.
+func transportOf(key transportKey) *http.Transport {
+	transports.Lock()
+	defer transports.Unlock()
+
+	if t, ok := transports.byKey[key]; ok {
+		return t
+	}
+
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConnsPerHost = idleConnsPerHost
+	t.ResponseHeaderTimeout = key.timeout
+
+	if key.socket != "" {
+		var dialer net.Dialer
+
+		t.Proxy = nil
+		t.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", key.socket)
+		}
+	}
+
+	transports.byKey[key] = t
 
 	return t
 }
 
 // Parse accepts an absolute http(s) URL or `unix:///<socket path>`. A socket
 // address carries no HTTP path, so requests go to the root of the server
-// listening on it.
-func Parse(raw string) (*Upstream, error) {
+// listening on it. A positive responseTimeout bounds the wait for the
+// response headers once the request is written.
+func Parse(raw string, responseTimeout time.Duration) (*Upstream, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
@@ -54,23 +90,19 @@ func Parse(raw string) (*Upstream, error) {
 		}
 
 		if u.Host != "" {
-			return &Upstream{URL: u, Transport: sharedTransport}, nil
+			label := *u
+			label.RawQuery = ""
+
+			return &Upstream{Label: label.String(), URL: u, Transport: transportOf(transportKey{timeout: responseTimeout})}, nil
 		}
 	case "unix":
 		if u.Host != "" || !path.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("url %q must be unix:///<absolute socket path>", raw)
 		}
 
-		transport := newTransport()
-		transport.Proxy = nil
+		transport := transportOf(transportKey{socket: u.Path, timeout: responseTimeout})
 
-		var dialer net.Dialer
-
-		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "unix", u.Path)
-		}
-
-		return &Upstream{URL: &url.URL{Scheme: "http", Host: "localhost"}, Transport: transport}, nil
+		return &Upstream{Label: raw, URL: &url.URL{Scheme: "http", Host: "localhost"}, Transport: transport}, nil
 	}
 
 	return nil, fmt.Errorf("url %q must be an absolute http(s) or unix URL", raw)

@@ -682,7 +682,7 @@ let
           inherit (socketRules.a) argument;
         };
         uds = sockets.services.llmhop.vllm.models.test.settings.uds;
-        routed = sockets.services.llmhop.gateway.llmhop.settings.models.test.url;
+        routed = sockets.services.llmhop.gateway.llmhop.settings.models.test.urls;
         inherit (socketContainer.containerConfig) PodmanArgs Network;
         mount = lib.elem "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U" socketContainer.containerConfig.Volume;
         after = socketContainer.unitConfig.After;
@@ -693,7 +693,7 @@ let
           argument = "default:user:hop:-wx";
         };
         uds = "/run/sockets/llmhop/vllm-test/http.sock";
-        routed = "unix:///run/sockets/llmhop/vllm-test/http.sock";
+        routed = [ "unix:///run/sockets/llmhop/vllm-test/http.sock" ];
         PodmanArgs = [ "--umask=0007" ];
         Network = "none";
         mount = true;

@@ -26,9 +26,10 @@ let
   sockets = map (unit: "${unit}.socket") socketUnits;
 
   containerConfigFile = "${util.containerRuntimeDirectory}/llmhop.json";
-  # A stable path, so a changed config reloads the native gateway in place.
+  # A stable path, so a changed config reloads the native gateway in place,
+  # where `llmhopctl` finds it on either runtime.
   etcConfigFile = "${name}/config.json";
-  nativeConfigFile = "/etc/${etcConfigFile}";
+  configFile = "/etc/${etcConfigFile}";
 
   # The glob of credentials loaded as auth tokens, imported from the system
   # credential store.
@@ -103,6 +104,19 @@ in
           with every endpoint of the backends as a model. Its listeners come
           from `listen`, so `settings` must not set it.
         '';
+      };
+      ctl = {
+        enable =
+          lib.mkEnableOption "`llmhopctl`, which manages the client tokens of `settings.authTokenCredentials`"
+          // {
+            default = true;
+          };
+        package = mkOption {
+          type = types.package;
+          default = pkgs.callPackage ../../pkgs/llmhopctl/package.nix { };
+          defaultText = lib.literalExpression "pkgs.callPackage ./pkgs/llmhopctl/package.nix { }";
+          description = "The `llmhopctl` package, which reads the gateway's config from `${configFile}`.";
+        };
       };
       listen = mkOption {
         type = types.attrsOf (
@@ -210,6 +224,9 @@ in
           };
         };
 
+        environment.etc.${etcConfigFile}.source = file;
+        environment.systemPackages = lib.mkIf cfg.ctl.enable [ cfg.ctl.package ];
+
         networking.firewall.allowedTCPPorts = lib.pipe tcpListeners [
           lib.attrValues
           (lib.filter (listener: listener.openFirewall))
@@ -256,7 +273,7 @@ in
         command = [
           (lib.getExe cfg.package)
           "serve"
-          nativeConfigFile
+          configFile
         ];
         # Tighter than the worker baseline: `@resources` syscalls are blocked
         # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited
@@ -296,7 +313,6 @@ in
         lib.mkMerge [
           {
             services.llmhop.socketClients = [ cfg.user ];
-            environment.etc.${etcConfigFile}.source = file;
             systemd.services.${name} = {
               restartTriggers = [ (lib.toJSON cfg.listen) ];
               reloadTriggers = [ file ];

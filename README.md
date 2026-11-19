@@ -173,6 +173,7 @@ SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`
   Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
   `settings.authTokenCredentials = "llmhop.token.*"` imports the tokens of `/etc/credstore/llmhop.token.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file.
   Natively, `systemctl reload llmhop` then re-imports the credentials and reloads the config without a restart, while a container needs `systemctl restart llmhop`, whose sockets hold new connections meanwhile.
+  `llmhopctl`, installed unless `ctl.enable` is false, does both as root with `llmhopctl token list`, `create <client>`, `rotate <client>` and `revoke <client>`, printing new tokens, and keeps a rotated token in the store holding it.
 - **SMG** reads its workers from a generated discovery file, which lists no LoRA adapters. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
 - **Bifrost** gets every model and LoRA adapter as a key of its `vllm` provider, or `sgl` for SGLang. `settings` is its `config.json`, with secrets as `env.NAME` references loaded from `environmentFile`. The native `package` comes from Bifrost's own flake.
 

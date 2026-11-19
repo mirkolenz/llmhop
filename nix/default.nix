@@ -52,6 +52,7 @@ in
       mkEvalCheck = pkgs.callPackage ./checks/lib.nix { };
       inherit (pkgs.stdenv.hostPlatform) isLinux;
       check-elf = pkgs.callPackage ./pkgs/check-elf/package.nix { };
+      llmhopctl = pkgs.callPackage ./pkgs/llmhopctl/package.nix { };
       mkCudaHome = pkgs.callPackage ./pkgs/mkCudaHome.nix { };
       mkUvEnv = pkgs.callPackage ./pkgs/mkUvEnv.nix {
         inherit check-elf;
@@ -61,7 +62,7 @@ in
     {
       checks = {
         inherit (config.packages) llmhop;
-        inherit check-elf;
+        inherit check-elf llmhopctl;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs isLinux {

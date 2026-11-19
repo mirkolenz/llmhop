@@ -236,11 +236,6 @@ testers.nixosTest {
         auth = f"-H 'Authorization: Bearer {token}'" if token else ""
         return f"""curl -fsS {auth} --json '{{"model": "fake-model"}}' http://127.0.0.1:8080/"""
 
-    def reload_tokens(node, script):
-        pid = node.get_unit_property("llmhop", "MainPID")
-        node.succeed(f"{script}; systemctl reload llmhop")
-        assert node.get_unit_property("llmhop", "MainPID") == pid
-
     def wait_restarted(node, unit, pid):
         node.wait_until_succeeds(f"systemctl is-active --quiet {unit} && test $(systemctl show -P MainPID {unit}) != {pid}")
 
@@ -279,16 +274,27 @@ testers.nixosTest {
     with subtest("llmhop reaches the worker through its socket"):
         assert machine.succeed(curl("client-secret")) == "socket ok"
 
-    with subtest("reloading llmhop imports added token credentials and drops deleted ones"):
-        machine.fail(curl("added-secret"))
-        reload_tokens(machine, "printf added-secret > /etc/credstore/llmhop.token.added")
-        assert machine.succeed(curl("added-secret")) == "socket ok"
-        reload_tokens(machine, "rm /etc/credstore/llmhop.token.added")
-        machine.fail(curl("added-secret"))
+    with subtest("llmhopctl creates, rotates and revokes tokens by reloading llmhop"):
+        pid = machine.get_unit_property("llmhop", "MainPID")
+        added = machine.succeed("llmhopctl token create added").strip()
+        assert machine.succeed(curl(added)) == "socket ok"
+        rotated = machine.succeed("llmhopctl token rotate added").strip()
+        machine.fail(curl(added))
+        assert machine.succeed(curl(rotated)) == "socket ok"
+        assert machine.succeed("llmhopctl token list") == "added\n"
+        machine.succeed("llmhopctl token revoke added")
+        machine.fail(curl(rotated))
+        machine.fail("llmhopctl token rotate added")
+        machine.fail("llmhopctl token create client")
+        assert machine.get_unit_property("llmhop", "MainPID") == pid
         assert machine.succeed(curl("client-secret")) == "socket ok"
 
     containers.wait_for_unit("llmhop.service")
     containers.wait_for_unit("llama-cpp-fake-model.service")
+
+    with subtest("containers: llmhopctl restarts llmhop to import a token"):
+        token = containers.succeed("llmhopctl token create added").strip()
+        assert containers.succeed(curl(token)) == "socket ok"
 
     for node, request, backend in [
         (machine, curl("client-secret"), "llama-cpp"),

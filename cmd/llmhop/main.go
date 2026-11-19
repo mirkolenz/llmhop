@@ -282,13 +282,18 @@ func reload(path string, current *swappable) {
 		slog.Warn("sd_notify", "err", err)
 	}
 
+	// systemd knows no failed reload, so ERRNO= reports the outcome as the
+	// unit's StatusErrno, which llmhopctl checks.
+	status, errno := "", unix.Errno(0)
+
 	if cfg, err := current.load(path); err != nil {
 		slog.Error("reload, keeping the current config", "err", err)
+		status, errno = "Reload failed, keeping the current config", unix.EINVAL
 	} else {
 		slog.Info("reload", "models", len(cfg.Models), "tokens", len(cfg.AuthTokens))
 	}
 
-	if err := notify(daemon.SdNotifyReady); err != nil {
+	if err := notify(fmt.Sprintf("%s\nSTATUS=%s\nERRNO=%d", daemon.SdNotifyReady, status, errno)); err != nil {
 		slog.Warn("sd_notify", "err", err)
 	}
 }

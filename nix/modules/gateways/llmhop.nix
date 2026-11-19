@@ -26,6 +26,9 @@ let
   sockets = map (unit: "${unit}.socket") socketUnits;
 
   containerConfigFile = "${util.containerRuntimeDirectory}/llmhop.json";
+  # A stable path, so a changed config reloads the native gateway in place.
+  etcConfigFile = "${name}/config.json";
+  nativeConfigFile = "/etc/${etcConfigFile}";
 
   # The glob of credentials loaded as auth tokens, imported from the system
   # credential store.
@@ -253,7 +256,7 @@ in
         command = [
           (lib.getExe cfg.package)
           "serve"
-          file
+          nativeConfigFile
         ];
         # Tighter than the worker baseline: `@resources` syscalls are blocked
         # (no setrlimit/setpriority). `AF_UNIX` stays in the inherited
@@ -264,7 +267,7 @@ in
         # the binary's sd_notify calls: the unit reaches `active` only once
         # llmhop serves, so anything ordered after it can assume it answers,
         # and a reload re-imports the credentials, then waits until llmhop
-        # reloaded its auth tokens. The listeners arrive from
+        # reloaded its config. The listeners arrive from
         # `llmhop-<name>.socket`, so nothing is bound here.
         serviceConfig = baseServiceConfig // {
           DynamicUser = false;
@@ -293,7 +296,11 @@ in
         lib.mkMerge [
           {
             services.llmhop.socketClients = [ cfg.user ];
-            systemd.services.${name}.restartTriggers = [ (lib.toJSON cfg.listen) ];
+            environment.etc.${etcConfigFile}.source = file;
+            systemd.services.${name} = {
+              restartTriggers = [ (lib.toJSON cfg.listen) ];
+              reloadTriggers = [ file ];
+            };
           }
           (util.identityConfig { inherit name cfg; })
         ]

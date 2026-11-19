@@ -60,6 +60,7 @@ Containers use Podman's `Notify=healthy`.
 Startup is chained by `name`, since two workers profiling GPU memory on one device both see it free and run out of memory.
 The llmhop gateway is `PartOf=` its listeners, so restarting a socket also restarts the gateway that holds it.
 Listener configuration changes also trigger a native gateway restart on NixOS.
+Its config lives at the stable path `/etc/llmhop/config.json` with `reloadTriggers`, so a changed config reloads it in place, since a restart would hold new connections in its sockets until every streaming response drained.
 
 ## Fetching
 

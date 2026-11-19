@@ -196,7 +196,8 @@ in
           so two workers profiling memory on the same GPU do not race into an
           OOM. Disable only when each model pins itself to a dedicated device,
           natively via its own `environment`, e.g. `CUDA_VISIBLE_DEVICES` with
-          GPU UUIDs, or in a container via its own `container.devices`.
+          GPU UUIDs or indices in PCI bus order, or in a container via its own
+          `container.devices`.
         '';
       };
       native.devices = mkOption {
@@ -223,8 +224,8 @@ in
           Prefer device groups of `/proc/devices` such as `char-nvidia` over
           nodes such as `/dev/nvidia0`, whose minor numbers follow probe order
           and may change between boots.
-          A model's `environment`, e.g. `CUDA_VISIBLE_DEVICES` with GPU UUIDs,
-          then picks its GPUs.
+          A model's `environment`, e.g. `CUDA_VISIBLE_DEVICES` with GPU UUIDs
+          or indices in PCI bus order, then picks its GPUs.
           Per-model `native.devices` replaces it.
           Only used if `runtime` is `"native"`.
         '';

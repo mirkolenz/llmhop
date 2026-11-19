@@ -20,7 +20,9 @@ The baseline denies binding IP sockets with `SocketBindDeny = "any"`, which a wo
 - `PrivateDevices = false` and the `render` and `video` groups give access to the CUDA, ROCm and Level Zero device nodes.
   A model's `native.devices` narrows it with `DevicePolicy = "closed"` and `DeviceAllow`.
   With the NVIDIA driver enabled, it defaults to the device groups `char-nvidia`, `char-nvidiactl` and `char-nvidia-uvm` of `/proc/devices`, which CUDA needs.
-  Groups cover every GPU, since the minor of `/dev/nvidia<N>` follows probe order and may change between boots, so `CUDA_VISIBLE_DEVICES` with GPU UUIDs places a model instead.
+  Groups cover every GPU, since the minor of `/dev/nvidia<N>` follows probe order and may change between boots, so `CUDA_VISIBLE_DEVICES` places a model instead.
+  It takes GPU UUIDs, or indices, which `CUDA_DEVICE_ORDER = "PCI_BUS_ID"` on every server ties to the slots.
+  Level Zero's indices follow the slots through `ZE_ENABLE_PCI_ID_DEVICE_ORDER = "1"`, while ROCm offers no such switch, so `ROCR_VISIBLE_DEVICES` should take GPU UUIDs.
   ROCm needs `/dev/kfd` beside `char-drm`, and Level Zero only the latter.
 - `PrivateUsers = "identity"`, since `true` would map those groups to `nobody`.
 - `MemoryDenyWriteExecute = false` for the JIT compilers of torch, triton, CUDA and SYCL.

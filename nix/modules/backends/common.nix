@@ -152,6 +152,11 @@ rec {
       SYCL_CACHE_DIR = "${cache}/sycl";
       NEO_CACHE_PERSISTENT = "1";
       NEO_CACHE_DIR = "${cache}/neo";
+      # Device indices follow the slots, rather than CUDA's speed heuristic,
+      # which vLLM and SGLang warn about, or Level Zero's discrete devices
+      # first. ROCm has no such switch.
+      CUDA_DEVICE_ORDER = "PCI_BUS_ID";
+      ZE_ENABLE_PCI_ID_DEVICE_ORDER = "1";
     }
     # Only the fetchers write the hub, so even a server with network access
     # never downloads into it.

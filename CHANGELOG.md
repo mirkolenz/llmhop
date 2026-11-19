@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.1](https://github.com/mirkolenz/llmhop/compare/v3.2.0...v3.2.1) (2026-11-19)
+
+### Bug Fixes
+
+* **nixos:** confine native models to nvidia device groups by default ([acac935](https://github.com/mirkolenz/llmhop/commit/acac935b7b5a5a1d3f87937c11008ed34eff51a3))
+* **nixos:** order device indices by pci bus ([6afaf9d](https://github.com/mirkolenz/llmhop/commit/6afaf9d7e3baae18c721a6503064881da1522964))
+
 ## [3.2.0](https://github.com/mirkolenz/llmhop/compare/v3.1.4...v3.2.0) (2026-11-19)
 
 ### ⚠ BREAKING CHANGES

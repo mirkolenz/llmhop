@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.2.2](https://github.com/mirkolenz/llmhop/compare/v3.2.1...v3.2.2) (2026-11-20)
+
+### Bug Fixes
+
+* **nix:** let nvcc of mkCudaHome find merged headers and libraries ([7e9f768](https://github.com/mirkolenz/llmhop/commit/7e9f7689b22fb6e181bf581225a08d629b879044))
+
 ## [3.2.1](https://github.com/mirkolenz/llmhop/compare/v3.2.0...v3.2.1) (2026-11-19)
 
 ### Bug Fixes

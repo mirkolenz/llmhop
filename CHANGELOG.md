@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.3.0](https://github.com/mirkolenz/llmhop/compare/v3.2.2...v3.3.0) (2026-11-21)
+
+### Features
+
+* add cors origins ([98df7f3](https://github.com/mirkolenz/llmhop/commit/98df7f3ab3a68939dc8cea3bf5e68a39e4f23116))
+* add trusted unix sockets ([3ed50bf](https://github.com/mirkolenz/llmhop/commit/3ed50bf9368cd4941ce33df41afbf795bfe41aef))
+
+### Bug Fixes
+
+* **nix:** update go vendor hash ([6956500](https://github.com/mirkolenz/llmhop/commit/69565000616cde1125f18171d9ac04cc5daa0cd2))
+
 ## [3.2.2](https://github.com/mirkolenz/llmhop/compare/v3.2.1...v3.2.2) (2026-11-20)
 
 ### Bug Fixes

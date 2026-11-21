@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.3.1](https://github.com/mirkolenz/llmhop/compare/v3.3.0...v3.3.1) (2026-11-21)
+
+### Bug Fixes
+
+* **nixos:** want the predecessor in the startup chain ([6f5a2e0](https://github.com/mirkolenz/llmhop/commit/6f5a2e078f0aa3d4321c8c3ffd46d95c06358b0e))
+
 ## [3.3.0](https://github.com/mirkolenz/llmhop/compare/v3.2.2...v3.3.0) (2026-11-21)
 
 ### Features

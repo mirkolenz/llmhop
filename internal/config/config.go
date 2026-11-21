@@ -78,6 +78,10 @@ type Config struct {
 	// as that client's without a token, since the socket's permissions decide
 	// who may connect. It requires auth tokens, as it is pointless without.
 	TrustedSockets map[string]string `json:"trustedSockets,omitempty"`
+	// CORSOrigins lists the origins whose pages may call the API with a
+	// bearer token, or `*` for every origin. It requires auth tokens, since a
+	// page would otherwise reach the backends with nothing to stop it.
+	CORSOrigins []string `json:"corsOrigins,omitempty"`
 	// Affinity lists the sources of the key keeping the requests of a
 	// conversation on one server, tried in order: `header:<name>` or the
 	// body's `prompt_cache_key`.
@@ -246,8 +250,8 @@ func (cfg *Config) validate(load bool) error {
 		names[token] = name
 	}
 
-	if len(cfg.TrustedSockets) > 0 && !cfg.RequiresAuth() {
-		return errors.New("trustedSockets require authTokens or authTokenCredentials")
+	if len(cfg.TrustedSockets)+len(cfg.CORSOrigins) > 0 && !cfg.RequiresAuth() {
+		return errors.New("trustedSockets and corsOrigins require authTokens or authTokenCredentials")
 	}
 
 	sockets := make(map[string]bool, len(cfg.TrustedSockets))
@@ -268,6 +272,12 @@ func (cfg *Config) validate(load bool) error {
 		}
 
 		sockets[socket] = true
+	}
+
+	for _, origin := range cfg.CORSOrigins {
+		if !validOrigin(origin) && (origin != "*" || len(cfg.CORSOrigins) > 1) {
+			return fmt.Errorf("corsOrigins: %q must be a scheme://host[:port], or the only entry *", origin)
+		}
 	}
 
 	for _, source := range cfg.Affinity {
@@ -428,6 +438,14 @@ func validModelName(name string) bool {
 	}
 
 	return wildcard || prefix != "" && !strings.HasSuffix(prefix, "/")
+}
+
+// validOrigin accepts a bare http(s) origin, without path or userinfo.
+func validOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" &&
+		u.Scheme+"://"+u.Host == origin
 }
 
 func validPath(p string) bool {

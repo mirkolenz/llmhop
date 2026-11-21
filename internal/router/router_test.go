@@ -877,12 +877,14 @@ func TestEarlyHintsKeepHeaders(t *testing.T) {
 
 func TestTrustedSockets(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_, _ = w.Write([]byte(r.Header.Get(clientHeader)))
 	}))
 	t.Cleanup(backend.Close)
 	h := newRouter(t, &config.Config{
 		AuthTokens:     map[string]string{"alice": "secret"},
 		TrustedSockets: map[string]string{"ssh": "/run/ssh.sock"},
+		CORSOrigins:    []string{"*"},
 		Models:         map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
@@ -908,6 +910,47 @@ func TestTrustedSockets(t *testing.T) {
 
 		if rec.Code != c.want || c.want == http.StatusOK && rec.Body.String() != "ssh" {
 			t.Errorf("%s: got status %d and body %q", c.name, rec.Code, rec.Body.String())
+		}
+
+		// The backend's CORS header never reaches a page.
+		if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("%s: got CORS headers %v", c.name, rec.Header())
+		}
+	}
+}
+
+func TestCORS(t *testing.T) {
+	backend, _ := startBackend(t)
+	h := newRouter(t, &config.Config{
+		AuthTokens:  map[string]string{"alice": "secret"},
+		CORSOrigins: []string{"https://chat.example"},
+		Models:      map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+	})
+
+	preflight := http.Header{"Access-Control-Request-Method": {"POST"}, "Access-Control-Request-Headers": {"authorization,content-type"}}
+	token := http.Header{"Authorization": {"Bearer secret"}}
+
+	cases := []struct {
+		name, method, origin string
+		header               http.Header
+		status               int
+		allowed              string
+	}{
+		{"preflight", http.MethodOptions, "https://chat.example", preflight, http.StatusNoContent, "https://chat.example"},
+		{"request", http.MethodPost, "https://chat.example", token, http.StatusOK, "https://chat.example"},
+		{"request without token", http.MethodPost, "https://chat.example", nil, http.StatusUnauthorized, "https://chat.example"},
+		{"preflight of another origin", http.MethodOptions, "https://evil.example", preflight, http.StatusNoContent, ""},
+	}
+
+	for _, c := range cases {
+		req := httptest.NewRequest(c.method, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+		req.Header.Set("Origin", c.origin)
+		maps.Copy(req.Header, c.header)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != c.status || rec.Header().Get("Access-Control-Allow-Origin") != c.allowed || rec.Header().Get("Access-Control-Allow-Credentials") != "" {
+			t.Errorf("%s: got status %d and headers %v", c.name, rec.Code, rec.Header())
 		}
 	}
 }

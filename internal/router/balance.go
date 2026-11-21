@@ -7,11 +7,13 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +65,9 @@ type target struct {
 	id uint64
 }
 
-func newModel(m config.Model, slots *semaphore.Weighted) (*model, error) {
+// newModel builds the model of m. With stripCORS, llmhop alone decides which
+// pages may read a response, as it does whenever tokens are required.
+func newModel(m config.Model, slots *semaphore.Weighted, stripCORS bool) (*model, error) {
 	headers := make(http.Header, len(m.Headers))
 
 	for k, v := range m.Headers {
@@ -120,6 +124,13 @@ func newModel(m config.Model, slots *semaphore.Weighted) (*model, error) {
 		ModifyResponse: func(resp *http.Response) error {
 			// llmhop already answers with the ID, which a backend may echo.
 			resp.Header.Del(requestIDHeader)
+
+			// The default CORS headers of a backend such as vLLM never apply.
+			if stripCORS {
+				maps.DeleteFunc(resp.Header, func(name string, _ []string) bool {
+					return strings.HasPrefix(name, "Access-Control-")
+				})
+			}
 
 			return nil
 		},

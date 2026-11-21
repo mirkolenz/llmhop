@@ -100,7 +100,9 @@ With `authTokens`, a map of names to tokens, set, every route but `/health` and 
 `authTokenCredentials`, a systemd credential glob with a single trailing `*` as in `ImportCredential=`, adds every matching credential as a token named by the part the `*` matched, read at startup, and keeps tokens required while none matches.
 `trustedSockets`, a map of client names to unix socket paths, serves the requests arriving on such a socket without a token as that client, so the socket's permissions decide who may connect, such as an admin forwarding it over SSH.
 Browsers must name a loopback host there, so web pages cannot rebind a domain to a forwarded port, and get `403` for cross-site requests with unsafe methods such as `POST`, while they cannot read the answers of the others.
-It requires auth tokens.
+`corsOrigins` lists the origins, as in `https://chat.example`, whose pages may call the API with a bearer token, or `*` for every origin, which is safe since browsers never send a token on their own.
+llmhop answers the preflights, allows the methods of REST APIs and every request and response header but no credentials, and drops the CORS headers of backends whenever tokens are required, so only `corsOrigins` decides which pages read a response.
+Both require auth tokens, and CORS never applies to trusted sockets.
 A model's `headers` are applied last, so a configured `Authorization` replaces the client's.
 Unknown keys are rejected, and `llmhop check config.json` validates a config without binding a port or expanding secrets.
 

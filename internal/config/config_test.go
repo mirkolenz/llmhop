@@ -124,6 +124,9 @@ func TestLoadErrors(t *testing.T) {
 		{"unclean trusted socket", `{"authTokens": {"t": "x"}, "trustedSockets": {"ssh": "/run//ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "absolute socket path"},
 		{"unlistened trusted socket", `{"listen": [":8080"], "authTokens": {"t": "x"}, "trustedSockets": {"ssh": "/run/ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "not in listen"},
 		{"trusted socket named like a token", `{"authTokens": {"t": "x"}, "trustedSockets": {"t": "/run/ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "also names an auth token"},
+		{"cors without auth", `{"corsOrigins": ["*"], "models": {"m": {"urls": ["http://x"]}}}`, "require authTokens"},
+		{"cors origin with path", `{"authTokens": {"t": "x"}, "corsOrigins": ["https://x/"], "models": {"m": {"urls": ["http://x"]}}}`, "corsOrigins"},
+		{"cors wildcard among origins", `{"authTokens": {"t": "x"}, "corsOrigins": ["*", "https://x"], "models": {"m": {"urls": ["http://x"]}}}`, "corsOrigins"},
 		{"model header expansion", `{"models": {"m": {"urls": ["http://x"], "headers": {"Authorization": "Bearer ${env:LLMHOP_CFG_MISSING}"}}}}`, "models.m.headers.Authorization"},
 	}
 

@@ -43,7 +43,7 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 	var models []*model
 
 	for name, m := range cfg.Models {
-		md, err := newModel(m, limits.semaphore("models."+name, int64(m.MaxConcurrentRequests)))
+		md, err := newModel(m, limits.semaphore("models."+name, int64(m.MaxConcurrentRequests)), cfg.RequiresAuth())
 		if err != nil {
 			return nil, fmt.Errorf("models.%s: %w", name, err)
 		}
@@ -75,7 +75,12 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 
 	var api http.Handler = mux
 	if cfg.RequiresAuth() {
-		api = newAuthenticator(cfg).wrap(api)
+		auth := newAuthenticator(cfg)
+		api = auth.wrap(api)
+
+		if len(cfg.CORSOrigins) > 0 {
+			api = auth.cors(cfg.CORSOrigins, api)
+		}
 	}
 
 	// Health and readiness sit outside the auth middleware: probes and

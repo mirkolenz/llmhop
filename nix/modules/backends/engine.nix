@@ -194,7 +194,8 @@ in
         description = ''
           Whether to start model services one at a time by ascending `name`,
           so two workers profiling memory on the same GPU do not race into an
-          OOM. Disable only when each model pins itself to a dedicated device,
+          OOM. Each service wants the one before it, so starting a model also
+          starts the stopped models before it. Disable only when each model pins itself to a dedicated device,
           natively via its own `environment`, e.g. `CUDA_VISIBLE_DEVICES` with
           GPU UUIDs or indices in PCI bus order, or in a container via its own
           `container.devices`.

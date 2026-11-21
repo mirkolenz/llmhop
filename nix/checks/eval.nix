@@ -722,7 +722,10 @@ let
         IPAddressDeny = "any";
         ReadOnlyPaths = [ "/var/cache/vllm/test/hub" ];
         local = false;
-        Wants = [ "vllm-test-fetch.service" ];
+        Wants = [
+          "vllm-test-fetch.service"
+          "vllm-marked.service"
+        ];
       };
     };
 
@@ -784,6 +787,7 @@ let
         inherit (socketContainer.containerConfig) PodmanArgs Network;
         mount = lib.elem "/run/sockets/llmhop/llama-cpp-b:/run/llmhop/socket:U" socketContainer.containerConfig.Volume;
         after = socketContainer.unitConfig.After;
+        wants = socketContainer.unitConfig.Wants;
       };
       expected = {
         root = {
@@ -798,6 +802,10 @@ let
         after = [
           "llama-cpp-b-fetch.service"
           "llama-cpp-b-refresh.service"
+          "llama-cpp-a.service"
+        ];
+        wants = [
+          "llama-cpp-b-fetch.service"
           "llama-cpp-a.service"
         ];
       };

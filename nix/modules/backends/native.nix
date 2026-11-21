@@ -106,7 +106,7 @@ let
           ]
         );
         wantedBy = [ "multi-user.target" ];
-        wants = fetchServices workload ++ online;
+        wants = fetchServices workload ++ after ++ online;
         after = fetchOrder workload ++ after ++ online;
         environment = serverEnvironment workload (
           {

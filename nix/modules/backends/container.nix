@@ -75,7 +75,7 @@ let
           util.startLimitConfig
           // image.unitConfig
           // {
-            Wants = fetchServices workload;
+            Wants = fetchServices workload ++ after;
             After = fetchOrder workload ++ after;
           };
         containerConfig =

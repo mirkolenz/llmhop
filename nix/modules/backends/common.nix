@@ -184,8 +184,8 @@ rec {
   sockets = lib.any (w: w.socket != null) workloads;
 
   # `perWorkload` applied to each of the sorted `models` with the units it
-  # starts after, its predecessor while `startupOrdering` so GPU memory
-  # profiling never overlaps, and to each detector with none.
+  # wants and starts after, its predecessor while `startupOrdering` so GPU
+  # memory profiling never overlaps, and to each detector with none.
   # See "Lifecycle" in the module internals documentation.
   chain =
     perWorkload:

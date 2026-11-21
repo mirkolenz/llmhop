@@ -115,17 +115,17 @@ let
   quadletDetector = quadlet.virtualisation.quadlet.containers.vllm-watermark;
   quadletFetcher = quadlet.virtualisation.quadlet.containers.vllm-test-fetch;
 
-  # Client tokens imported by glob, one clashing with another credential, and
-  # a gateway without endpoints to route.
+  # Client tokens imported by glob, one clashing with another credential,
+  # trusted listeners, and a gateway without endpoints to route.
   tokenGateway =
-    credentials:
+    extra:
     mkSystem {
       gateway = {
         type = "llmhop";
         llmhop = {
-          inherit credentials;
           settings.authTokenCredentials = "llmhop.token.*";
-        };
+        }
+        // extra;
       };
       vllm = nativeVllm // {
         models.test = {
@@ -959,7 +959,7 @@ let
       expr = {
         inherit (tokens.systemd.services.llmhop.serviceConfig) ImportCredential;
         clash = failing "client token" (tokenGateway {
-          "llmhop.token.backend" = apiKeys;
+          credentials."llmhop.token.backend" = apiKeys;
         });
         idle = idleGateway.systemd.services ? llmhop;
       };
@@ -967,6 +967,24 @@ let
         ImportCredential = [ "llmhop.token.*" ];
         clash = 1;
         idle = false;
+      };
+    };
+
+    testTrustedListener = {
+      expr = {
+        inherit ((tokenGateway { listen.ssh.trusted = true; }).services.llmhop.gateway.llmhop.settings)
+          trustedSockets
+          ;
+        tcp = failing "is trusted" (tokenGateway {
+          listen.ssh = {
+            trusted = true;
+            port = 2222;
+          };
+        });
+      };
+      expected = {
+        trustedSockets.ssh = "/run/llmhop/ssh.sock";
+        tcp = 1;
       };
     };
 

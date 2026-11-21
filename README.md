@@ -55,6 +55,7 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
 | ------ | ----------------------------------------------------------------- |
 | `400`  | an invalid body, a missing `model` or an unreadable body           |
 | `401`  | missing or invalid bearer token, with `WWW-Authenticate: Bearer`   |
+| `403`  | a cross-site request or foreign host on a trusted socket          |
 | `404`  | unknown model                                                      |
 | `408`  | the body did not arrive within a minute                            |
 | `413`  | the body exceeds `maxBodyBytes`                                    |
@@ -97,6 +98,9 @@ Setting both or neither is an error, and `check` does not require `listen`.
 Each of `urls` is an absolute `http(s)` URL or `unix:///<socket path>`.
 With `authTokens`, a map of names to tokens, set, every route but `/health` and `/readiness` requires a matching bearer token, which is stripped before forwarding, while the backend learns the token's name from `X-Llmhop-Client`.
 `authTokenCredentials`, a systemd credential glob with a single trailing `*` as in `ImportCredential=`, adds every matching credential as a token named by the part the `*` matched, read at startup, and keeps tokens required while none matches.
+`trustedSockets`, a map of client names to unix socket paths, serves the requests arriving on such a socket without a token as that client, so the socket's permissions decide who may connect, such as an admin forwarding it over SSH.
+Browsers must name a loopback host there, so web pages cannot rebind a domain to a forwarded port, and get `403` for cross-site requests with unsafe methods such as `POST`, while they cannot read the answers of the others.
+It requires auth tokens.
 A model's `headers` are applied last, so a configured `Authorization` replaces the client's.
 Unknown keys are rejected, and `llmhop check config.json` validates a config without binding a port or expanding secrets.
 
@@ -167,6 +171,7 @@ Routed models must stay on loopback and leave authentication to the gateway, and
 SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`, `port` and `openFirewall`.
 
 - **llmhop** runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
+  A listener with `trusted` is added to `trustedSockets` as the client named after it.
   The `default` listener serves `127.0.0.1:8080` and `environment` and `environmentFile` are forwarded to the service.
   Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a vLLM model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
   Natively, a changed config reloads the gateway in place, without dropping a request.

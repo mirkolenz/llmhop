@@ -119,6 +119,11 @@ func TestLoadErrors(t *testing.T) {
 		{"alias of another model", `{"models": {"m": {"urls": ["http://x"], "aliases": ["n"]}, "n": {"urls": ["http://x"]}}}`, "already a model"},
 		{"invalid affinity header", `{"affinity": ["header:Bad Header"], "models": {"m": {"urls": ["http://x"]}}}`, "affinity"},
 		{"unknown affinity source", `{"affinity": ["session"], "models": {"m": {"urls": ["http://x"]}}}`, "affinity"},
+		{"trusted socket without auth", `{"trustedSockets": {"ssh": "/run/ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "require authTokens"},
+		{"relative trusted socket", `{"authTokens": {"t": "x"}, "trustedSockets": {"ssh": "ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "absolute socket path"},
+		{"unclean trusted socket", `{"authTokens": {"t": "x"}, "trustedSockets": {"ssh": "/run//ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "absolute socket path"},
+		{"unlistened trusted socket", `{"listen": [":8080"], "authTokens": {"t": "x"}, "trustedSockets": {"ssh": "/run/ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "not in listen"},
+		{"trusted socket named like a token", `{"authTokens": {"t": "x"}, "trustedSockets": {"t": "/run/ssh.sock"}, "models": {"m": {"urls": ["http://x"]}}}`, "also names an auth token"},
 		{"model header expansion", `{"models": {"m": {"urls": ["http://x"], "headers": {"Authorization": "Bearer ${env:LLMHOP_CFG_MISSING}"}}}}`, "models.m.headers.Authorization"},
 	}
 

@@ -21,6 +21,7 @@ let
   # Every endpoint, unlisted ones included.
   endpoints = lib.attrValues config.services.llmhop.endpoints;
   tcpListeners = lib.filterAttrs (_: listener: listener.port != null) cfg.listen;
+  trustedListeners = lib.filterAttrs (_: listener: listener.trusted) cfg.listen;
   # The socket units of the listeners, which the gateway service holds.
   socketUnits = map socketUnit (lib.attrNames cfg.listen);
   sockets = map (unit: "${unit}.socket") socketUnits;
@@ -166,6 +167,17 @@ in
                   default = "0660";
                   description = "Mode of `socket`. Connecting needs write permission.";
                 };
+                trusted = mkOption {
+                  type = types.bool;
+                  default = false;
+                  description = ''
+                    Whether requests on `socket` need no token and count as the client
+                    named after the listener, since `socketUser`, `socketGroup` and
+                    `socketMode` decide who may connect. Browsers must send same-origin
+                    requests to a loopback host, so web pages cannot use a port forward
+                    of it. Requires `settings.authTokens` or `settings.authTokenCredentials`.
+                  '';
+                };
               };
             }
           )
@@ -174,6 +186,10 @@ in
         example = {
           default.host = "";
           caddy.socketGroup = "caddy";
+          ssh = {
+            socketGroup = "wheel";
+            trusted = true;
+          };
         };
         description = ''
           Listeners of the gateway, each a `llmhop-<name>.socket` unit handing
@@ -195,6 +211,10 @@ in
         ++ lib.mapAttrsToList (
           listenerName: util.firewallAssertion "${owner}.listen.${listenerName}"
         ) tcpListeners
+        ++ lib.mapAttrsToList (listenerName: listener: {
+          assertion = listener.port == null;
+          message = "services.llmhop: `${owner}.listen.${listenerName}` is trusted, which only a unix socket may be, so unset `port`.";
+        }) trustedListeners
         # A container reaches the endpoints on TCP only.
         ++ gateway.routeAssertions {
           inherit name endpoints;
@@ -204,6 +224,9 @@ in
         services.llmhop = {
           gateway.${name} = {
             listen.default.port = lib.mkDefault 8080;
+            settings.trustedSockets = lib.mkIf (trustedListeners != { }) (
+              lib.mapAttrs (_: listener: listener.socket) trustedListeners
+            );
             # Every endpoint is probed by readiness.
             settings.models = lib.genAttrs' endpoints (
               endpoint:

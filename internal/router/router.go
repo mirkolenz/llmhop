@@ -35,9 +35,9 @@ import (
 // New returns the handler of cfg, which serves the OpenAI models API from
 // the configured models and proxies every other request to the model named
 // by its /route/{model} path prefix or else its body, all guarded by the
-// auth tokens. Only GET /health and GET /readiness are served
-// unauthenticated and unlogged. It is immutable, so a reload replaces it,
-// sharing the limits with the router it replaces.
+// auth tokens or trusted sockets. Only GET /health and GET /readiness are
+// served unauthenticated and unlogged. It is immutable, so a reload replaces
+// it, sharing the limits with the router it replaces.
 func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 	rt := &routes{exact: make(map[string]*model), affinity: cfg.Affinity}
 	var models []*model

@@ -1,10 +1,12 @@
 package router
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -870,5 +872,42 @@ func TestEarlyHintsKeepHeaders(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK || resp.Header.Get(requestIDHeader) != "r1" {
 		t.Fatalf("got status %d and headers %v", resp.StatusCode, resp.Header)
+	}
+}
+
+func TestTrustedSockets(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Header.Get(clientHeader)))
+	}))
+	t.Cleanup(backend.Close)
+	h := newRouter(t, &config.Config{
+		AuthTokens:     map[string]string{"alice": "secret"},
+		TrustedSockets: map[string]string{"ssh": "/run/ssh.sock"},
+		Models:         map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+	})
+
+	cases := []struct {
+		name, socket, host string
+		header             http.Header
+		want               int
+	}{
+		{"trusted socket", "/run/ssh.sock", "localhost:8080", nil, http.StatusOK},
+		{"other socket", "/run/http.sock", "localhost:8080", nil, http.StatusUnauthorized},
+		{"rebound host", "/run/ssh.sock", "evil.example:8080", nil, http.StatusForbidden},
+		{"cross-site request", "/run/ssh.sock", "localhost:8080", http.Header{"Sec-Fetch-Site": {"cross-site"}}, http.StatusForbidden},
+		{"same-origin page", "/run/ssh.sock", "127.0.0.1:8080", http.Header{"Origin": {"http://127.0.0.1:8080"}}, http.StatusOK},
+	}
+
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
+		req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.UnixAddr{Name: c.socket, Net: "unix"}))
+		req.Host = c.host
+		maps.Copy(req.Header, c.header)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != c.want || c.want == http.StatusOK && rec.Body.String() != "ssh" {
+			t.Errorf("%s: got status %d and body %q", c.name, rec.Code, rec.Body.String())
+		}
 	}
 }

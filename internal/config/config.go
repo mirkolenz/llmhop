@@ -74,6 +74,10 @@ type Config struct {
 	// `*`, as in ImportCredential=, whose matches join AuthTokens at startup,
 	// each named by the part the `*` matched.
 	AuthTokenCredentials string `json:"authTokenCredentials,omitempty"`
+	// TrustedSockets maps a client name to a unix socket whose requests count
+	// as that client's without a token, since the socket's permissions decide
+	// who may connect. It requires auth tokens, as it is pointless without.
+	TrustedSockets map[string]string `json:"trustedSockets,omitempty"`
 	// Affinity lists the sources of the key keeping the requests of a
 	// conversation on one server, tried in order: `header:<name>` or the
 	// body's `prompt_cache_key`.
@@ -231,8 +235,7 @@ func (cfg *Config) validate(load bool) error {
 	names := make(map[string]string, len(cfg.AuthTokens))
 
 	for name, token := range cfg.AuthTokens {
-		// The name reaches backends in the X-Llmhop-Client header.
-		if name == "" || !httpguts.ValidHeaderFieldValue(name) {
+		if !validClientName(name) {
 			return fmt.Errorf("authTokens: invalid name %q", name)
 		}
 
@@ -241,6 +244,30 @@ func (cfg *Config) validate(load bool) error {
 		}
 
 		names[token] = name
+	}
+
+	if len(cfg.TrustedSockets) > 0 && !cfg.RequiresAuth() {
+		return errors.New("trustedSockets require authTokens or authTokenCredentials")
+	}
+
+	sockets := make(map[string]bool, len(cfg.TrustedSockets))
+
+	for name, socket := range cfg.TrustedSockets {
+		switch {
+		case !validClientName(name):
+			return fmt.Errorf("trustedSockets: invalid name %q", name)
+		case cfg.AuthTokens[name] != "":
+			return fmt.Errorf("trustedSockets.%s: also names an auth token", name)
+		// Requests carry the socket path as bound, so only that spelling matches.
+		case !path.IsAbs(socket) || path.Clean(socket) != socket:
+			return fmt.Errorf("trustedSockets.%s: %q must be a clean absolute socket path", name, socket)
+		case len(cfg.Listen) > 0 && !slices.Contains(cfg.Listen, "unix://"+socket):
+			return fmt.Errorf("trustedSockets.%s: %q is not in listen", name, socket)
+		case sockets[socket]:
+			return fmt.Errorf("trustedSockets.%s: %q is trusted twice", name, socket)
+		}
+
+		sockets[socket] = true
 	}
 
 	for _, source := range cfg.Affinity {
@@ -378,6 +405,12 @@ func (cfg *Config) loadAuthTokenCredentials(load bool) error {
 	}
 
 	return nil
+}
+
+// validClientName rejects an empty name and one that is no valid header
+// value, since the name reaches backends in the X-Llmhop-Client header.
+func validClientName(name string) bool {
+	return name != "" && httpguts.ValidHeaderFieldValue(name)
 }
 
 // validToken rejects an empty token, which would authenticate

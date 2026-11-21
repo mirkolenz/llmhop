@@ -20,6 +20,8 @@ func errorType(status int) string {
 	switch status {
 	case http.StatusUnauthorized:
 		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
 	case http.StatusNotFound:
 		return "not_found_error"
 	case http.StatusTooManyRequests:

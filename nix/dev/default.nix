@@ -14,23 +14,34 @@
       ...
     }:
     let
-      # A gateway and backends of both kinds on a host managed by system-manager.
-      systemManager = inputs.system-manager.lib.makeSystemConfig {
-        modules = lib.singleton {
-          imports = [ self.systemManagerModules.default ];
-          nixpkgs.hostPlatform = system;
-          services.llmhop = {
-            gateway.type = "llmhop";
-            llama-cpp = {
-              enable = true;
-              models.native.model = "example/native-GGUF:Q4_K_M";
-            };
-            vllm = {
-              runtime = "quadlet";
-              enable = true;
-              container.image = "docker.io/vllm/vllm-openai:latest";
-              models.container.model = "example/container";
-            };
+      # The gateway and a backend on a host managed by system-manager.
+      mkSystemManager =
+        llmhop:
+        inputs.system-manager.lib.makeSystemConfig {
+          modules = lib.singleton {
+            imports = [ self.systemManagerModules.default ];
+            nixpkgs.hostPlatform = system;
+            services.llmhop = {
+              gateway.enable = true;
+            }
+            // llmhop;
+          };
+        };
+      units = llmhop: (mkSystemManager llmhop).config.environment.etc."systemd/system".source;
+      native = units {
+        llama-cpp = {
+          enable = true;
+          models.native.model = "example/native-GGUF:Q4_K_M";
+        };
+      };
+      container = units {
+        runtime = "container";
+        vllm = {
+          enable = true;
+          container.image = "docker.io/vllm/vllm-openai:latest";
+          models.container = {
+            model = "example/container";
+            port = 8001;
           };
         };
       };
@@ -39,17 +50,20 @@
       checks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         system-manager = pkgs.runCommand "llmhop-system-manager" { } ''
           set -euo pipefail
-          cd ${systemManager.config.environment.etc."systemd/system".source}
-          for unit in llmhop.service llama-cpp-native.service vllm-container.service; do
+          cd ${native}
+          for unit in llmhop.service llama-cpp-native.service; do
             test -e "system-manager.target.wants/$unit"
           done
           test -e sockets.target.wants/llmhop-default.socket
-          test -e vllm-image.service -a -e vllm-container-fetch.service
-          grep -q '^ExecStart=.*/podman run ' vllm-container.service
           grep -q '^ExecStart=.*/bin/llama-server' llama-cpp-native.service
           grep -qx 'Sockets=llmhop-default.socket' llmhop.service
-          grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block vllm-container.service' \
-            vllm-container-refresh.service
+          grep -qx 'ExecStart=+/usr/bin/systemctl try-restart --no-block llama-cpp-native.service' \
+            llama-cpp-native-refresh.service
+          cd ${container}
+          for unit in llmhop.service vllm-container.service; do
+            test -e "system-manager.target.wants/$unit"
+          done
+          grep -q '^ExecStart=.*/podman run .*--userns auto:size=65536' vllm-container.service
           touch $out
         '';
       };

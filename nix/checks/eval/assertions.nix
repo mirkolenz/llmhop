@@ -1,0 +1,226 @@
+# Each misconfiguration fails exactly its own assertions.
+{
+  lib,
+  nativeVllm,
+  nativeSglang,
+  failing,
+  mkSystem,
+  mkContainer,
+  mkExposed,
+  mkRoutable,
+  tokenGateway,
+  apiKeys,
+  ...
+}:
+let
+  # Failing assertions containing `needle` of `system`, expected `count` times.
+  assertionCases = {
+    inlineWatermarkKey = {
+      needle = "watermark key inline";
+      count = 1;
+      system = mkContainer { vllm.models.test.watermark.settings.key_file = "/key"; };
+    };
+    # The flags of a watermark are reserved, even for a model without one,
+    # and under a dotted field.
+    watermarkFlag = {
+      needle = "`watermark-config.key`";
+      count = 1;
+      system = mkContainer { vllm.models.test.settings."watermark-config.key" = 42; };
+    };
+    routedBeyondLoopback = {
+      needle = "is routed by the gateway";
+      count = 1;
+      system = mkRoutable { vllm.models.qwen.host = "0.0.0.0"; };
+    };
+    firewallOnRoutedModel = {
+      needle = "is loopback";
+      count = 1;
+      system = mkRoutable { vllm.models.qwen.openFirewall = true; };
+    };
+    llmhopListenSetting = {
+      needle = "sets `listen`";
+      count = 1;
+      system = mkRoutable { gateway.settings.listen = [ ":8080" ]; };
+    };
+    portClash = {
+      needle = "is claimed by";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.native = {
+            model = "example/test";
+            port = 22001;
+          };
+        };
+        sglang = nativeSglang // {
+          models.other = {
+            model = "example/test";
+            port = 22001;
+          };
+        };
+      };
+    };
+    nameClash = {
+      needle = "model `test` is claimed";
+      count = 1;
+      system = mkSystem {
+        gateway.enable = true;
+        vllm = nativeVllm // {
+          models.test.model = "example/test";
+        };
+        llama-cpp = {
+          enable = true;
+          models.test.model = "example/test";
+        };
+      };
+    };
+    # Settings never silently lose to the flags llmhop derives.
+    forcedSettings = {
+      needle = "`served-model-name`";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          modelSettings.host = "0.0.0.0";
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            settings.served-model-name = "other";
+          };
+        };
+      };
+    };
+    # Nor do they under another spelling or at their default.
+    flagSpelling = {
+      needle = "`data_parallel_size`";
+      count = 1;
+      system = mkSystem {
+        sglang = nativeSglang // {
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            settings.data_parallel_size = 2;
+          };
+        };
+      };
+    };
+    # Nor as the negation of a derived boolean, on every negating parser.
+    negatedVllmFlag = {
+      needle = "`no-enable-lora`";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            loras.sql = "example/sql-lora";
+            settings.no-enable-lora = true;
+          };
+        };
+      };
+    };
+    negatedLlamaCppFlag = {
+      needle = "`no-alias`";
+      count = 1;
+      system = mkSystem {
+        llama-cpp = {
+          enable = true;
+          models.test = {
+            model = "example/test";
+            settings.no-alias = true;
+          };
+        };
+      };
+    };
+    # Without the gateway, an adapter clashing with another model fails.
+    loraClash = {
+      needle = "model `other` is claimed";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models = {
+            test = {
+              model = "example/test";
+              loras.other = "example/lora";
+            };
+            other.model = "example/other";
+          };
+        };
+      };
+    };
+    loraSelf = {
+      needle = "like the model itself";
+      count = 1;
+      system = mkSystem {
+        sglang = nativeSglang // {
+          models.test = {
+            model = "example/test";
+            port = 25001;
+            loras.test = "example/lora";
+          };
+        };
+      };
+    };
+    offlineInContainer = {
+      needle = "sets `offline = true`";
+      count = 1;
+      system = mkContainer { vllm.models.test.offline = true; };
+    };
+    offlineOnSocket = {
+      needle = "sets `offline = true`";
+      count = 0;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          models.test = {
+            model = "example/test";
+            offline = true;
+          };
+        };
+      };
+    };
+    offlineBeyondLoopback = {
+      needle = "sets `offline = true`";
+      count = 1;
+      system = mkExposed { offline = true; };
+    };
+    offlineWithoutFetch = {
+      needle = "downloads its repositories itself";
+      count = 1;
+      system = mkSystem {
+        vllm = nativeVllm // {
+          fetch.enable = false;
+          models.test = {
+            model = "example/test";
+            offline = true;
+          };
+        };
+      };
+    };
+    containerWithoutPort = {
+      needle = "which a container publishes";
+      count = 1;
+      system = mkContainer { vllm.models.test.port = null; };
+    };
+    trustedPort = {
+      needle = "is trusted";
+      count = 1;
+      system = tokenGateway {
+        listen.ssh = {
+          trusted = true;
+          port = 2222;
+        };
+      };
+    };
+    # Any other credential matching the glob would become a client token.
+    tokenClash = {
+      needle = "client token";
+      count = 1;
+      system = tokenGateway { credentials."llmhop.token.backend" = apiKeys; };
+    };
+  };
+in
+{
+  testAssertions = {
+    expr = lib.mapAttrs (_: case: failing case.needle case.system) assertionCases;
+    expected = lib.mapAttrs (_: case: case.count) assertionCases;
+  };
+}

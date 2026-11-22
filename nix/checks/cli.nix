@@ -6,7 +6,7 @@
   mkEvalCheck,
 }:
 let
-  inherit (import ../modules/lib.nix lib) renderCliArgs;
+  inherit (import ../modules/lib lib) renderCliArgs;
   engines = import ../modules/engines.nix lib;
 
   settings = {
@@ -47,20 +47,19 @@ mkEvalCheck {
       ];
     };
 
-    # Repeat-style parser: one flag per element, empty lists still dropped.
-    testRepeatDialect = {
+    # Comma-style parser: one flag with the elements joined, empty lists
+    # still dropped.
+    testCsvDialect = {
       expr = renderCliArgs engines.llama-cpp {
-        lora-paths = [
-          "x=/p/x"
-          "y=/p/y"
+        tensor-split = [
+          3
+          1
         ];
         empty = [ ];
       };
       expected = [
-        "--lora-paths"
-        "x=/p/x"
-        "--lora-paths"
-        "y=/p/y"
+        "--tensor-split"
+        "3,1"
       ];
     };
 

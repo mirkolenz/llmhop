@@ -8,7 +8,7 @@ It is built for single-model servers like [vLLM](https://github.com/vllm-project
 - Pure Go, no CGO, stateless and safe behind any load balancer.
 - Body and path routing with aliases and wildcards, a models API served from the config, health and readiness endpoints, graceful draining and reloading.
 - Balancing over several servers or data-parallel ranks with stateless prefix-cache affinity, failover, queueing and timeouts.
-- Ships as a static binary, a Docker image and a hardened NixOS module running llama.cpp, SGLang or vLLM behind llmhop, SMG, Bifrost or no gateway.
+- Ships as a static binary, a Docker image and a hardened NixOS module running llama.cpp, SGLang or vLLM behind llmhop or no gateway, natively or in containers.
 
 ## How it works
 
@@ -143,49 +143,42 @@ Add the flake input `github:mirkolenz/llmhop` and import `llmhop.nixosModules.de
 
 ```nix
 services.llmhop = {
-  gateway.type = "llmhop";
-  gateway.llmhop.listen.default.host = "";
-  gateway.llmhop.listen.default.openFirewall = true;
+  gateway.enable = true;
+  gateway.listen.default.host = "";
+  gateway.listen.default.openFirewall = true;
   llama-cpp.enable = true;
   llama-cpp.models."qwen3-8b".model = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
 };
 ```
 
-Both include [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) for containers, which every backend and gateway selects with `runtime = "native"` or `"quadlet"`, defaulting to the global `services.llmhop.runtime`, `"native"`.
-Container setups can also be [bundled](#hosts-without-nix) for hosts without Nix.
+`services.llmhop.runtime` decides how every backend and the gateway run:
+
+| `runtime`     | Units                                    | Downloads           | Clients reach a model through | Bundles |
+| ------------- | ---------------------------------------- | ------------------- | ----------------------------- | ------- |
+| `"native"`    | hardened system services                 | fetchers, offline servers | a unix socket or a port  | no      |
+| `"container"` | rootful Quadlet containers in user namespaces | each server itself | a published port          | yes     |
+
+Both include [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) for containers, and container setups can be [bundled](#hosts-without-nix) for hosts without Nix.
 With system-manager, the host provides the configuration of podman in `/etc/containers`.
 See the [options reference](https://mirkolenz.github.io/llmhop/) for every option and the [module internals](https://mirkolenz.github.io/llmhop/internals.html) for the design rationale.
 
-### Gateways
+### Gateway
 
-`services.llmhop.gateway.type` selects at most one gateway, configured by the option set of the same name, which routes every model of every backend by its `name`.
-The gateway runs only while some backend serves a model, which the read-only `services.llmhop.gateway.active` reports.
+`services.llmhop.gateway.enable` puts llmhop in front of every backend, routing every model and detector by its `name`.
+It runs only while some backend serves a workload, which the read-only `services.llmhop.gateway.active` reports.
+Routed workloads must stay on loopback and leave authentication to the gateway.
 
-| `type`      | Gateway                                                          | Unix sockets | Detectors |
-| ----------- | ---------------------------------------------------------------- | ------------ | --------- |
-| `null`      | none, clients connect to each model                              |              |           |
-| `"llmhop"`  | llmhop                                                           | native only  | yes       |
-| `"smg"`     | the [Shepherd Model Gateway](https://github.com/smg-project/smg) | no           | no        |
-| `"bifrost"` | [Bifrost](https://github.com/maximhq/bifrost)                    | no           | no        |
+The gateway runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container on the host network receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
+A listener with `trusted` is added to `trustedSockets` as the client named after it.
+The `default` listener serves `127.0.0.1:8080` and `environment` and `environmentFile` are forwarded to the service.
+Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
+Natively, a changed config reloads the gateway in place, without dropping a request.
+Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
+`settings.authTokenCredentials = "llmhop.token.*"` imports the tokens of `/etc/credstore/llmhop.token.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file.
+Natively, `systemctl reload llmhop` then re-imports the credentials and reloads the config without a restart, while a container needs `systemctl restart llmhop`, whose sockets hold new connections meanwhile.
+`llmhopctl`, installed unless `ctl.enable` is false, does both as root with `llmhopctl token list`, `create <client>`, `rotate <client>` and `revoke <client>`, printing new tokens, and keeps a rotated token in the store holding it.
 
-Each gateway runs natively or as a container, as selected by `gateway.<type>.runtime`.
-
-Routed models must stay on loopback and leave authentication to the gateway, and gateways without socket support need every model to set a `port`.
-SMG and Bifrost listen on `127.0.0.1:8080` by default, configured through `host`, `port` and `openFirewall`.
-
-- **llmhop** runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
-  A listener with `trusted` is added to `trustedSockets` as the client named after it.
-  The `default` listener serves `127.0.0.1:8080` and `environment` and `environmentFile` are forwarded to the service.
-  Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a vLLM model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
-  Natively, a changed config reloads the gateway in place, without dropping a request.
-  Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
-  `settings.authTokenCredentials = "llmhop.token.*"` imports the tokens of `/etc/credstore/llmhop.token.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file.
-  Natively, `systemctl reload llmhop` then re-imports the credentials and reloads the config without a restart, while a container needs `systemctl restart llmhop`, whose sockets hold new connections meanwhile.
-  `llmhopctl`, installed unless `ctl.enable` is false, does both as root with `llmhopctl token list`, `create <client>`, `rotate <client>` and `revoke <client>`, printing new tokens, and keeps a rotated token in the store holding it.
-- **SMG** reads its workers from a generated discovery file, which lists no LoRA adapters. `settings` takes its CLI flags, where `${cred:name}` resolves to a file path, as in `settings.api-key-file = "\${cred:smg.api-key}"`, which requires an SMG build newer than v1.13.0. The native `package` is a [`mkUvEnv`](#native-vllm-and-sglang-from-prebuilt-wheels) environment.
-- **Bifrost** gets every model and LoRA adapter as a key of its `vllm` provider, or `sgl` for SGLang. `settings` is its `config.json`, with secrets as `env.NAME` references loaded from `environmentFile`. The native `package` comes from Bifrost's own flake.
-
-Without a gateway, each model serves clients on its own socket or `port`, and `socketClients` lists the users, such as a reverse proxy, that may connect to every model socket.
+Without the gateway, each model serves clients on its own socket or `port`, and `socketClients` lists the users, such as a reverse proxy, that may connect to every native model socket.
 
 ### Inference backends
 
@@ -208,8 +201,7 @@ services.llmhop = {
   };
   sglang = {
     enable = true;
-    runtime = "quadlet";
-    container.image = "docker.io/lmsysorg/sglang:latest";
+    package = inputs.llmhop.legacyPackages.${pkgs.stdenv.hostPlatform.system}.mkUvEnv { workspaceRoot = ./sglang-env; };
     models."llama-3-8b" = {
       model = "meta-llama/Meta-Llama-3-8B-Instruct";
       port = 19002;
@@ -218,7 +210,7 @@ services.llmhop = {
 };
 ```
 
-A vLLM model serves `loras`, LoRA adapters by the name clients request them under, which its fetcher downloads like `model`:
+A vLLM or SGLang model serves `loras`, LoRA adapters by the name clients request them under, which its fetcher downloads like `model`:
 
 ```nix
 services.llmhop.vllm.models."qwen3-8b" = {
@@ -228,24 +220,37 @@ services.llmhop.vllm.models."qwen3-8b" = {
 };
 ```
 
+vLLM serves an adapter under its own name, while SGLang serves it as `<model>:<adapter>`, so the gateway rewrites the `model` of requests to the adapter's name, and clients without the gateway send the latter.
+
 Several GPUs serve one model faster as data-parallel ranks of one server, set by `dataParallelSize = 2` on a vLLM or SGLang model, than as separate models, since the server balances requests by its own load and cache state.
 vLLM then runs several API frontends by default, each storing the responses of the Responses API on its own, so stored responses need `settings.api-server-count = 1`.
 
-Each model runs as the unit `<engine>-<name>`.
-Native workers are hardened services running as the backend's `user`, which defaults to the engine name, while container workers run rootful, with `user` defaulting to `root`, through [quadlet-nix](https://github.com/mirkolenz/quadlet-nix) with the backend's `container.image`, managed with `quadletctl`.
-Switching a backend's `runtime` therefore changes the owner of its cache directories, but not of the files a previous fetch left in them, so a native fetcher cannot update a cache filled by a container until `chown -R` hands it to the new `user` and `group`, or the cache is deleted for a fresh download.
-A worker stays `activating` until it answers its health endpoint, and `startupOrdering`, enabled by default for every backend, starts workers one at a time by `name`, so two never profile or size their GPU memory at once.
+Each workload runs as the unit `<engine>-<name>`.
+Native workers are hardened services running as the backend's `user`, which defaults to the engine name, while containers run rootful in user namespaces, see [containers](#containers-and-user-namespaces).
+A worker stays `activating` until it answers its health endpoint, and `startupOrdering`, enabled by default for every backend, starts models one at a time by `name`, so two never profile or size their GPU memory at once.
+On a stop, such as the restart after a fetch, a server drains its in-flight requests for the backend's `shutdownTimeoutSeconds`, 10 by default, before it is killed: vLLM through `--shutdown-timeout`, SGLang and llama.cpp on SIGTERM.
+
+Ordering does not split a GPU between models, since every engine sizes itself from the memory free when it starts.
+vLLM gives its KV cache everything free after warmup, SGLang its static pool a fraction of what was free at its start, and llama.cpp fits its context and offloaded layers to free memory.
+Models sharing a GPU therefore need explicit budgets in their `settings`, which together fit the GPU:
+
+| Engine    | Budget                                                                                               |
+| --------- | ---------------------------------------------------------------------------------------------------- |
+| vLLM      | `gpu-memory-utilization`, a fraction of the GPU, and `kv-cache-memory`, which skips sizing the cache |
+| SGLang    | `mem-fraction-static`, a fraction of the memory free at its start, and `max-total-tokens` as a cap   |
+| llama.cpp | `fit = "off"` with `n-gpu-layers` and `ctx-size`                                                     |
+
 Evaluation rejects any port, unit or model name claimed twice.
 Customize the generated units directly, as in `systemd.services.vllm-qwen3-8b.serviceConfig.MemoryHigh = "64G"` or `virtualisation.quadlet.containers.vllm-qwen3-8b.containerConfig`.
 
-llama.cpp and vLLM workers default to `port = null`, binding a unix socket below `socketDirectory` that only the backend's workers, llmhop and `socketClients` can reach.
-Set `port` to bind `<host>:<port>` instead, which SGLang always needs.
+Native llama.cpp and vLLM workers default to `port = null`, binding a unix socket below `socketDirectory` that only the backend's workers, the gateway and `socketClients` can reach.
+Set `port` to bind `<host>:<port>` instead, which SGLang and every container always need.
 
 #### Fetching and offline servers
 
-Each model has a fetcher `<engine>-<name>-fetch` that downloads everything into the model's own cache `cache.directory/<name>`, after which the server runs offline from it.
+Natively, each model has a fetcher `<engine>-<name>-fetch` that downloads everything into the model's own cache `cache.directory/<name>`, after which the server runs offline from it.
 A `model` that is an absolute path has no fetcher.
-`extraRepositories` lists further repositories that `settings` reference, such as a draft model or LoRA adapter, and `revision` pins a branch, tag or commit:
+`extraRepositories` lists further repositories that `settings` reference, such as a draft model, and `revision` pins a branch, tag or commit:
 
 ```nix
 services.llmhop.vllm.models."qwen3-8b" = {
@@ -263,16 +268,12 @@ Only fetchers get the backend's `fetch.credentials`, `fetch.environment` and the
 `<backend>-update`, such as `vllm-update`, reruns every fetcher on the `fetch.schedule` (`OnCalendar=`), weekly by default, prunes what the model no longer references, and restarts each running server after a successful fetch, even if its model did not change.
 An interrupted download leaves a running server alone, and a successful retry refreshes it.
 An explicitly stopped server stays stopped.
-
 `fetch.enable = false` drops the fetchers, refresh and update units, so each server downloads its repositories itself when it starts, which needs `offline = false`, its default then.
-A container backend can then also set `cache.directory = null`, keeping each cache in the named volume `<engine>-<name>` without tmpfiles rules, and `container.imageUnit = false`, so each container references `container.image` directly rather than through the image unit `<engine>-image`.
-Together they leave one unit per model, as in the bundle `packages.x86_64-linux.vllm-bundle` of [`nix/bundles/vllm.nix`](nix/bundles/vllm.nix).
 
-With fetchers, servers never download from the hub: they get `HF_HUB_OFFLINE`, and with `offline = true`, the default, no network.
-A native server on a socket gets no network at all and on a `port` only loopback, while a container gets `Network=none`.
-Only a socket or a native loopback `host` can be isolated like this, so any other workload defaults to `offline = false` and rejects `offline = true`.
+With fetchers, servers never download from the hub: they get `HF_HUB_OFFLINE` and `LLAMA_ARG_OFFLINE`, and with `offline = true`, the default, no network.
+A server on a socket gets no network at all and on a `port` only loopback.
+Only a socket or a loopback `host` can be isolated like this, so any other workload defaults to `offline = false` and rejects `offline = true`.
 `offline = false` lifts the network restrictions for features like media URLs in requests.
-Tagged container images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`, and are otherwise only pulled while missing, so a start needs no registry.
 
 #### Settings rendering
 
@@ -281,50 +282,38 @@ Strings and paths are passed verbatim and everything else as JSON, so attribute 
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.
 - llama.cpp and vLLM render `false` as `--no-<key>`, while SGLang drops it, so write the negated key, as in `disable-radix-cache = true`.
-- vLLM and SGLang pass a list to one flag (`--<key> a b`), llama.cpp repeats the flag (`--<key> a --<key> b`).
+- vLLM and SGLang pass a list to one flag (`--<key> a b`), llama.cpp joins it by commas (`--<key> a,b`), since repeating some of its flags, such as `--tensor-split`, keeps only the last.
 
 #### Containers and user namespaces
 
-Every container backend and gateway runs as root by default, which a user namespace maps to an unprivileged host range.
-`container.config` adds `[Container]` keys to every container of a backend, servers, fetchers and detectors alike, or of a gateway, and `container.mountOptions` adds idmapped mounts let the namespace own the cache and read the credentials:
+With `runtime = "container"`, every workload runs the backend's `container.image` on its published loopback `port` and downloads what it serves into the Podman volume `<engine>-<name>` when it starts, so a restart picks up a moved `revision`.
+A gated repository needs `HF_TOKEN` from the backend's `environmentFile`, since the server itself downloads.
+`container.devices` exposes the GPUs through CDI, such as `nvidia.com/gpu=all`, which `hardware.nvidia-container-toolkit` provides.
+Tagged registry images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`, and are otherwise only pulled while missing, so a start needs no registry.
+
+Every container runs rootful in its own user namespace, `services.llmhop.container.userNS = "auto:size=65536"` by default, which maps its root onto a range of the subordinate IDs of the `containers` user that quadlet-nix declares.
+Podman may pick another range whenever it recreates a container, so llmhop mounts every volume and the credentials with `idmap`, which needs a filesystem supporting idmapped mounts below `/var/lib/containers`, such as ext4, xfs, btrfs or ZFS 2.2.
+`services.llmhop.container.config` adds `[Container]` keys to every container, such as the render group of AMD and Intel GPUs, whose device nodes the namespace otherwise cannot open:
 
 ```nix
-services.llmhop = {
-  vllm = {
-    runtime = "quadlet";
-    container = {
-      config.UserNS = "auto:size=65536";
-      mountOptions = {
-        cache = [ "idmap" ];
-        credentials = [ "idmap" ];
-      };
-    };
-  };
-  gateway.llmhop = {
-    runtime = "quadlet";
-    container = {
-      config.UserNS = "auto";
-      mountOptions.credentials = [ "idmap" ];
-    };
-  };
+services.llmhop.container = {
+  userNS = "auto:size=65536,gidmapping=303:303:1";
+  config.GroupAdd = [ "303" ];
 };
 ```
 
-`UIDMap=` and `GIDMap=` work the same way in place of `UserNS=`.
-A non-root `User=` inside the namespace takes the mapping `idmap=uids=0-<uid>-1;gids=0-<gid>-1` in both lists, so the cache stays owned by host root.
-Only a cache on a filesystem without idmapped mounts, such as NFS, needs the backend's `user` and `group` set to the host IDs that an explicit `UIDMap=` and `GIDMap=` give the container user.
-Rootful `UserNS=auto` needs subordinate IDs for a `containers` user, which NixOS does not declare.
+`userNS = null` runs the containers as host root, or leaves explicit `UIDMap=` and `GIDMap=` to `container.config`.
 
 #### Hosts without Nix
 
-The container backends and gateways can be rendered into plain files for any host with podman 5 and systemd, such as Ubuntu 25.04:
+Container setups can be rendered into plain files for any host with podman 5 and systemd, such as Ubuntu 25.04:
 
 ```nix
 packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.mkQuadletBundle {
   modules = [
     {
       services.llmhop = {
-        gateway.type = "llmhop";
+        gateway.enable = true;
         vllm = {
           enable = true;
           container.image = "docker.io/vllm/vllm-openai:latest";
@@ -340,10 +329,11 @@ packages.x86_64-linux.llmhop-bundle = inputs.llmhop.legacyPackages.x86_64-linux.
 ```
 
 It is the [bundle of quadlet-nix](https://github.com/mirkolenz/quadlet-nix#bundles-for-hosts-without-nix) named `llmhop`, which every system importing llmhop's modules exposes as `virtualisation.quadlet.bundle.package`, with every rootful Quadlet unit of that system.
-It defaults `services.llmhop.runtime` to `"quadlet"`.
-The bundle holds the Quadlet files, update and refresh units, timers, the llmhop gateway's socket units and tmpfiles rules below `etc/`, the scripts and generated configs below `/usr/local/lib/llmhop`, and an `install.sh` that copies them into place, starts the servers, restarts every running unit it changed and retires those a previous bundle had but this one lacks.
-The `uninstall.sh` installed beside the assets removes the bundle again, keeping the model caches.
-Native backends and gateways cannot be bundled, and firewall and user options have no effect there.
+It sets `services.llmhop.runtime` to `"container"`, so a native configuration fails to build.
+The bundle holds the Quadlet files, the gateway's socket units and the auto-update units below `etc/`, the generated configs and the gateway's image archive below `/usr/local/lib/llmhop`, and an `install.sh` that copies them into place, starts the servers, restarts every running unit it changed and retires those a previous bundle had but this one lacks.
+The `uninstall.sh` installed beside the assets removes the bundle again, keeping the volumes.
+The host needs the `containers` entry in `/etc/subuid` and `/etc/subgid` for the user namespaces, as in `useradd --system --no-create-home containers && usermod --add-subuids 2147483647-4294967294 --add-subgids 2147483647-4294967294 containers`.
+Firewall and user options have no effect there.
 
 ### Native vLLM and SGLang from prebuilt wheels
 
@@ -368,7 +358,7 @@ dependencies = ["vllm==0.16.2"]
 
 ### Inference server credentials
 
-Credentials are granted per model, so no worker can read another's keys.
+Credentials are granted per workload, so no worker can read another's keys.
 `credentials.<name>` maps a name to a file outside the Nix store, or to `null` to import it from the system credential store, and `${cred:name}` in `settings` or `environment` expands to its read-only path:
 
 ```nix
@@ -387,12 +377,12 @@ systemd-ask-password -n | systemd-creds encrypt --name=llmhop.hf-token - /etc/cr
 ```
 
 vLLM and SGLang read a YAML file with `api-key` through `settings.config`, as in `credentials."config.yaml"` with `settings.config = "\${cred:config.yaml}"`, while llama.cpp uses `api-key-file`.
-Containers see their credentials at `/run/llmhop/credentials`, named by `$CREDENTIALS_DIRECTORY` as natively, and readable through a user namespace with the backend's or gateway's `container.mountOptions.credentials`, see [user namespaces](#containers-and-user-namespaces).
+Containers see their credentials at `/run/llmhop/credentials`, named by `$CREDENTIALS_DIRECTORY` as natively.
 
-### vLLM watermarking
+### Watermarking
 
-Both vLLM backends can watermark a model's output and run detectors serving `POST /detect` beside the workers.
-A `watermark` holds vLLM's `WatermarkConfig` without the key as `settings`, plus the `credential` holding the key, and a detector tests every one of its `profiles`:
+vLLM and SGLang can watermark a model's output and run detectors serving `POST /detect` beside the workers.
+A `watermark` holds the engine's watermark config without its key as `settings`, plus the `credential` holding the key, and a detector tests every one of its `profiles`:
 
 ```nix
 services.llmhop.vllm = {
@@ -420,7 +410,10 @@ A key is an unsigned 64-bit integer credential, never entering the Nix store or 
 (umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key.2026-10)
 ```
 
+vLLM reads the key through `key_file` of its `WatermarkConfig`, which requires a vLLM newer than 0.34.0.
+SGLang reads its keys from its config file, which the watermark script writes into the server's private `/tmp`, and takes a second key for dual-key watermarking as `secondaryCredential`.
+Its `settings` are SGLang's watermark config without `key` and `key_b`, such as `context_window` and `enforce_all`, which keeps clients from opting out.
+The engines differ in their algorithms, so each detector only detects the watermarks of its own backend.
 A detector reports the most significant profile with its Bonferroni-corrected `p_value`, `score`, `num_scored_tokens` and `is_watermarked`.
 To rotate a key, provision it under a new credential name and keep a profile with the old one while old text still needs checking.
-llmhop routes detectors as unlisted models, as in `POST /route/production/detect`, while other gateways leave them to direct clients.
-Watermarking requires vLLM 0.30.0 or newer.
+The gateway routes detectors as unlisted models, as in `POST /route/production/detect`.

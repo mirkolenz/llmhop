@@ -1,3 +1,7 @@
+# The options every backend and the gateway share: the runtime of all their
+# units, the sockets of native ones, the user namespaces of containers, and
+# the claims that keep ports, units and model names unique.
+sectionType:
 {
   config,
   lib,
@@ -5,10 +9,8 @@
   ...
 }:
 let
+  inherit (lib) mkOption types;
   cfg = config.services.llmhop;
-
-  util = import ./lib.nix lib;
-  sockets = lib.filter (e: e.socket != null) (lib.attrValues cfg.endpoints);
 
   # Assertion that only one owner claims the resource `key` of `kind`.
   claimAssertion = kind: key: owners: {
@@ -20,15 +22,15 @@ in
   meta.maintainers = with lib.maintainers; [ mirkolenz ];
 
   options.services.llmhop = {
-    version = lib.mkOption {
-      type = lib.types.str;
+    version = mkOption {
+      type = types.str;
       internal = true;
       default = "dev";
       description = "Version of `package`, which the flake's modules set to its revision.";
     };
 
-    package = lib.mkOption {
-      type = lib.types.package;
+    package = mkOption {
+      type = types.package;
       internal = true;
       readOnly = true;
       default = pkgs.callPackage ../package.nix { inherit (cfg) version; };
@@ -36,98 +38,89 @@ in
       description = "The llmhop package, whose binary also runs the worker commands.";
     };
 
-    systemctl = lib.mkOption {
-      type = lib.types.str;
+    systemctl = mkOption {
+      type = types.str;
       internal = true;
       default = lib.getExe' config.systemd.package "systemctl";
       defaultText = lib.literalExpression ''lib.getExe' config.systemd.package "systemctl"'';
       description = "The `systemctl` of the running systemd, which the refresh units call.";
     };
 
-    runtime = removeAttrs (util.runtimeOption "native") [ "defaultText" ] // {
-      description = "Default `runtime` of every backend and gateway, natively as hardened services or as Quadlet containers.";
+    runtime = mkOption {
+      type = types.enum [
+        "native"
+        "container"
+      ];
+      default = "native";
+      description = ''
+        How every backend and the gateway run: natively as hardened services
+        with fetchers, unix sockets and offline servers, or as rootful
+        Quadlet containers in user namespaces, which publish loopback ports,
+        download for themselves and can be bundled for hosts without Nix.
+      '';
     };
 
-    socketDirectory = lib.mkOption {
-      type = lib.types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
+    socketDirectory = mkOption {
+      type = types.strMatching "/run(/[[:alnum:]_][[:alnum:]_.-]*)+";
       default = "/run/llmhop";
       description = ''
         Directory of every unix socket a workload or llmhop serves, with a
-        `RuntimeDirectory=` per workload without a `port`, hence below `/run`.
+        `RuntimeDirectory=` per native workload without a `port`, hence
+        below `/run`.
       '';
     };
 
-    socketClients = lib.mkOption {
-      type = with lib.types; listOf str;
+    socketClients = mkOption {
+      type = with types; listOf str;
       default = [ ];
       example = [ "caddy" ];
       description = ''
-        Users that may connect to the unix socket of every workload without a
-        `port`, such as a reverse proxy in front of them. Each joins the group
-        of every native backend and gets a default ACL on `socketDirectory`
-        for the containers. A gateway reaching sockets adds its own user.
+        Users that may connect to the unix socket of every native workload
+        without a `port`, such as a reverse proxy in front of them, by
+        joining the group of every backend. The gateway adds its own user.
       '';
     };
 
-    gateway = {
-      type = lib.mkOption {
-        type = lib.types.nullOr (
-          lib.types.enum [
-            "llmhop"
-            "smg"
-            "bifrost"
-          ]
-        );
-        default = null;
-        example = "llmhop";
+    container = {
+      userNS = mkOption {
+        type = with types; nullOr str;
+        default = "auto:size=65536";
+        example = "auto:gidmapping=0:303:1";
         description = ''
-          The one gateway in front of every backend, configured by the option
-          set of the same name, or `null` for none, so clients connect to each
-          workload directly. It routes every listed model, which must then
-          stay on loopback and leave authentication to the gateway.
+          `UserNS=` of every container, which maps its root onto an
+          unprivileged range of the subordinate IDs of the `containers` user
+          that quadlet-nix declares, a fresh range on every start. Every
+          writable or root-owned mount then gets `idmap`. `null` runs the
+          containers as host root, or leaves `UIDMap=` and `GIDMap=` to
+          `config`. A host without Nix needs the `containers` entry in
+          `/etc/subuid` and `/etc/subgid`.
         '';
       };
-
-      active = lib.mkOption {
-        type = lib.types.bool;
-        readOnly = true;
-        default = cfg.gateway.type != null && cfg.endpoints != { };
-        defaultText = lib.literalExpression "config.services.llmhop.gateway.type != null && config.services.llmhop.endpoints != { }";
+      config = mkOption {
+        type = sectionType;
+        default = { };
+        example = {
+          GroupAdd = [ "303" ];
+        };
         description = ''
-          Whether the gateway of `type` runs, which needs at least one
-          endpoint, so a host whose backends are all disabled, such as a test
-          VM without GPUs, keeps its gateway config without running it. Units
-          relying on the gateway, such as clients joining its socket group,
-          can follow it.
+          `[Container]` keys of every container, servers, detectors and the
+          gateway alike, over the generated ones.
         '';
       };
     };
 
-    endpoints = lib.mkOption {
-      type = with lib.types; attrsOf attrs;
-      default = { };
-      internal = true;
-      description = ''
-        Every workload by its `owner`, which gateways route by its `name`
-        and its `aliases`, with its `engine`, its `url` on its port or socket,
-        its `socket` or null, the `dataParallelSize` ranks its server pins
-        a request to by the `X-data-parallel-rank` header, whether it is
-        `unlisted` and whether it is `exposed` beyond loopback.
-      '';
-    };
-
-    claims = lib.mkOption {
-      type = with lib.types; attrsOf (attrsOf (listOf str));
+    claims = mkOption {
+      type = with types; attrsOf (attrsOf (listOf str));
       default = { };
       internal = true;
       example.port."8080" = [
-        "services.llmhop.gateway.llmhop.listen.default"
+        "services.llmhop.gateway.listen.default"
         "services.llmhop.vllm.models.qwen3-8b"
       ];
       description = ''
         Resources that only one owner may hold, by kind (`port`, `unit`,
-        `model`) and key, each listing the option paths of its
-        owners. An assertion rejects every key with more than one owner.
+        `model`) and key, each listing the option paths of its owners. An
+        assertion rejects every key with more than one owner.
       '';
     };
   };
@@ -136,19 +129,6 @@ in
     assertions = lib.concatLists (
       lib.mapAttrsToList (kind: lib.mapAttrsToList (claimAssertion kind)) cfg.claims
     );
-
-    # A container maps to no host group known in advance, so its socket is
-    # reachable through a default ACL on the root instead. See "Unix sockets"
-    # in the module internals documentation.
-    systemd.tmpfiles.settings."10-llmhop" = lib.mkIf (sockets != [ ]) (
-      lib.mkMerge [
-        (util.rootDirectoryRule cfg.socketDirectory)
-        (lib.mkIf (lib.any (e: cfg.${e.engine}.runtime == "quadlet") sockets && cfg.socketClients != [ ]) {
-          ${cfg.socketDirectory}.a.argument = lib.concatMapStringsSep "," (
-            user: "default:user:${user}:-wx"
-          ) cfg.socketClients;
-        })
-      ]
-    );
+    virtualisation.quadlet.bundle.name = "llmhop";
   };
 }

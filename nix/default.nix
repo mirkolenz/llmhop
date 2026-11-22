@@ -67,12 +67,12 @@ in
       }
       // lib.optionalAttrs isLinux {
         inherit (config.packages) docker;
-        vm = pkgs.callPackage ./checks/vm.nix { inherit self; };
+        vm = pkgs.callPackage ./checks/vm { inherit self; };
         bundle = pkgs.callPackage ./checks/bundle.nix {
           inherit (config.legacyPackages) mkQuadletBundle;
           inherit (config.packages) vllm-bundle;
         };
-        eval = pkgs.callPackage ./checks/eval.nix {
+        eval = pkgs.callPackage ./checks/eval {
           inherit mkEvalCheck self;
           mkBundleSystem = { modules }: inputs.quadlet-nix.lib.mkBundleSystem { inherit pkgs modules; };
         };
@@ -114,7 +114,8 @@ in
             inherit pkgs;
             modules = [
               self.nixosModules.default
-              { services.llmhop.runtime = lib.mkDefault "quadlet"; }
+              # Not a default, so a native backend or gateway fails to evaluate.
+              { services.llmhop.runtime = "container"; }
             ]
             ++ modules;
           };

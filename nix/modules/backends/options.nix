@@ -105,7 +105,7 @@ in
         default = "/var/cache/${name}";
         description = ''
           Root of the cache directories of this backend's workloads, created
-          with mode `0711`, each `<name>` the `HF_HOME` of one fetcher and its
+          with mode `0711`, each `<key>` the `HF_HOME` of one fetcher and its
           server, created with mode `0700` for `user` and `group`. The
           fetcher writes its `hub/`, which the server only reads. Point it at
           a data disk for large models. A container keeps its cache in the
@@ -220,10 +220,11 @@ in
           }
         '';
         description = ''
-          Models to serve, each as the unit `${name}-<name>`, natively a
-          hardened system service beside its fetcher `${name}-<name>-fetch`,
+          Models to serve, each as the unit `${name}-<key>`, natively a
+          hardened system service beside its fetcher `${name}-<key>-fetch`,
           otherwise a container, whose units
-          `virtualisation.quadlet.containers.<unit>` override.
+          `virtualisation.quadlet.containers.<unit>` override. Models
+          sharing a `name` are replicas of one model.
         '';
       };
     }
@@ -275,7 +276,7 @@ in
         description = ''
           Watermark detection services serving `POST /detect` for the
           watermarks of this backend's models, each as the unit
-          `${name}-<name>`, which the gateway routes as an unlisted model.
+          `${name}-<key>`, which the gateway routes as an unlisted model.
         '';
       };
     };

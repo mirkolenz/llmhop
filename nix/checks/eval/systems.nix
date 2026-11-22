@@ -211,6 +211,28 @@ rec {
   };
   socketRules = sockets.systemd.tmpfiles.settings."10-llmhop"."/run/sockets/llmhop";
 
+  # Two llama.cpp replicas on their sockets and a vLLM one on a port, which
+  # the gateway balances as one model, with client credentials.
+  replicas = mkSystem {
+    gateway = {
+      enable = true;
+      settings.clientCredentials = true;
+    };
+    llama-cpp = {
+      enable = true;
+      models = lib.genAttrs [ "gpu0" "gpu1" ] (_: {
+        name = "qwen";
+        model = "example/qwen";
+      });
+    };
+    vllm = nativeVllm // {
+      models.qwen = {
+        model = "example/qwen";
+        port = 27001;
+      };
+    };
+  };
+
   # A native model accepting clients beyond loopback.
   mkExposed =
     overrides:

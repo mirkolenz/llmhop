@@ -63,8 +63,8 @@ let
             RestrictAddressFamilies = util.hardenedServiceConfig.RestrictAddressFamilies ++ [ "AF_NETLINK" ];
             SocketBindAllow = "tcp";
             TasksMax = 4096;
-            StateDirectory = "${name}/${workload.name}";
-            WorkingDirectory = "/var/lib/${name}/${workload.name}";
+            StateDirectory = "${name}/${workload.key}";
+            WorkingDirectory = "/var/lib/${name}/${workload.key}";
           }
           // lib.optionalAttrs (workload.gpu.nativeDevices != null) {
             DevicePolicy = "closed";
@@ -112,7 +112,7 @@ let
             workload
             cache
             ;
-          resolve = util.resolveCredentialRefs util.credentialDirectory workload.credentials;
+          resolve = util.systemdEnvironment workload.credentials;
           extra = {
             HOME = cache;
           }

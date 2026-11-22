@@ -13,6 +13,7 @@ let
     containerScript
     exposed
     isolable
+    namePattern
     ;
 in
 rec {
@@ -122,7 +123,7 @@ rec {
           fetches = native && cfg.fetch.enable && rest.repositories != [ ];
         in
         {
-          inherit owner fetches;
+          inherit key owner fetches;
           inherit (workload)
             name
             unit
@@ -145,6 +146,10 @@ rec {
           gpu = null;
           assertions = [
             (util.firewallAssertion owner workload)
+            {
+              assertion = lib.match namePattern key != null;
+              message = "services.llmhop: `${owner}` is declared under a key that cannot name its units, which takes letters, digits, underscores, dots and hyphens.";
+            }
             {
               assertion = clashing == [ ];
               message = "services.llmhop: `${owner}.settings` or the backend's `modelSettings` set ${
@@ -180,8 +185,10 @@ rec {
           watermark = lib.mapNullable normalize (workload.watermark or null);
           marked = watermark != null;
           loras = engine.loras != null && workload.loras != { };
+          # In the shape of llmhop's config, the model of a body rewritten
+          # for each adapter, or null to forward it verbatim.
           aliases = lib.optionalAttrs loras (
-            lib.mapAttrs (adapter: _: engine.loras.alias workload adapter) workload.loras
+            lib.mapAttrs (adapter: _: { model = engine.loras.alias workload adapter; }) workload.loras
           );
           # SGLang reads its key from its config, which the script writes.
           wrapped = marked && engine.watermark.wrapped;
@@ -192,7 +199,7 @@ rec {
             inherit key workload;
             collection = "models";
             noun = "model";
-            reserved = watermarkFlags;
+            reserved = watermarkFlags ++ engine.reservedSettings;
             watermarks = lib.optional marked watermark;
             forced =
               listener engine.socketSettings workload

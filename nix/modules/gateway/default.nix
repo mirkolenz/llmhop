@@ -100,19 +100,14 @@ in
             default.port = lib.mkDefault 8080;
             metrics.metrics = lib.mkDefault true;
           };
-          # Every workload is probed by readiness, and pinned to its ranks.
-          settings.models = lib.genAttrs' workloads (
-            w:
-            lib.nameValuePair w.name {
-              urls = [ (util.probeUrl w) ];
-              inherit (w) unlisted dataParallelSize;
-              aliases = lib.mapAttrs (_: model: lib.optionalAttrs (model != null) { inherit model; }) w.aliases;
-              inherit (util) healthPath;
-            }
-          );
           credentials = lib.mkIf (cfg.settings.clientCredentials == true) {
             "llmhop.api-key.*" = lib.mkDefault null;
           };
+          # Every served name is probed by readiness, pinned to its ranks
+          # and balanced over its replicas.
+          settings.models = lib.mapAttrs (
+            _: ws: gatewayModel (lib.head ws) // { urls = map util.probeUrl ws; }
+          ) replicas;
         };
         claims = {
           unit.llmhop = [ owner ];
@@ -178,8 +173,13 @@ in
             description = "llmhop model gateway";
             wantedBy = [ "multi-user.target" ];
             after = [ "network.target" ];
-            environment = util.resolveCredentialRefs util.credentialDirectory cfg.credentials cfg.environment;
-            restartTriggers = [ (lib.toJSON cfg.listen) ];
+            environment = util.systemdEnvironment cfg.credentials cfg.environment;
+            # A reload keeps the groups of the process, such as those of the
+            # worker sockets.
+            restartTriggers = [
+              (lib.toJSON cfg.listen)
+              (lib.toJSON config.users.users.${cfg.user}.extraGroups)
+            ];
             reloadTriggers = [ file ];
             unitConfig = util.startLimitConfig // {
               PartOf = sockets;
@@ -246,11 +246,13 @@ in
             // {
               Network = "host";
               Notify = true;
-              Exec = lib.escapeShellArgs [
+              Exec = util.containerExec [
                 "serve"
                 containerConfigFile
               ];
-              Environment = containerCredentials.resolve cfg.environment // containerCredentials.environment;
+              Environment = util.containerEnvironment (
+                containerCredentials.resolve cfg.environment // containerCredentials.environment
+              );
               EnvironmentFile = util.environmentFiles [ cfg ];
               Volume = [
                 "${file}:${containerConfigFile}:ro"

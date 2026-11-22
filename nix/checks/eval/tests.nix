@@ -24,11 +24,62 @@
   routable,
   routedModels,
   policed,
+  replicas,
+  mkSystem,
+  mkContainer,
+  nativeVllm,
+  failing,
   lib,
   pkgs,
   ...
 }:
 {
+  # systemd expands neither `%` nor `$` of a value, while `%d` credentials
+  # stay.
+  testSystemdEscaping = {
+    expr = {
+      container =
+        lib.hasInfix "'{%% if x %%}$$X{%% endif %%}'"
+          (mkContainer {
+            vllm.models.test.settings.chat-template = "{% if x %}$X{% endif %}";
+          }).virtualisation.quadlet.containers.vllm-test.containerConfig.Exec;
+      native =
+        (mkSystem {
+          gateway = {
+            enable = true;
+            credentials.a = "/run/secrets/a";
+            environment.KEY = "\${cred:a} %40";
+          };
+          vllm = nativeVllm // {
+            models.test.model = "example/test";
+          };
+        }).systemd.services.llmhop.environment.KEY;
+    };
+    expected = {
+      container = true;
+      native = "%d/a %%40";
+    };
+  };
+
+  # A native system has nothing to bundle.
+  testNativeBundle = {
+    expr = evaluates native.virtualisation.quadlet.bundle.package.drvPath;
+    expected = false;
+  };
+
+  # A key names the units of its workload, whatever its `name`.
+  testWorkloadKey = {
+    expr = failing "cannot name its units" (mkSystem {
+      vllm = nativeVllm // {
+        models.my_model = {
+          name = "qwen";
+          model = "example/qwen";
+        };
+      };
+    });
+    expected = 0;
+  };
+
   # Every container runs in its own user namespace, whose writable and
   # root-owned mounts are idmapped, unless left to `container.config`. The
   # bundle and VM tests check the default further.
@@ -283,6 +334,25 @@
         };
       };
       kernels = "1";
+    };
+  };
+
+  # Replicas sharing a name keep their units and caches, and the gateway
+  # balances them as one model, importing the client keys by their prefix.
+  testReplicas = {
+    expr = {
+      inherit (replicas.services.llmhop.gateway.settings.models.qwen) urls;
+      cache = replicas.systemd.services.llama-cpp-gpu1.environment.HF_HOME;
+      inherit (replicas.systemd.services.llmhop.serviceConfig) ImportCredential;
+    };
+    expected = {
+      urls = [
+        "unix:///run/llmhop/llama-cpp-gpu0/http.sock"
+        "unix:///run/llmhop/llama-cpp-gpu1/http.sock"
+        "http://127.0.0.1:27001"
+      ];
+      cache = "/var/cache/llama-cpp/gpu1";
+      ImportCredential = [ "llmhop.api-key.*" ];
     };
   };
 

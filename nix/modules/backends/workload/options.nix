@@ -20,6 +20,10 @@ rec {
   # module internals documentation.
   socketName = "http.sock";
 
+  # The names of workloads and their attributes, which also name units and
+  # paths. Dots allow `qwen3.6-…`-style version suffixes.
+  namePattern = "[[:alnum:]_][[:alnum:]_.-]*";
+
   # Where a container finds the watermark script mounted.
   containerScript = "${util.containerRuntimeDirectory}/watermark.py";
 
@@ -104,20 +108,24 @@ rec {
         default = true;
       };
       name = mkOption {
-        # Allows dots so `qwen3.6-…`-style version suffixes work.
-        type = types.strMatching "[[:alnum:]][[:alnum:].-]*";
+        type = types.strMatching namePattern;
         default = name;
         description = ''
-          Name of this ${noun} in its unit `${engine.name}-<name>` and in the
-          `model` field clients send, unique across every workload.
+          Name of this ${noun} in the `model` field clients send. Workloads
+          sharing a name are replicas, which the gateway balances as one
+          model, so they must agree on what it routes, such as their
+          adapters, `dataParallelSize` and whether they are listed.
         '';
       };
       unit = mkOption {
         type = types.str;
         readOnly = true;
-        default = "${engine.name}-${config.name}";
-        defaultText = lib.literalExpression ''"${engine.name}-''${name}"'';
-        description = "Name of the server unit, from which every other unit of this ${noun} derives.";
+        default = "${engine.name}-${name}";
+        defaultText = lib.literalExpression ''"${engine.name}-<key>"'';
+        description = ''
+          Name of the server unit, by the attribute name of this ${noun},
+          from which every other unit and its cache directory derive.
+        '';
       };
       port = mkOption (
         if socketCapable then
@@ -146,7 +154,7 @@ rec {
             "${llmhop.socketDirectory}/${config.unit}/${socketName}"
           else
             null;
-        defaultText = lib.literalMD "`<services.llmhop.socketDirectory>/${engine.name}-<name>/${socketName}` natively while `port` is null, else null";
+        defaultText = lib.literalMD "`<services.llmhop.socketDirectory>/${engine.name}-<key>/${socketName}` natively while `port` is null, else null";
         description = "Unix socket the server binds, derived from `port`.";
       };
       host = mkOption {

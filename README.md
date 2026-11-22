@@ -354,7 +354,21 @@ vLLM serves an adapter under its own name, while SGLang serves it as `<model>:<a
 Several GPUs serve one model faster as data-parallel ranks of one server, set by `dataParallelSize = 2` on a vLLM or SGLang model, than as separate models, since the server balances requests by its own load and cache state.
 vLLM then runs several API frontends by default, each storing the responses of the Responses API on its own, so stored responses need `settings.api-server-count = 1`.
 
-Each workload runs as the unit `<engine>-<name>`.
+Workloads sharing a `name` are replicas, which the gateway [balances](#balancing-and-affinity) as one model with the URL of each, while each keeps its own unit, port or socket and cache.
+Unit names, caches, state directories, sockets and Podman volumes derive from a workload's attribute key rather than its `name`, so a model whose `name` differs from its key moves to new paths and downloads its repositories again.
+Replicas restart without downtime, since the gateway avoids the one restarting, scale out llama.cpp, which has no data-parallel ranks, over several GPUs, and may mix engines:
+
+```nix
+services.llmhop.llama-cpp.models = lib.genAttrs [ "gpu0" "gpu1" ] (gpu: {
+  name = "qwen3-8b";
+  model = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
+  environment.CUDA_VISIBLE_DEVICES = lib.removePrefix "gpu" gpu;
+});
+```
+
+Replicas must agree on what the gateway routes, their adapters, `dataParallelSize` and whether they are listed, which an assertion checks.
+
+Each workload runs as the unit `<engine>-<key>`, named by its attribute rather than its `name`.
 Native workers are hardened services running as the backend's `user`, which defaults to the engine name, while containers run rootful in user namespaces, see [containers](#containers-and-user-namespaces).
 A worker stays `activating` until it answers its health endpoint, and `startupOrdering`, enabled by default for every backend, starts models one at a time by `name`, so two never profile or size their GPU memory at once.
 On a stop, such as the restart after a fetch, a server drains its in-flight requests for the backend's `shutdownTimeoutSeconds`, 10 by default, before it is killed: vLLM through `--shutdown-timeout`, SGLang and llama.cpp on SIGTERM.
@@ -369,7 +383,7 @@ Models sharing a GPU therefore need explicit budgets in their `settings`, which 
 | SGLang    | `mem-fraction-static`, a fraction of the memory free at its start, and `max-total-tokens` as a cap   |
 | llama.cpp | `fit = "off"` with `n-gpu-layers` and `ctx-size`                                                     |
 
-Evaluation rejects any port, unit or model name claimed twice.
+Evaluation rejects any port or unit claimed twice.
 Customize the generated units directly, as in `systemd.services.vllm-qwen3-8b.serviceConfig.MemoryHigh = "64G"` or `virtualisation.quadlet.containers.vllm-qwen3-8b.containerConfig`.
 
 Native llama.cpp and vLLM workers default to `port = null`, binding a unix socket below `socketDirectory` that only the backend's workers, the gateway and `socketClients` can reach.
@@ -377,7 +391,7 @@ Set `port` to bind `<host>:<port>` instead, which SGLang and every container alw
 
 #### Fetching and offline servers
 
-Natively, each model has a fetcher `<engine>-<name>-fetch` that downloads everything into the model's own cache `cache.directory/<name>`, after which the server runs offline from it.
+Natively, each model has a fetcher `<engine>-<key>-fetch` that downloads everything into the model's own cache `cache.directory/<key>`, after which the server runs offline from it.
 A `model` that is an absolute path has no fetcher.
 `extraRepositories` lists further repositories that `settings` reference, such as a draft model, and `revision` pins a branch, tag or commit:
 
@@ -415,7 +429,7 @@ Strings and paths are passed verbatim and everything else as JSON, so attribute 
 
 #### Containers and user namespaces
 
-With `runtime = "container"`, every workload runs the backend's `container.image` on its published loopback `port` and downloads what it serves into the Podman volume `<engine>-<name>` when it starts, so a restart picks up a moved `revision`.
+With `runtime = "container"`, every workload runs the backend's `container.image` on its published loopback `port` and downloads what it serves into the Podman volume `<engine>-<key>` when it starts, so a restart picks up a moved `revision`.
 A gated repository needs `HF_TOKEN` from the backend's `environmentFile`, since the server itself downloads.
 `container.devices` exposes the GPUs through CDI, such as `nvidia.com/gpu=all`, which `hardware.nvidia-container-toolkit` provides.
 Tagged registry images are labeled `AutoUpdate=registry` for `virtualisation.quadlet.autoUpdate`, and are otherwise only pulled while missing, so a start needs no registry.

@@ -111,7 +111,7 @@ lib.mergeAttrsList (
   # units fetching into it. See "Directory layout" and "Fetching" in the
   # module internals documentation.
   nativeCache = cfg: rec {
-    cacheDirectory = workload: "${cfg.cache.directory}/${workload.name}";
+    cacheDirectory = workload: "${cfg.cache.directory}/${workload.key}";
     hubDirectory = workload: "${cacheDirectory workload}/hub";
     hubDirectories = workload: lib.optional workload.fetches (hubDirectory workload);
     fetchUnit = workload: "${workload.unit}-fetch";

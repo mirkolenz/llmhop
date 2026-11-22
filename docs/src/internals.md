@@ -101,7 +101,7 @@ It resets the server's start limit first, so planned restarts do not use it up, 
 The server starts after it, so a first download finds the server still waiting rather than restarting it.
 
 The fetcher controls everything in the cache, so no command touching it runs with more privileges than the cache owner, or a planted symlink could redirect a privileged write or deletion.
-The refresh unit prunes as the workload's `user`, writing only the hub cache and opening no socket, since a root owner could otherwise reach systemd or Podman.
+The refresh unit prunes as the backend's `user`, writing only the hub cache and opening no socket, since a root owner could otherwise reach systemd or Podman.
 Only its `systemctl` step runs as root, and it reads no file.
 
 `huggingface_hub` moves a ref before downloading its snapshot, so an interrupted download leaves the ref on an incomplete snapshot, which an offline server fails to load until the next complete download.
@@ -110,15 +110,17 @@ Only its `systemctl` step runs as root, and it reads no file.
 
 ## Claims
 
-Ports, unit names and model names admit one owner each, but NixOS merges clashing units silently or fails opaquely, and port clashes only fail at boot.
+Ports and unit names admit one owner each, but NixOS merges clashing units silently or fails opaquely, and port clashes only fail at boot.
 So every owner adds its option path to the internal `services.llmhop.claims.<kind>.<key>`, and an assertion names all owners of a clash.
-The gateway builds its models keyed by name, so a name clash reaches that assertion instead of silently dropping a model.
+Units derive from the attribute names of the workloads rather than their `name`, which replicas share, and the gateway groups the workloads by `name` into one model with the URL of each, so an assertion requires the replicas to agree on the rest of that model.
+A clash between the adapters of different models reaches `llmhop check` of the gateway's config.
 
 ## Directory layout
 
-Each native workload's `cache.directory/<name>` is the `HF_HOME` of its fetcher and server, holding the hub cache in `hub/`, which the server can only read, beside the server's runtime caches.
+Each native workload's `cache.directory/<key>` is the `HF_HOME` of its fetcher and server, holding the hub cache in `hub/`, which the server can only read, beside the server's runtime caches.
 It is no `CacheDirectory=`, which would have to stay below `/var/cache`.
 A container keeps everything in the named volume of its unit at `/var/cache/llmhop`, which Podman creates on first use, so a bundle needs no tmpfiles rule.
+A container has no fetcher, so its server downloads its repositories while starting, within the hour of `TimeoutStartSec=` that every server gets, and a slower first download restarts it, resuming from the volume.
 
 ## Offline servers
 

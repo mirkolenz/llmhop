@@ -15,8 +15,11 @@
 # is its server command, natively from its package or in its image,
 # followed by `positional` and the settings, among them `modelSettings` and
 # `shutdownSettings`, which renders how long its server drains requests on
-# a stop. `fetch` renders the argv downloading one repository with its package into the hub cache
-# below `HF_HOME`, after which its servers get `offlineEnvironment`.
+# a stop. `reservedSettings` lists the aliases of the flags it renders or
+# of `positional`, which the `settings` of a model must not set either.
+# `fetch` renders the argv downloading one repository with its package into
+# the hub cache below `HF_HOME`, after which its servers get
+# `offlineEnvironment`.
 # `implicitConfig` lists the files it reads beside its arguments, which every
 # unit hides, and `environment` is set on every server.
 lib:
@@ -29,6 +32,7 @@ let
     loras = null;
     watermark = null;
     shutdownSettings = _: { };
+    reservedSettings = [ ];
     offlineEnvironment = { };
     implicitConfig = {
       paths = [ ];
@@ -81,6 +85,13 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
       container = [ "/app/llama-server" ];
     };
     positional = _model: [ ];
+    # Every other source of the model besides the one that `model` sets.
+    reservedSettings = [
+      "model"
+      "hf-repo"
+      "model-url"
+      "docker-repo"
+    ];
     modelSettings =
       model:
       {
@@ -162,6 +173,8 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
       ];
     };
     positional = model: [ model.model ];
+    # `vllm serve` takes the positional model over `--model`.
+    reservedSettings = [ "model" ];
     modelSettings = model: {
       served-model-name = model.name;
       inherit (model) revision;
@@ -230,6 +243,12 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
       ];
     };
     positional = model: [ model.model ];
+    # `sglang serve` turns the positional model into `--model-path`.
+    reservedSettings = [
+      "model-path"
+      "model"
+      "dp-size"
+    ];
     # `sglang serve` otherwise probes the hub for a diffusion model.
     modelSettings = model: {
       served-model-name = model.name;

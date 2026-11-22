@@ -1,6 +1,6 @@
 # The options every backend and the gateway share: the runtime of all their
 # units, the sockets of native ones, the user namespaces of containers, and
-# the claims that keep ports, units and model names unique.
+# the claims that keep ports and units unique.
 sectionType:
 {
   config,
@@ -118,8 +118,8 @@ in
         "services.llmhop.vllm.models.qwen3-8b"
       ];
       description = ''
-        Resources that only one owner may hold, by kind (`port`, `unit`,
-        `model`) and key, each listing the option paths of its owners. An
+        Resources that only one owner may hold, by kind (`port` or
+        `unit`) and key, each listing the option paths of its owners. An
         assertion rejects every key with more than one owner.
       '';
     };
@@ -129,6 +129,13 @@ in
     assertions = lib.concatLists (
       lib.mapAttrsToList (kind: lib.mapAttrsToList (claimAssertion kind)) cfg.claims
     );
-    virtualisation.quadlet.bundle.name = "llmhop";
+    # Only containers can be bundled, so a native system would bundle none,
+    # and installing that would retire the units of the previous bundle.
+    # Only building the bundle reads its name, unlike `assertions`.
+    virtualisation.quadlet.bundle.name =
+      if cfg.runtime == "container" then
+        "llmhop"
+      else
+        throw "services.llmhop: only the container runtime can be bundled, but `services.llmhop.runtime` is `${cfg.runtime}`.";
   };
 }

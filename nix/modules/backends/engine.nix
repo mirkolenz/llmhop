@@ -44,8 +44,6 @@ in
           map (
             w:
             {
-              # Every LoRA adapter is a served name as well.
-              model = lib.genAttrs ([ w.name ] ++ lib.attrNames w.aliases) (_: [ w.owner ]);
               unit.${w.unit} = [ w.owner ];
             }
             // lib.optionalAttrs (w.port != null) {

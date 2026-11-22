@@ -53,13 +53,17 @@ let
         };
       };
     };
-    nameClash = {
-      needle = "model `test` is claimed";
+    # Replicas of one name must agree on the model of the gateway.
+    replicaMismatch = {
+      needle = "of `test` differ";
       count = 1;
       system = mkSystem {
         gateway.enable = true;
         vllm = nativeVllm // {
-          models.test.model = "example/test";
+          models.test = {
+            model = "example/test";
+            dataParallelSize = 2;
+          };
         };
         llama-cpp = {
           enable = true;
@@ -120,22 +124,6 @@ let
           models.test = {
             model = "example/test";
             settings.no-alias = true;
-          };
-        };
-      };
-    };
-    # Without the gateway, an adapter clashing with another model fails.
-    loraClash = {
-      needle = "model `other` is claimed";
-      count = 1;
-      system = mkSystem {
-        vllm = nativeVllm // {
-          models = {
-            test = {
-              model = "example/test";
-              loras.other = "example/lora";
-            };
-            other.model = "example/other";
           };
         };
       };

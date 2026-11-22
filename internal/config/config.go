@@ -97,18 +97,21 @@ type Config struct {
 	// page would otherwise reach the backends with nothing to stop it.
 	CORSOrigins []string `json:"corsOrigins,omitempty"`
 	// Affinity lists the sources of the key keeping the requests of a
-	// conversation on one server, tried in order: `header:<name>` or the
-	// body's `prompt_cache_key`.
-	Affinity []string         `json:"affinity,omitempty"`
+	// conversation on one server, tried in order.
+	Affinity []AffinitySource `json:"affinity,omitempty"`
 	Models   map[string]Model `json:"models"`
 }
 
-// DefaultAffinity tries the session header of vLLM's router and SMG, then
-// the key of OpenAI's prompt caching.
-var DefaultAffinity = []string{"header:X-Session-Id", promptCacheKey}
+// AffinitySource carries the affinity key in exactly one of a request
+// header or a string at a path of members into the JSON body. Pinned keeps
+// its requests on their server under any load or failure, since their state
+// lives there.
+type AffinitySource struct {
+	Header string   `json:"header,omitempty"`
+	Body   []string `json:"body,omitempty"`
+	Pinned bool     `json:"pinned,omitempty"`
+}
 
-// promptCacheKey is the affinity source of the body member of that name.
-const promptCacheKey = "prompt_cache_key"
 // Listener is a socket llmhop serves on, a TCP Port on Host, a unix Socket,
 // or without either a socket systemd passes by the name of the listener.
 type Listener struct {
@@ -240,6 +243,15 @@ const clientCredentialPrefix = "llmhop.api-key."
 // zero client being the anonymous one.
 func (cfg *Config) EffectivePolicy(c Client) Policy {
 	return c.Policy.Over(cfg.Policies[c.PolicyName]).Over(cfg.Defaults)
+}
+
+// DefaultAffinity tries the session header of vLLM's router and SMG, the
+// key of OpenAI's prompt caching, then the session of SGLang, whose state
+// lives on one server.
+var DefaultAffinity = []AffinitySource{
+	{Header: "X-Session-Id"},
+	{Body: []string{"prompt_cache_key"}},
+	{Body: []string{"session_params", "id"}, Pinned: true},
 }
 
 // maxDataParallelSize bounds the ranks of a URL, far beyond any GPU count.
@@ -381,6 +393,12 @@ func (cfg *Config) validate(load bool) error {
 		return err
 	}
 
+	for i, source := range cfg.Affinity {
+		if (source.Header == "") == (len(source.Body) == 0) || source.Header != "" && !httpguts.ValidHeaderFieldName(source.Header) {
+			return fmt.Errorf("affinity.%d: must set exactly one of a valid header or a non-empty body path", i)
+		}
+	}
+
 	if len(cfg.CORSOrigins) > 0 && !cfg.RequiresAuth() {
 		return errors.New("corsOrigins require clients or clientCredentials")
 	}
@@ -391,12 +409,6 @@ func (cfg *Config) validate(load bool) error {
 		}
 	}
 
-	for _, source := range cfg.Affinity {
-		header, isHeader := strings.CutPrefix(source, "header:")
-		if isHeader && !httpguts.ValidHeaderFieldName(header) || !isHeader && source != promptCacheKey {
-			return fmt.Errorf("affinity: %q must be header:<name> or %s", source, promptCacheKey)
-		}
-	}
 	aliased := make(map[string]string)
 
 	for name, model := range cfg.Models {

@@ -61,6 +61,13 @@ let
       expiresAt = field types.str "RFC 3339 time after which the client is rejected.";
     };
   };
+  affinitySource = types.submodule {
+    options = {
+      header = field types.str "Request header carrying the affinity key.";
+      body = field (types.nonEmptyListOf types.str) "Path of member names to a string in the JSON body carrying the affinity key.";
+      pinned = field types.bool "Whether the requests of the key never leave their server, since their state lives there.";
+    };
+  };
   model = types.submodule {
     options = {
       urls = mkOption {
@@ -188,6 +195,12 @@ in
               Origins whose pages may call the API with a bearer key, such as
               `https://chat.example`, or only `*` for every origin, which
               requires `clients` or `clientCredentials`.
+            '';
+            affinity = field (types.listOf affinitySource) ''
+              Sources of the key keeping the requests of a conversation on one
+              server, tried in order, each setting exactly one of `header` and
+              `body`. `null` keeps llmhop's defaults, while `[ ]` disables
+              affinity.
             '';
             clientCredentials = field types.bool ''
               Whether every credential `llmhop.api-key.<client>` of the

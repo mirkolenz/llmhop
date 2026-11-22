@@ -735,7 +735,7 @@ func TestFailover(t *testing.T) {
 func TestDataParallelRanks(t *testing.T) {
 	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{
-		Affinity: []string{"header:X-Session-Id"},
+		Affinity: config.DefaultAffinity,
 		Models: map[string]config.Model{
 			"m": {URLs: []string{backend.URL}, DataParallelSize: 2},
 			"u": {URLs: []string{backend.URL}},
@@ -748,6 +748,15 @@ func TestDataParallelRanks(t *testing.T) {
 
 	if rank := captured.header.Get(rankHeader); rank != "0" && rank != "1" {
 		t.Fatalf("keyed request got rank %q", rank)
+	}
+
+	// A native SGLang session, routed by its path, is keyed by its body,
+	// which passes verbatim.
+	session := `{"session_params":{"id":"s"}}`
+	send(t, h, http.MethodPost, "/llmhop/proxy/m/generate", session, "")
+
+	if rank := captured.header.Get(rankHeader); rank != "0" && rank != "1" || captured.body != session {
+		t.Fatalf("session got rank %q and body %s", rank, captured.body)
 	}
 
 	// The server balances keyless requests over its ranks itself, which a
@@ -831,14 +840,26 @@ func TestClientHeaders(t *testing.T) {
 func TestAffinityOf(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("X-Session-Id", "s")
-	key := func(sources []string, body string) affinity { return affinityOf(req, sources, []byte(body)) }
+	body := config.DefaultAffinity[1:]
+	key := func(sources []config.AffinitySource, data string) affinity {
+		o, err := parseObject([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if a, b := key(config.DefaultAffinity, `{"prompt_cache_key":"k"}`), key([]string{"prompt_cache_key"}, `{"prompt_cache_key":"k"}`); !a.keyed || !b.keyed || a.key == b.key {
+		return affinityOf(req, sources, o)
+	}
+
+	if a, b := key(config.DefaultAffinity, `{"prompt_cache_key":"k"}`), key(body, `{"prompt_cache_key":"k"}`); !a.keyed || !b.keyed || a.key == b.key {
 		t.Errorf("the header did not take precedence: %+v, %+v", a, b)
 	}
 
-	if a := key([]string{"prompt_cache_key"}, `{"messages":[]}`); a.keyed {
+	if a := key(body, `{"messages":[]}`); a.keyed {
 		t.Errorf("keyless body got %+v", a)
+	}
+
+	if a, b := key(body, `{"session_params":{"id":"k"}}`), key(body, `{"session_params":{"id":1}}`); !a.keyed || b.keyed {
+		t.Errorf("nested path got %+v and %+v", a, b)
 	}
 }
 

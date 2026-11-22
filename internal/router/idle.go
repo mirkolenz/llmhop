@@ -5,9 +5,9 @@ import (
 	"net/http"
 )
 
-// mediaType returns the media type of a response.
-func mediaType(resp *http.Response) string {
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+// mediaType returns the media type of a request or response by its header.
+func mediaType(h http.Header) string {
+	mediaType, _, _ := mime.ParseMediaType(h.Get("Content-Type"))
 
 	return mediaType
 }

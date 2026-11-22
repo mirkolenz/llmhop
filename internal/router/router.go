@@ -43,7 +43,12 @@ import (
 // with the router it replaces, which drop the models and clients it lacks.
 // Its probes run until it is closed.
 func New(cfg *config.Config, limits *Limits) (*Router, error) {
-	rt := &routes{rewrites: make(map[string]jsontext.Value), affinity: cfg.Affinity, limits: limits}
+	rt := &routes{
+		rewrites:     make(map[string]jsontext.Value),
+		affinity:     cfg.Affinity,
+		bodyAffinity: slices.ContainsFunc(cfg.Affinity, func(s config.AffinitySource) bool { return len(s.Body) > 0 }),
+		limits:       limits,
+	}
 	var models []*model
 
 	for name, m := range cfg.Models {
@@ -129,8 +134,10 @@ type routes struct {
 	// segments is the most path segments of an exact name, which bounds
 	// the prefixes of a path that may name a model.
 	segments int
-	affinity []string
-	limits   *Limits
+	affinity []config.AffinitySource
+	// bodyAffinity is whether a source of affinity reads the body.
+	bodyAffinity bool
+	limits       *Limits
 }
 
 // bodyTimeout bounds reading a body buffered for its "model" field,
@@ -141,7 +148,8 @@ const bodyTimeout = time.Minute
 // field of its body, which is buffered within the `buffered` budget until
 // the backend starts its response and edited for a rewriting alias,
 // or if routed by its path, which is stripped up to its proxy segment,
-// and the body streamed verbatim.
+// and the body forwarded verbatim, buffered only if JSON that may carry an
+// affinity key, such as the session of a native SGLang request.
 // The limits apply only once the model is resolved,
 // so a saturated model never blocks requests to another.
 func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, routed bool) http.HandlerFunc {
@@ -163,6 +171,17 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 
 		if routed {
 			name, m = rt.routeModel(req.URL)
+
+			if m != nil && rt.keyedBody(m, req.Header) {
+				if b = buffer(w, req, buffered); b == nil {
+					return
+				}
+
+				defer b.release()
+
+				// A body other than an object carries no key, yet passes.
+				obj, _ = parseObject(b.data)
+			}
 		} else {
 			if b = buffer(w, req, buffered); b == nil {
 				return
@@ -204,16 +223,10 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 
 		a := &attempt{}
 
-		var body []byte
 		if b != nil {
-			set := make(map[string]jsontext.Value)
-			if upstream, ok := rt.rewrites[name]; ok {
-				set["model"] = upstream
-			}
+			body := b.data
 
-			body = b.data
-
-			if len(set) > 0 {
+			if upstream, ok := rt.rewrites[name]; ok && !routed {
 				// A form would have to be rebuilt.
 				if obj == nil {
 					writeError(w, http.StatusBadRequest, errAliasRewrite.Code, errAliasRewrite.Message)
@@ -221,7 +234,7 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 					return
 				}
 
-				body = obj.patch(set)
+				body = obj.patch(map[string]jsontext.Value{"model": upstream})
 			}
 
 			req, a.accept = b.forward(req, body)
@@ -234,6 +247,18 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 
 		m.serve(w, req, a, &ticket{client: c})
 	}
+}
+
+// keyedBody reports whether a body routed to m by its path may carry its
+// affinity key, which only JSON does, sent as such or without a media type.
+func (rt *routes) keyedBody(m *model, h http.Header) bool {
+	if !rt.bodyAffinity || len(m.targets) < 2 {
+		return false
+	}
+
+	media := mediaType(h)
+
+	return media == "" || media == "application/json"
 }
 
 // routeModel resolves the model of a /llmhop/proxy/{model}/{path} URL and
@@ -393,6 +418,42 @@ func parseObject(data []byte) (*object, error) {
 }
 
 var errNoObject = errors.New("not a single JSON object")
+
+// member returns the value of a member, of which a nil object has none.
+func (o *object) member(name string) (jsontext.Value, bool) {
+	if o == nil {
+		return nil, false
+	}
+
+	span, ok := o.members[name]
+
+	return o.data[span[0]:span[1]], ok
+}
+
+// lookup returns the value at a path of members through nested objects.
+func (o *object) lookup(path []string) (jsontext.Value, bool) {
+	value, ok := o.member(path[0])
+
+	for _, name := range path[1:] {
+		inner, err := parseObject(value)
+		if !ok || err != nil {
+			return nil, false
+		}
+
+		value, ok = inner.member(name)
+	}
+
+	return value, ok
+}
+
+// text returns the string at a path of members, empty for any other value.
+func (o *object) text(path ...string) string {
+	var s string
+	value, _ := o.lookup(path)
+	_ = json.Unmarshal(value, &s)
+
+	return s
+}
 
 // patch returns the object with the values of set, replacing those of its
 // members and appending the others, in one pass that keeps everything else.

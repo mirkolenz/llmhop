@@ -32,7 +32,8 @@ llmhop reserves the prefix `/llmhop/` for its own routes and answers an unknown 
 | `/llmhop/proxy/{model}/{path}`    | client | any path of the backend of a model, with the prefix stripped    |
 | `GET /llmhop/metrics`             | none   | the [metrics](#metrics) of llmhop, on metrics listeners only    |
 
-A request under `/llmhop/proxy/{model}/` is routed by its path, with the prefix stripped and the body left unparsed, for requests without a `model` in their body.
+A request under `/llmhop/proxy/{model}/` is routed by its path, with the prefix stripped and the body forwarded verbatim, for requests without a `model` in their body, such as `/generate` of SGLang.
+Its body streams unparsed, unless it is JSON that a `body` [affinity](#balancing-and-affinity) source may read for a model with several targets.
 The longest configured model name or alias that prefixes the path wins, wildcards do not apply, and a `/` in a model name may be written raw or as `%2F`.
 A model marked `"unlisted": true` is routed but left out of the models API, which suits services such as a watermark detector.
 
@@ -48,10 +49,12 @@ A model's `urls` are servers of the same model, such as replicas on several GPUs
 A request without an affinity key goes to the server with the fewest requests in flight.
 A request with a key always goes to the first server in the [rendezvous hashing](https://en.wikipedia.org/wiki/Rendezvous_hashing) order of its key, so the turns of a conversation reuse the prefix cache of one server and a chain of stored responses of the Responses API that keeps its key stays with the server storing it.
 Every llmhop instance computes the same order without sharing any state, so affinity holds behind any load balancer.
-The key comes from the first of the `affinity` sources a request carries, which clients set to name their conversation, by default:
+The key comes from the first of the `affinity` sources a request carries, which clients set to name their conversation.
+Each source sets exactly one of `header`, the name of a header, or `body`, the path of member names to a string in the JSON body, by default:
 
-1. `header:X-Session-Id`, a header, where Open WebUI's `X-OpenWebUI-Chat-Id` also fits,
-2. `prompt_cache_key`, the body's member meant for this by OpenAI.
+1. `{"header": "X-Session-Id"}`, where Open WebUI's `X-OpenWebUI-Chat-Id` also fits,
+2. `{"body": ["prompt_cache_key"]}`, the body's member meant for this by OpenAI,
+3. `{"body": ["session_params", "id"]}`, the session of SGLang, whose state lives on one server.
 
 `"affinity": []` disables affinity.
 

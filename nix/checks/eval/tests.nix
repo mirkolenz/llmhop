@@ -298,6 +298,7 @@
       settings = {
         defaults.requestsPerMinute = 0;
         policies.guest.models = [ "qwen*" ];
+        affinity = [ { body = [ "user" ]; } ];
         clients = {
           ci = {
             key = "\${env:CI_KEY}";

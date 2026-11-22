@@ -244,6 +244,9 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 			}
 
 			req, a.accept = b.forward(req, body)
+		} else if req.Body != nil && req.Body != http.NoBody {
+			a.upload = &upload{ReadCloser: req.Body}
+			req.Body = a.upload
 		}
 
 		// Computed before queueing, so a large body holds no slot meanwhile.

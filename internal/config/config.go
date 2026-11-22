@@ -53,6 +53,9 @@ type Model struct {
 	// ResponseTimeoutSeconds bounds the wait for the response headers of a
 	// backend. Zero means unlimited.
 	ResponseTimeoutSeconds uint32 `json:"responseTimeoutSeconds,omitempty"`
+	// StreamIdleTimeoutSeconds aborts an event stream that sends nothing for
+	// that long. Zero means unlimited.
+	StreamIdleTimeoutSeconds uint32 `json:"streamIdleTimeoutSeconds,omitempty"`
 	// DataParallelSize is the number of data-parallel ranks of every URL,
 	// which requests with an affinity key are pinned to through the
 	// `X-Data-Parallel-Rank` header of vLLM and SGLang, one by default.

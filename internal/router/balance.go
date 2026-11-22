@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ type model struct {
 	queue        *queue
 	queueTimeout time.Duration
 	failover     time.Duration
+	streamIdle   time.Duration
 	proxy        *httputil.ReverseProxy
 
 	// mu guards the in-flight counts and health of every server, that of
@@ -102,6 +104,7 @@ func newModel(name string, m config.Model, q *queue, p *pool, stripCORS bool) (*
 		mu:           &p.mu,
 		queueTimeout: time.Duration(m.QueueTimeoutSeconds) * time.Second,
 		failover:     time.Duration(m.FailoverSeconds) * time.Second,
+		streamIdle:   time.Duration(m.StreamIdleTimeoutSeconds) * time.Second,
 	}
 	headers.Del("Host")
 
@@ -393,6 +396,8 @@ type attempt struct {
 	tried   []*server
 	// path is the outgoing URL before a server is joined onto it.
 	path url.URL
+	// upload is the body streamed from the client, unless nil.
+	upload *upload
 	// accept lets go of a buffered body once a response is accepted, unless
 	// nil.
 	accept func()
@@ -405,7 +410,67 @@ func attemptOf(req *http.Request) *attempt {
 	return req.Context().Value(attemptKey{}).(*attempt)
 }
 
+// RoundTrip sends out to the target of its attempt, and lets the response
+// of an event stream idle for at most the stream idle timeout.
 func (m *model) RoundTrip(out *http.Request) (*http.Response, error) {
+	if m.streamIdle == 0 {
+		return m.send(out)
+	}
+
+	ctx, cancel := context.WithCancel(out.Context())
+
+	resp, err := m.send(out.WithContext(ctx))
+	if err != nil {
+		cancel()
+
+		return nil, err
+	}
+
+	// ReverseProxy writes to the body of a switched protocol.
+	if body, ok := resp.Body.(io.ReadWriteCloser); ok && resp.StatusCode == http.StatusSwitchingProtocols {
+		resp.Body = upgradedBody{body, cancel}
+
+		return resp, nil
+	}
+
+	resp.Body = newIdleBody(resp, m.streamIdle, cancel)
+
+	return resp, nil
+}
+
+// upgradedBody is the connection of a switched protocol, whose request it
+// cancels once closed.
+type upgradedBody struct {
+	io.ReadWriteCloser
+	cancel context.CancelFunc
+}
+
+func (b upgradedBody) Close() error {
+	b.cancel()
+
+	return b.ReadWriteCloser.Close()
+}
+
+// upload is a body streamed from the client, which records whether reading
+// it failed, such as beyond the maximum body size.
+type upload struct {
+	io.ReadCloser
+	failed atomic.Bool
+}
+
+func (u *upload) Read(p []byte) (int, error) {
+	n, err := u.ReadCloser.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		u.failed.Store(true)
+	}
+
+	return n, err
+}
+
+// send sends out to the target of its attempt and moves a body that can be
+// resent on to the next server while servers refuse the connection, reset
+// it before responding, or answer 502, 503 or 504.
+func (m *model) send(out *http.Request) (*http.Response, error) {
 	a := attemptOf(out)
 
 	if a.accept != nil {
@@ -415,8 +480,9 @@ func (m *model) RoundTrip(out *http.Request) (*http.Response, error) {
 	for {
 		resp, err := a.target.up.Transport.RoundTrip(out)
 
-		// One the client cancelled says nothing about the server.
-		if out.Context().Err() != nil {
+		// One the client cancelled or failed to upload says nothing about
+		// the server.
+		if out.Context().Err() != nil || a.upload != nil && a.upload.failed.Load() {
 			return resp, err
 		}
 

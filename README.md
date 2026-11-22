@@ -215,6 +215,7 @@ Keys of `clients` and strings in `models.*.headers` are expanded at startup, and
 - `models.*.maxConcurrentRequests` (unlimited): proxied requests per model over all its URLs, further ones get `429` with `Retry-After: 1`, see [clients and policies](#clients-and-policies) for those of a client.
 - `models.*.queueTimeoutSeconds` (`0`): how long a request waits in line for a free slot before its `429`, holding its buffered body meanwhile.
 - `models.*.responseTimeoutSeconds` (unlimited): how long a backend may take from receiving the whole request until its response headers, after which the request gets `504`. A streamed response may take longer after that.
+- `models.*.streamIdleTimeoutSeconds` (unlimited): how long an event stream may send nothing before llmhop aborts it and frees its slot.
 
 `0` disables a limit.
 

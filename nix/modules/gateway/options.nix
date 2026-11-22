@@ -86,6 +86,7 @@ let
       maxConcurrentRequests = field types.ints.u32 "Requests in flight over all `urls`, beyond which a request waits in the model's queue, `0` meaning no limit.";
       queueTimeoutSeconds = field types.ints.u32 "Seconds a request waits for a free slot before it gets `429`, `0` rejecting it at once.";
       responseTimeoutSeconds = field types.ints.u32 "Seconds a server may take until its response headers, before the request gets `504`, `0` meaning no limit.";
+      streamIdleTimeoutSeconds = field types.ints.u32 "Seconds an event stream may send nothing before it is aborted, `0` meaning no limit.";
       dataParallelSize = field (types.ints.between 1 256) "Data-parallel ranks of every URL, which requests with an affinity key are pinned to.";
       failoverSeconds = field types.ints.u32 "Seconds a server is avoided after it refused a connection or failed three requests in a row, `5` by default.";
       healthPath = field types.str "Path that readiness and `llmhop_backend_up` probe on every URL, or `null` to skip the model.";

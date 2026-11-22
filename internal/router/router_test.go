@@ -833,6 +833,22 @@ func TestEjection(t *testing.T) {
 	}
 }
 
+// An upload beyond the maximum body size says nothing about the server.
+func TestOversizedUploadKeepsServer(t *testing.T) {
+	urls, hits := statusBackends(t, http.StatusOK, http.StatusOK)
+	h := newRouter(t, &config.Config{MaxBodyBytes: 10, Models: map[string]config.Model{"m": {URLs: urls, FailoverSeconds: 5}}})
+
+	for range ejectAfter {
+		req := httptest.NewRequest(http.MethodPost, "/llmhop/proxy/m/v1/x", strings.NewReader(strings.Repeat("a", 1<<20)))
+		req.ContentLength = -1
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	if send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); hits[1].Load() != 0 {
+		t.Errorf("servers got %d and %d requests", hits[0].Load(), hits[1].Load())
+	}
+}
+
 // A keyed request spills from its server beyond the bound of its load.
 func TestBoundedLoads(t *testing.T) {
 	cfg := config.Model{URLs: []string{"http://a", "http://b"}}
@@ -891,6 +907,27 @@ func TestProbedServerSkipped(t *testing.T) {
 	}
 }
 
+// A stream is aborted once it sends nothing for its idle timeout, which
+// every event restarts.
+func TestStreamIdleTimeout(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		for range 3 {
+			_, _ = io.WriteString(w, "data: {}\n\n")
+			_ = http.NewResponseController(w).Flush()
+			time.Sleep(600 * time.Millisecond)
+		}
+
+		<-r.Context().Done()
+	}))
+	t.Cleanup(backend.Close)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: []string{backend.URL}, StreamIdleTimeoutSeconds: 1}}})
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Body.String() != strings.Repeat("data: {}\n\n", 3) {
+		t.Fatalf("got %q", rec.Body)
+	}
+}
 
 func TestDataParallelRanks(t *testing.T) {
 	backend, captured := startBackend(t)

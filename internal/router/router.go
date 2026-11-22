@@ -20,7 +20,6 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"os"
 	"slices"
@@ -41,23 +40,19 @@ import (
 // served unauthenticated and unlogged. It is immutable, so a reload replaces
 // it, sharing the limits with the router it replaces.
 func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
-	rt := &routes{exact: make(map[string]*model), rewrites: make(map[string]jsontext.Value), affinity: cfg.Affinity}
+	rt := &routes{rewrites: make(map[string]jsontext.Value), affinity: cfg.Affinity, limits: limits}
 	var models []*model
 
 	for name, m := range cfg.Models {
-		md, err := newModel(m, limits.semaphore("models."+name, int64(m.MaxConcurrentRequests)), cfg.RequiresAuth())
+		md, err := newModel(name, m, limits.queue(name, m.MaxConcurrentRequests), cfg.RequiresAuth())
 		if err != nil {
 			return nil, fmt.Errorf("models.%s: %w", name, err)
 		}
 
-		if prefix, ok := config.Pattern(name); ok {
-			rt.patterns = append(rt.patterns, pattern{prefix, md})
-		} else {
-			rt.exact[name] = md
-		}
+		rt.models.add(name, md)
 
 		for alias, a := range m.Aliases {
-			rt.exact[alias] = md
+			rt.models.add(alias, md)
 
 			if a.Model != "" {
 				// Quoting a string from valid JSON cannot fail.
@@ -65,33 +60,26 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 			}
 		}
 
-		for _, n := range append(slices.Collect(maps.Keys(m.Aliases)), name) {
-			rt.segments = max(rt.segments, strings.Count(n, "/")+1)
-		}
-
 		models = append(models, md)
 	}
 
-	// The longest prefix wins.
-	slices.SortFunc(rt.patterns, func(a, b pattern) int { return cmp.Compare(len(b.prefix), len(a.prefix)) })
-
-	objects := catalog(cfg.Models)
-	mux := http.NewServeMux()
-	registerModels(mux, objects)
 	mux.Handle("/", rt.proxyHandler(cfg.MaxBodyBytes, limits.semaphore("maxBufferedBytes", cfg.MaxBufferedBytes)))
-
-	var api http.Handler = mux
-	if cfg.RequiresAuth() {
-		auth := newAuthenticator(cfg)
-		api = auth.wrap(api)
-
-		if len(cfg.CORSOrigins) > 0 {
-			api = auth.cors(cfg.CORSOrigins, api)
-		}
+	for name := range rt.models.exact {
+		rt.segments = max(rt.segments, strings.Count(name, "/")+1)
 	}
 
-	// Health and readiness sit outside the auth middleware: probes and
-	// downstream load balancers must be able to check the proxy without a token.
+	objects := catalog(cfg.Models)
+	buffered := limits.bufferBudget(cfg.MaxBufferedBytes)
+	mux := http.NewServeMux()
+	registerModels(mux, objects)
+
+	auth := newAuthenticator(cfg, limits)
+	api := auth.wrap(mux)
+
+	if len(cfg.CORSOrigins) > 0 {
+		api = auth.cors(cfg.CORSOrigins, api)
+	}
+
 	root := http.NewServeMux()
 	registerHealth(root, len(objects))
 	registerReadiness(root, models)
@@ -102,36 +90,15 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 
 // routes resolves a model name to its model.
 type routes struct {
-	// exact holds every model name and alias.
-	exact map[string]*model
+	// models holds every model name, alias and wildcard.
+	models matcher[*model]
 	// rewrites holds the encoded model name each rewriting alias forwards.
 	rewrites map[string]jsontext.Value
-	// patterns holds the wildcards, the longest prefix first.
-	patterns []pattern
 	// segments is the most path segments of an exact name, which bounds
 	// the prefixes of a path that may name a model.
 	segments int
 	affinity []string
-}
-
-type pattern struct {
-	prefix string
-	model  *model
-}
-
-// lookup resolves a model name, else the longest wildcard prefixing it.
-func (rt *routes) lookup(name string) *model {
-	if m, ok := rt.exact[name]; ok {
-		return m
-	}
-
-	for _, p := range rt.patterns {
-		if strings.HasPrefix(name, p.prefix) {
-			return p.model
-		}
-	}
-
-	return nil
+	limits   *Limits
 }
 
 // routePrefix starts path-routed requests, chosen so it cannot collide with
@@ -162,23 +129,30 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) htt
 
 		var name string
 		var m *model
-		var body []byte
+		var b *bufferedBody
+		var obj *object
 
 		if strings.HasPrefix(req.URL.Path, routePrefix) {
 			name, m = rt.routeModel(req.URL)
 		} else {
-			b := bodyModel(w, req, buffered, rt.rewrites)
-			if b == nil {
+			if b = buffer(w, req, buffered); b == nil {
 				return
 			}
 
 			defer b.release()
 
-			req, name, body = b.req, b.model, b.body
-			m = rt.lookup(name)
+			var invalid *apiErrorBody
+			if name, obj, invalid = modelField(req.Header.Get("Content-Type"), b.data); invalid != nil {
+				writeError(w, http.StatusBadRequest, invalid.Code, invalid.Message)
+
+				return
+			}
+
+			m, _ = rt.models.lookup(name)
 		}
 
-		entryOf(req).model = name
+		e := entryOf(req)
+		e.model = name
 
 		if m == nil {
 			unknownModel(w, name)
@@ -186,13 +160,52 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) htt
 			return
 		}
 
-		// Computed before queueing, so a large body holds no slot meanwhile.
-		var aff affinity
-		if len(m.targets) > 1 {
-			aff = affinityOf(req, rt.affinity, body)
+		c := e.client
+
+		if !c.allows(name) {
+			modelNotAllowed(w, name)
+
+			return
 		}
 
-		m.serve(w, req, aff)
+		if !take(w, c.limiters) {
+			return
+		}
+
+		a := &attempt{}
+
+		var body []byte
+		if b != nil {
+			set := make(map[string]jsontext.Value)
+			if upstream, ok := rt.rewrites[name]; ok {
+				set["model"] = upstream
+			}
+
+			body = b.data
+
+			if len(set) > 0 {
+				// A form would have to be rebuilt.
+				if obj == nil {
+					writeError(w, http.StatusBadRequest, errAliasRewrite.Code, errAliasRewrite.Message)
+
+					return
+				}
+
+				body = obj.patch(set)
+			}
+
+			req, a.accept = b.forward(req, body)
+		}
+
+		// A compressed response would hide its usage.
+		req.Header.Del("Accept-Encoding")
+
+		// Computed before queueing, so a large body holds no slot meanwhile.
+		if len(m.targets) > 1 {
+			a.affinity = affinityOf(req, rt.affinity, obj)
+		}
+
+		m.serve(w, req, a, &ticket{client: c})
 	}
 }
 
@@ -206,7 +219,7 @@ func (rt *routes) routeModel(u *url.URL) (string, *model) {
 
 	for n := min(len(segments), rt.segments); n > 0; n-- {
 		name, err := url.PathUnescape(strings.Join(segments[:n], "/"))
-		if m, ok := rt.exact[name]; ok && err == nil {
+		if m, ok := rt.models.exact[name]; ok && err == nil {
 			u.RawPath = "/" + strings.Join(segments[n:], "/")
 			u.Path, _ = url.PathUnescape(u.RawPath)
 
@@ -219,27 +232,19 @@ func (rt *routes) routeModel(u *url.URL) (string, *model) {
 	return name, nil
 }
 
-// bufferedRequest is a request whose body was read for its "model" field.
-type bufferedRequest struct {
-	req   *http.Request
-	model string
-	body  []byte
-	// release drops the body and its budget, which also happens once the
-	// backend starts its response.
+// bufferedBody is a request body read in full, charged to the budget of
+// buffered bytes until released.
+type bufferedBody struct {
+	data    []byte
 	release func()
 }
 
-// bodyModel buffers the body, charged to buffered, to read its "model"
-// field, replaces that field with the name an alias rewrites it to, and
-// returns the request carrying the body as a replayBody, or writes an error
-// response and returns nil.
-//
-// Full buffering validates the entire JSON body before forwarding, which
-// also rejects a duplicate "model" that a backend might resolve differently.
-func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted, rewrites map[string]jsontext.Value) *bufferedRequest {
-	charged := &chargedReader{r: req.Body, budget: buffered}
+// buffer reads the body of req within the budget of buffered bytes, or
+// writes an error response and returns nil.
+func buffer(w http.ResponseWriter, req *http.Request, budget *semaphore.Weighted) *bufferedBody {
+	charged := &chargedReader{r: req.Body, budget: budget}
 
-	body, err := readBody(w, charged)
+	data, err := readBody(w, charged)
 	if err != nil {
 		charged.release()
 
@@ -258,27 +263,13 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Wei
 		return nil
 	}
 
-	name, span, invalid := modelField(req.Header.Get("Content-Type"), body)
-	if upstream, ok := rewrites[name]; ok && invalid == nil {
-		// A form would have to be rebuilt.
-		if span == nil {
-			invalid = errAliasRewrite
-		} else {
-			body = slices.Concat(body[:span[0]], upstream, body[span[1]:])
-		}
-	}
+	return &bufferedBody{data: data, release: sync.OnceFunc(charged.release)}
+}
 
-	if invalid != nil {
-		charged.release()
-		writeError(w, http.StatusBadRequest, invalid.Code, invalid.Message)
-
-		return nil
-	}
-
-	rb := newReplayBody(body, charged.release)
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		GotFirstResponseByte: rb.drop,
-	}))
+// forward returns req carrying body as a replayBody, and the function that
+// lets go of it and the budget once a response is accepted.
+func (b *bufferedBody) forward(req *http.Request, body []byte) (*http.Request, func()) {
+	rb := newReplayBody(body, b.release)
 	req.Body, _ = rb.open()
 	req.GetBody = rb.open
 	req.ContentLength = int64(len(body))
@@ -288,76 +279,134 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Wei
 		req.ContentLength = -1
 	}
 
-	return &bufferedRequest{req: req, model: name, body: body, release: rb.drop}
+	return req, rb.drop
 }
 
 // maxModelField bounds the "model" field of a multipart body.
 const maxModelField = 4 << 10
 
-// modelField reads the "model" field of a JSON body with the span of its
-// value, or of a multipart one as uploads such as /v1/audio/transcriptions
-// send, without a span, or describes why a body lacks one.
-func modelField(contentType string, body []byte) (string, []int, *apiErrorBody) {
+// modelField reads the "model" field of a JSON object body, returned with
+// its members, or of a multipart one as uploads such as
+// /v1/audio/transcriptions send, or describes why a body lacks one.
+//
+// Full buffering validates the entire JSON body before forwarding, which
+// also rejects a duplicate "model" that a backend might resolve differently.
+func modelField(contentType string, body []byte) (string, *object, *apiErrorBody) {
 	if mediaType, params, err := mime.ParseMediaType(contentType); err == nil && mediaType == "multipart/form-data" {
 		name, invalid := multipartModel(multipart.NewReader(bytes.NewReader(body), params["boundary"]))
 
 		return name, nil, invalid
 	}
 
-	return jsonModel(body)
-}
-
-// jsonModel reads the "model" member of a JSON object in one pass, which
-// also validates the whole body and rejects duplicate members. The decoder
-// parses the buffer in place.
-func jsonModel(body []byte) (string, []int, *apiErrorBody) {
-	dec := jsontext.NewDecoder(bytes.NewBuffer(body))
-	if token, err := dec.ReadToken(); err != nil || token.Kind() != '{' {
-		return "", nil, errInvalidJSON
-	}
-
-	var model jsontext.Value
-	var end int
-
-	for dec.PeekKind() == '"' {
-		token, err := dec.ReadToken()
-		if err != nil {
-			return "", nil, errInvalidJSON
-		}
-
-		// Read before the value voids the token.
-		isModel := token.String() == "model"
-
-		value, err := dec.ReadValue()
-		if err != nil {
-			return "", nil, errInvalidJSON
-		}
-
-		if isModel {
-			model, end = value, int(dec.InputOffset())
-		}
-	}
-
-	if _, err := dec.ReadToken(); err != nil {
-		return "", nil, errInvalidJSON
-	}
-
-	if _, err := dec.ReadToken(); !errors.Is(err, io.EOF) {
+	obj, err := parseObject(body)
+	if err != nil {
 		return "", nil, errInvalidJSON
 	}
 
 	var name *string
-	if model != nil {
-		if err := json.Unmarshal(model, &name); err != nil {
-			return "", nil, errInvalidJSON
-		}
+	if value, ok := obj.member("model"); ok && json.Unmarshal(value, &name) != nil {
+		return "", nil, errInvalidJSON
 	}
 
 	if name == nil {
 		return "", nil, errMissingModel
 	}
 
-	return *name, []int{end - len(model), end}, nil
+	return *name, obj, nil
+}
+
+// object is a JSON object with the spans of its member values.
+type object struct {
+	data    []byte
+	members map[string][2]int
+	// end is the offset of its closing brace.
+	end int
+}
+
+// parseObject reads the members of a JSON object in one pass, which also
+// validates it whole and rejects duplicate members. The decoder parses the
+// buffer in place.
+func parseObject(data []byte) (*object, error) {
+	dec := jsontext.NewDecoder(bytes.NewBuffer(data))
+	if token, err := dec.ReadToken(); err != nil || token.Kind() != '{' {
+		return nil, errNoObject
+	}
+
+	o := &object{data: data, members: make(map[string][2]int)}
+
+	for dec.PeekKind() == '"' {
+		token, err := dec.ReadToken()
+		if err != nil {
+			return nil, err
+		}
+
+		// Read before the value voids the token.
+		name := token.String()
+
+		value, err := dec.ReadValue()
+		if err != nil {
+			return nil, err
+		}
+
+		end := int(dec.InputOffset())
+		o.members[name] = [2]int{end - len(value), end}
+	}
+
+	if _, err := dec.ReadToken(); err != nil {
+		return nil, err
+	}
+
+	o.end = int(dec.InputOffset()) - 1
+
+	if _, err := dec.ReadToken(); !errors.Is(err, io.EOF) {
+		return nil, errNoObject
+	}
+
+	return o, nil
+}
+
+var errNoObject = errors.New("not a single JSON object")
+
+// patch returns the object with the values of set, replacing those of its
+// members and appending the others, in one pass that keeps everything else.
+func (o *object) patch(set map[string]jsontext.Value) []byte {
+	type splice struct {
+		start, end int
+		value      []byte
+	}
+
+	splices := make([]splice, 0, len(set)+1)
+	var added []byte
+	size := len(o.data)
+
+	for _, name := range slices.Sorted(maps.Keys(set)) {
+		if span, ok := o.members[name]; ok {
+			splices = append(splices, splice{span[0], span[1], set[name]})
+			size += len(set[name]) - (span[1] - span[0])
+
+			continue
+		}
+
+		if len(o.members) > 0 || len(added) > 0 {
+			added = append(added, ',')
+		}
+
+		added, _ = jsontext.AppendQuote(added, name)
+		added = append(append(added, ':'), set[name]...)
+	}
+
+	splices = append(splices, splice{o.end, o.end, added})
+	slices.SortFunc(splices, func(a, b splice) int { return cmp.Compare(a.start, b.start) })
+
+	out := make([]byte, 0, size+len(added))
+	at := 0
+
+	for _, s := range splices {
+		out = append(append(out, o.data[at:s.start]...), s.value...)
+		at = s.end
+	}
+
+	return append(out, o.data[at:]...)
 }
 
 // multipartModel reads the only "model" field of a form, which the whole
@@ -500,12 +549,23 @@ func bodyTooLarge(w http.ResponseWriter) {
 	writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
 }
 
-// proxyError maps a streamed body exceeding the size limit to 413, a backend
-// exceeding its response timeout to 504, and every other upstream failure to
-// 502 like the default ReverseProxy handler.
+// statusClientClosed is nginx's status of a request its client abandoned,
+// which only the log and the metrics see.
+const statusClientClosed = 499
+
+// proxyError maps a streamed body exceeding the size limit to 413, a client
+// gone before the response to 499, a backend exceeding its response timeout
+// to 504, and every other upstream failure to 502 like the default
+// ReverseProxy handler.
 func proxyError(w http.ResponseWriter, req *http.Request, err error) {
 	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		bodyTooLarge(w)
+
+		return
+	}
+
+	if req.Context().Err() != nil {
+		w.WriteHeader(statusClientClosed)
 
 		return
 	}

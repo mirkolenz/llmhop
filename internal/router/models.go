@@ -29,8 +29,8 @@ type modelObject map[string]jsontext.Value
 //
 // https://developers.openai.com/api/reference/resources/models/methods/list
 type modelList struct {
-	Object string        `json:"object"`
-	Data   []modelObject `json:"data"`
+	Object string           `json:"object"`
+	Data   []jsontext.Value `json:"data"`
 }
 
 // jsonBody encodes v, so payloads immutable after startup are encoded once.
@@ -87,35 +87,48 @@ func catalog(models map[string]config.Model) map[string]modelObject {
 }
 
 // registerModels wires the read-only OpenAI models API onto mux, listing the
-// objects sorted by name. The catalog is immutable after startup, so every
-// response is built once and reused.
+// objects that the client may use sorted by name. The catalog is immutable
+// after startup, so every object is encoded once and reused.
 func registerModels(mux *http.ServeMux, objects map[string]modelObject) {
+	names := slices.Sorted(maps.Keys(objects))
 	byName := make(map[string][]byte, len(objects))
-	list := modelList{Object: "list", Data: make([]modelObject, 0, len(objects))}
 
-	for _, name := range slices.Sorted(maps.Keys(objects)) {
+	for _, name := range names {
 		byName[name] = jsonBody(objects[name])
-		list.Data = append(list.Data, objects[name])
 	}
 
-	listBody := jsonBody(list)
+	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
+		c := entryOf(r).client
+		list := modelList{Object: "list", Data: []jsontext.Value{}}
 
-	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, listBody)
+		for _, name := range names {
+			if c.allows(name) {
+				list.Data = append(list.Data, byName[name])
+			}
+		}
+
+		writeJSON(w, http.StatusOK, jsonBody(list))
 	})
 
 	mux.HandleFunc("GET /v1/models/{model...}", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("model")
 		m, ok := byName[name]
-		if !ok {
-			unknownModel(w, name)
 
-			return
+		switch {
+		case !ok:
+			unknownModel(w, name)
+		case !entryOf(r).client.allows(name):
+			modelNotAllowed(w, name)
+		default:
+			writeJSON(w, http.StatusOK, m)
 		}
-		writeJSON(w, http.StatusOK, m)
 	})
 }
 
 func unknownModel(w http.ResponseWriter, name string) {
 	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model %q", name))
+}
+
+func modelNotAllowed(w http.ResponseWriter, name string) {
+	writeError(w, http.StatusForbidden, "model_not_allowed", fmt.Sprintf("this client may not use the model %q", clip(name)))
 }

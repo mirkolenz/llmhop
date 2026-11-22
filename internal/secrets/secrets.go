@@ -56,7 +56,7 @@ func resolve(key string, load bool) (string, error) {
 			return "", err
 		}
 
-		read = readCredential
+		read = Credential
 	case "env":
 		if arg == "" {
 			return "", fmt.Errorf("invalid env var name %q", arg)
@@ -89,22 +89,29 @@ func lookupEnv(name string) (string, error) {
 	return v, nil
 }
 
-// CheckCredentialName rejects a credential name, or a prefix of one, that is
-// not a plain file name inside the credentials directory.
+// maxCredentialName is the longest credential name systemd accepts.
+const maxCredentialName = 255
+
+// CheckCredentialName rejects a credential name outside the subset of those
+// systemd accepts that llmhop, llmhopctl and the NixOS module share: an
+// ASCII letter, digit or `_`, followed by those, `.` and `-`.
 func CheckCredentialName(name string) error {
-	if !filepath.IsLocal(name) || filepath.Base(name) != name {
+	valid := func(r rune) bool {
+		return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || strings.ContainsRune("_.-", r)
+	}
+
+	if name == "" || len(name) > maxCredentialName || name[0] == '.' || name[0] == '-' || strings.ContainsFunc(name, func(r rune) bool { return !valid(r) }) {
 		return fmt.Errorf("invalid credential name %q", name)
 	}
 
 	return nil
 }
 
-// Credentials reads every systemd credential whose name starts with prefix,
-// keyed by the rest of its name.
-func Credentials(prefix string) (map[string]string, error) {
+// CredentialNames lists the systemd credentials of the unit.
+func CredentialNames() ([]string, error) {
 	dir, err := credentialsDir()
 	if err != nil {
-		return nil, fmt.Errorf("credentials %q*: %w", prefix, err)
+		return nil, fmt.Errorf("credentials: %w", err)
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -112,30 +119,22 @@ func Credentials(prefix string) (map[string]string, error) {
 		return nil, fmt.Errorf("read credentials: %w", err)
 	}
 
-	creds := make(map[string]string)
+	var names []string
 
 	for _, entry := range entries {
-		name, ok := strings.CutPrefix(entry.Name(), prefix)
-		if !ok || name == "" || entry.IsDir() {
-			continue
+		if !entry.IsDir() {
+			names = append(names, entry.Name())
 		}
-
-		v, err := readFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, err
-		}
-
-		creds[name] = v
 	}
 
-	return creds, nil
+	return names, nil
 }
 
-// readCredential resolves the systemd credential called name. This is the same
+// Credential reads the systemd credential called name. This is the same
 // reference the NixOS module rewrites at eval time for the model servers, which
-// receive a path because they read the file themselves; llmhop reads its own
+// receive a path because they read the file themselves. llmhop reads its own
 // config, so here the reference expands to the credential's contents.
-func readCredential(name string) (string, error) {
+func Credential(name string) (string, error) {
 	dir, err := credentialsDir()
 	if err != nil {
 		return "", fmt.Errorf("credential %q: %w", name, err)
@@ -154,8 +153,8 @@ func credentialsDir() (string, error) {
 	return dir, nil
 }
 
-// readFile reads a secret from an absolute path and trims trailing line
-// terminators.
+// readFile reads a secret from an absolute path, without the trailing line
+// terminators that files and pipes usually end with.
 func readFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

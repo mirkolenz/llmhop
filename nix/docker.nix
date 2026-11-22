@@ -25,7 +25,7 @@
       "/config.json"
     ];
     User = "nobody:nobody";
-    # The mounted config must set `listen: [":8080"]`.
+    # The mounted config must set `"listen": {"default": {"port": 8080}}`.
     ExposedPorts."8080/tcp" = { };
     Labels = {
       "org.opencontainers.image.source" = "https://github.com/mirkolenz/llmhop";

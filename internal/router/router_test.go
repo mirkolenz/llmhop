@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -73,7 +74,10 @@ func send(t *testing.T, handler http.Handler, method, path, body, authHeader str
 }
 
 func TestBearer(t *testing.T) {
-	a := &authenticator{tokens: map[string][]byte{"a": []byte("alpha"), "b": []byte("beta")}}
+	a := &authenticator{keys: map[[sha256.Size]byte]*client{
+		sha256.Sum256([]byte("alpha")): {name: "a"},
+		sha256.Sum256([]byte("beta")):  {name: "b"},
+	}}
 	cases := []struct {
 		header string
 		want   string
@@ -88,7 +92,9 @@ func TestBearer(t *testing.T) {
 	for _, c := range cases {
 		got := ""
 		if token, ok := bearer(c.header); ok {
-			got, _ = a.lookup(token)
+			if c, ok := a.lookup(token); ok {
+				got = c.name
+			}
 		}
 
 		if got != c.want {
@@ -99,7 +105,7 @@ func TestBearer(t *testing.T) {
 
 func TestCatalog(t *testing.T) {
 	backend, _ := startBackend(t)
-	h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: map[string]config.Model{
 		"b":        {URLs: []string{backend.URL}},
 		"a":        {URLs: []string{backend.URL}},
 		"detector": {URLs: []string{backend.URL}, Unlisted: true},
@@ -118,7 +124,9 @@ func TestCatalog(t *testing.T) {
 	})
 
 	t.Run("list is sorted and omits unlisted models and wildcards", func(t *testing.T) {
-		var got modelList
+		var got struct {
+			Data []modelObject `json:"data"`
+		}
 		if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer secret").Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +170,7 @@ func TestCatalog(t *testing.T) {
 func TestRouterRequests(t *testing.T) {
 	cases := []struct {
 		name       string
-		auth       map[string]string
+		auth       map[string]config.Client
 		headers    map[string]string
 		body       string
 		authHeader string
@@ -176,7 +184,7 @@ func TestRouterRequests(t *testing.T) {
 		{name: "non-string model", body: `{"model":123}`, wantCode: http.StatusBadRequest},
 		{name: "duplicate model key", body: `{"model":"m","model":null}`, wantCode: http.StatusBadRequest},
 		{name: "unknown model", body: `{"model": "nope"}`, wantCode: http.StatusNotFound},
-		{name: "auth runs before model lookup", auth: map[string]string{"t": "secret"}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
+		{name: "auth runs before model lookup", auth: map[string]config.Client{"t": {Key: "secret"}}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
 		{name: "oversized body", maxBody: 16, body: `{"model": "m", "prompt": "` + strings.Repeat("x", 100) + `"}`, wantCode: http.StatusRequestEntityTooLarge},
 		{
 			name:     "known model is proxied with its body intact",
@@ -201,7 +209,7 @@ func TestRouterRequests(t *testing.T) {
 		},
 		{
 			name:       "auth strips client Authorization before forwarding",
-			auth:       map[string]string{"t": "secret"},
+			auth:       map[string]config.Client{"t": {Key: "secret"}},
 			body:       `{"model": "m"}`,
 			authHeader: "Bearer secret",
 			wantCode:   http.StatusOK,
@@ -233,7 +241,7 @@ func TestRouterRequests(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			backend, captured := startBackend(t)
 			h := newRouter(t, &config.Config{
-				AuthTokens:   c.auth,
+				Clients:      c.auth,
 				MaxBodyBytes: c.maxBody,
 				Models:       map[string]config.Model{"m": {URLs: []string{backend.URL}, Headers: c.headers}},
 			})
@@ -250,13 +258,13 @@ func TestRouterRequests(t *testing.T) {
 	}
 }
 
-// A credential glob matching no credential locks the gateway instead of
+// Client credentials without any credential lock the gateway instead of
 // opening it.
 func TestAuthRequiredWithoutTokens(t *testing.T) {
 	backend, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
-		AuthTokenCredentials: "llmhop.token.*",
-		Models:               map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+		ClientCredentials: true,
+		Models:            map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model": "m"}`, "Bearer anything"); rec.Code != http.StatusUnauthorized {
@@ -292,7 +300,7 @@ func TestProxyPreservesHostAndQuery(t *testing.T) {
 
 func TestPathRouting(t *testing.T) {
 	backend, captured := startBackend(t)
-	h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: map[string]config.Model{
 		"detector": {URLs: []string{backend.URL + "/base"}, Unlisted: true},
 	}})
 
@@ -354,10 +362,12 @@ func TestBodyLimit(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			h := newRouter(t, &config.Config{MaxBodyBytes: c.maxBytes, Models: map[string]config.Model{"other": {URLs: []string{"http://127.0.0.1:1"}}}})
 			req := httptest.NewRequest(http.MethodPost, "/", c.body)
 			req.ContentLength = c.contentLength
 			rec := httptest.NewRecorder()
 			(&routes{}).proxyHandler(c.maxBytes, newSemaphore(0))(rec, req)
+			h.ServeHTTP(rec, req)
 
 			if rec.Code != c.wantCode {
 				t.Fatalf("got status %d, want %d", rec.Code, c.wantCode)
@@ -432,8 +442,8 @@ func TestReadiness(t *testing.T) {
 
 	check := func(wantCode int, want readiness) {
 		t.Helper()
-		h := newRouter(t, &config.Config{AuthTokens: map[string]string{"t": "secret"}, Models: models})
 		rec := send(t, h, http.MethodGet, "/readiness", "", "")
+		h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: models})
 
 		var got readiness
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -542,6 +552,7 @@ func TestBufferedBytesReleasedOnceResponding(t *testing.T) {
 	<-done
 }
 
+
 func TestProxyPreservesRequestTrailer(t *testing.T) {
 	var trailer string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -604,7 +615,9 @@ func TestNames(t *testing.T) {
 		"openai/*": {URLs: []string{remote.URL}},
 	}})
 
-	var got modelList
+	var got struct {
+		Data []modelObject `json:"data"`
+	}
 	if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "").Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -721,6 +734,8 @@ func TestFailover(t *testing.T) {
 	}
 }
 
+
+
 func TestDataParallelRanks(t *testing.T) {
 	backend, captured := startBackend(t)
 	h := newRouter(t, &config.Config{
@@ -801,8 +816,8 @@ func TestClientHeaders(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 	h := newRouter(t, &config.Config{
-		AuthTokens: map[string]string{"alice": "secret"},
-		Models:     map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+		Clients: map[string]config.Client{"alice": {Key: "secret"}},
+		Models:  map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
@@ -903,27 +918,26 @@ func TestTrustedSockets(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 	h := newRouter(t, &config.Config{
-		AuthTokens:     map[string]string{"alice": "secret"},
-		TrustedSockets: map[string]string{"ssh": "/run/ssh.sock"},
-		CORSOrigins:    []string{"*"},
-		Models:         map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+		Clients:     map[string]config.Client{"alice": {Key: "secret"}, "ssh": {Listener: "ssh"}},
+		CORSOrigins: []string{"*"},
+		Models:      map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
 	cases := []struct {
-		name, socket, host string
-		header             http.Header
-		want               int
+		name, listener, host string
+		header               http.Header
+		want                 int
 	}{
-		{"trusted socket", "/run/ssh.sock", "localhost:8080", nil, http.StatusOK},
-		{"other socket", "/run/http.sock", "localhost:8080", nil, http.StatusUnauthorized},
-		{"rebound host", "/run/ssh.sock", "evil.example:8080", nil, http.StatusForbidden},
-		{"cross-site request", "/run/ssh.sock", "localhost:8080", http.Header{"Sec-Fetch-Site": {"cross-site"}}, http.StatusForbidden},
-		{"same-origin page", "/run/ssh.sock", "127.0.0.1:8080", http.Header{"Origin": {"http://127.0.0.1:8080"}}, http.StatusOK},
+		{"client listener", "ssh", "localhost:8080", nil, http.StatusOK},
+		{"other listener", "default", "localhost:8080", nil, http.StatusUnauthorized},
+		{"rebound host", "ssh", "evil.example:8080", nil, http.StatusForbidden},
+		{"cross-site request", "ssh", "localhost:8080", http.Header{"Sec-Fetch-Site": {"cross-site"}}, http.StatusForbidden},
+		{"same-origin page", "ssh", "127.0.0.1:8080", http.Header{"Origin": {"http://127.0.0.1:8080"}}, http.StatusOK},
 	}
 
 	for _, c := range cases {
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
-		req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.UnixAddr{Name: c.socket, Net: "unix"}))
+		req = req.WithContext(context.WithValue(WithListener(req.Context(), c.listener), http.LocalAddrContextKey, &net.UnixAddr{Name: "/run/llmhop.sock", Net: "unix"}))
 		req.Host = c.host
 		maps.Copy(req.Header, c.header)
 		rec := httptest.NewRecorder()
@@ -943,7 +957,7 @@ func TestTrustedSockets(t *testing.T) {
 func TestCORS(t *testing.T) {
 	backend, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
-		AuthTokens:  map[string]string{"alice": "secret"},
+		Clients:     map[string]config.Client{"alice": {Key: "secret"}},
 		CORSOrigins: []string{"https://chat.example"},
 		Models:      map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})

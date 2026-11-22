@@ -33,7 +33,14 @@ testers.nixosTest {
     imports = [ self.nixosModules.default ];
 
     environment.etc = {
-      "credstore/llmhop.client-token" = secretFile "client-secret";
+      "credstore/llmhop.api-key.client" = secretFile "client-secret";
+      # A JSON credential, whose policy allows only another model.
+      "credstore/llmhop.api-key.guest" = secretFile (
+        lib.toJSON {
+          key = "guest-secret";
+          policy = "guest";
+        }
+      );
       "llmhop/worker-key" = secretFile "worker-secret";
     };
 
@@ -80,12 +87,13 @@ testers.nixosTest {
 
       gateway = {
         enable = true;
-        # Two sockets, so llmhop serves every descriptor systemd hands over.
+        # A further socket, so llmhop serves every descriptor systemd hands
+        # over by its name.
         listen.local = { };
-        credentials."llmhop.client-token" = null;
         settings = {
-          authTokens.client = "\${cred:llmhop.client-token}";
-          authTokenCredentials = "llmhop.token.*";
+          clients.local.listener = "local";
+          policies.guest.models = [ "dying" ];
+          clientCredentials = true;
         };
       };
     };
@@ -93,7 +101,7 @@ testers.nixosTest {
 
   nodes.containers = {
     imports = [ self.nixosModules.default ];
-    environment.etc."credstore/llmhop.token.client" = secretFile "client-secret";
+    environment.etc."credstore/llmhop.api-key.client" = secretFile "client-secret";
     virtualisation.diskSize = 4096;
     # Every container, the gateway reading its imported credentials among
     # them, runs in a user namespace of its own, by default.
@@ -110,7 +118,7 @@ testers.nixosTest {
       };
       gateway = {
         enable = true;
-        settings.authTokenCredentials = "llmhop.token.*";
+        settings.clientCredentials = true;
       };
     };
   };
@@ -123,9 +131,12 @@ testers.nixosTest {
     ''
       import json
 
-      def curl(token=None):
-          auth = f"-H 'Authorization: Bearer {token}'" if token else ""
-          return f"""curl -fsS {auth} --json '{{"model": "fake-model"}}' http://127.0.0.1:8080/"""
+      def curl(key=None, flags="-fsS"):
+          auth = f"-H 'Authorization: Bearer {key}'" if key else ""
+          return f"""curl {flags} {auth} --json '{{"model": "fake-model"}}' http://127.0.0.1:8080/"""
+
+      def status(key):
+          return machine.succeed(curl(key, "-sS -o /dev/null -w '%{http_code}'"))
 
       # Both read at once, since a restarting unit has no `MainPID` between
       # its processes.
@@ -143,13 +154,18 @@ testers.nixosTest {
       start_all()
       machine.wait_for_unit("llmhop.service")
 
-      with subtest("both listeners serve health without a token"):
           assert json.loads(machine.succeed("curl -fsS http://127.0.0.1:8080/health")) == {"status": "ok", "models": 2}
           machine.succeed("curl -fsS --unix-socket /run/llmhop/local.sock http://localhost/health")
+      with subtest("both listeners serve health without a key"):
 
-      with subtest("the imported client token is required"):
+      with subtest("the imported client key is required"):
           machine.fail(curl())
           machine.fail(curl("nope"))
+
+      with subtest("a JSON credential's policy allows only its models"):
+          assert status("guest-secret") == "403"
+          models = json.loads(machine.succeed("curl -fsS -H 'Authorization: Bearer guest-secret' http://127.0.0.1:8080/v1/models"))
+          assert [model["id"] for model in models["data"]] == ["dying"]
 
       with subtest("restarting a listener reconnects the gateway to its sockets"):
           machine.succeed("systemctl restart llmhop-default.socket")
@@ -174,27 +190,46 @@ testers.nixosTest {
       with subtest("llmhop reaches the worker through its socket"):
           assert machine.succeed(curl("client-secret")) == "socket ok"
 
-      with subtest("llmhopctl creates, rotates and revokes tokens by reloading llmhop"):
+      with subtest("the listener of a client needs no key"):
+          assert machine.succeed("""curl -fsS --json '{"model": "fake-model"}' --unix-socket /run/llmhop/local.sock http://localhost/""") == "socket ok"
+
+      with subtest("llmhopctl creates, rotates, updates and revokes keys by reloading llmhop"):
           pid = machine.get_unit_property("llmhop", "MainPID")
-          added = machine.succeed("llmhopctl token create added").strip()
+          added = machine.succeed("llmhopctl key create added").strip()
           assert machine.succeed(curl(added)) == "socket ok"
-          rotated = machine.succeed("llmhopctl token rotate added").strip()
+          rotated = machine.succeed("llmhopctl key rotate added").strip()
           machine.fail(curl(added))
           assert machine.succeed(curl(rotated)) == "socket ok"
-          assert machine.succeed("llmhopctl token list") == "added\n"
-          machine.succeed("llmhopctl token revoke added")
+          machine.succeed("llmhopctl key create --policy guest --expires 30d limited")
+          # Rotating keeps the policy.
+          assert status(machine.succeed("llmhopctl key rotate limited").strip()) == "403"
+          listed = {
+              name: json.loads(fields)
+              for name, fields in (line.split("\t") for line in machine.succeed("llmhopctl key list").splitlines())
+          }
+          assert list(listed) == ["added", "client", "guest", "limited"], listed
+          assert listed["added"] == {} and listed["guest"] == {"policy": "guest"}
+          assert listed["limited"]["policy"] == "guest" and listed["limited"]["expiresAt"].startswith("20")
+          # Updating keeps the key, and llmhopctl refuses an unknown policy.
+          machine.succeed("llmhopctl key update --policy guest added")
+          assert status(rotated) == "403"
+          machine.fail("llmhopctl key update --policy missing added")
+          machine.succeed("llmhopctl key update --policy= --no-expires limited")
+          assert status(machine.succeed("llmhopctl key rotate limited").strip()) == "200"
+          machine.succeed("llmhopctl key revoke added")
           machine.fail(curl(rotated))
-          machine.fail("llmhopctl token rotate added")
-          machine.fail("llmhopctl token create client")
+          machine.fail("llmhopctl key rotate added")
+          machine.fail("llmhopctl key create client")
+          machine.fail("llmhopctl key create local")
           assert machine.get_unit_property("llmhop", "MainPID") == pid
           assert machine.succeed(curl("client-secret")) == "socket ok"
 
       containers.wait_for_unit("llmhop.service")
       containers.wait_for_unit("llama-cpp-fake-model.service")
 
-      with subtest("containers: llmhopctl restarts llmhop to import a token"):
-          token = containers.succeed("llmhopctl token create added").strip()
-          assert containers.succeed(curl(token)) == "socket ok"
+      with subtest("containers: llmhopctl restarts llmhop to import a key"):
+          key = containers.succeed("llmhopctl key create added").strip()
+          assert containers.succeed(curl(key)) == "socket ok"
 
       with subtest("containers: the worker downloads into its volume in its own user namespace"):
           huser = containers.succeed("podman top ${worker.podmanName} huser").split()[1]

@@ -58,6 +58,7 @@ Every accelerator stack caches compiled kernels below `$HOME`, which is read-onl
 Only native workloads bind unix sockets, since a container's user maps to an unpredictable host ID.
 Each socket lives in a directory of its own below `socketDirectory`, so no worker can delete or squat another's socket.
 The root is `root:root` with mode `0711` and each directory `0710`, since clients know the name, and servers run with umask `0007`, since they never `chmod` their socket.
+The socket units of the gateway create the root with `DirectoryMode=0711` themselves, since a bundle installs no tmpfiles rules.
 
 A worker's socket belongs to the backend's `group`, which every user of `socketClients` joins, since systemd drops ACLs when it chowns an exec directory.
 That is why the gateway runs as a named user rather than a `DynamicUser`.
@@ -132,8 +133,16 @@ The function `isolable` of `backends/workload` captures this, deriving the defau
 The gateway is llmhop alone, since chained gateways duplicate routing and auth, and other gateways could neither reach unix sockets, route detectors nor describe LoRA adapters.
 A workload reachable beside it bypasses its auth, hence the loopback assertion.
 SGLang serves an adapter as `<served>:<adapter>` and falls back to the base model for any other name, so the gateway rewrites the `model` of a JSON body sent to an adapter's alias.
-Both runtimes share the `listen` options, socket units, claims and firewall rules, and never bind themselves, since their config must not set `listen`.
-Podman passes the sockets of the units listed in the container's `Sockets=` into the container, which stays on the host network to reach the published ports of the workloads.
+Both runtimes share the `listen` options, socket units, claims and firewall rules, and never bind themselves, since systemd passes the socket of every listener of the read-only `settings.listen`, whose `host`, `port` or `socket` llmhop only checks against it.
+`settings.listen` renders exactly the fields of llmhop's listeners from the enabled entries of `listen`, `host` and `port` for a port or else `socket`, beside `metrics`, so neither the options of the socket units nor the unused one of `host` and `socket` reach llmhop, which rejects them.
+Each socket unit sets `FileDescriptorName=` to the name of its listener, by which llmhop matches the passed sockets to its listeners.
+Podman passes the sockets of the units listed in the container's `Sockets=` into the container with `LISTEN_FDNAMES`, and the container stays on the host network to reach the published ports of the workloads.
+A credential holds only the key, policy and expiry, which rotate together, so llmhopctl checks the policy against the config itself, while limits belong to policies.
+Every client credential is named `llmhop.api-key.<client>`, a fixed prefix that llmhop and llmhopctl share without a per-entry policy, and the gateway imports it as the glob `llmhop.api-key.*`.
+
+`settings` is a freeform submodule, as in RFC 42, whose typed options for `defaults`, `policies`, `clients` and `clientCredentials` share one set of policy fields, beside typed `models`, into which every workload merges.
+Each defaults to `null` and is left out of the config while unset, since llmhop counts a field present in the JSON as set, even `0`, `{}` or `[]`, which replaces the layers below it.
+`llmhop check` rejects a client whose `listener` names no unix socket, since `settings.listen` renders the port or socket of every listener.
 
 ## Watermarking
 

@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/semaphore"
-
 	"github.com/mirkolenz/llmhop/internal/config"
 	"github.com/mirkolenz/llmhop/internal/upstream"
 )
@@ -31,6 +29,8 @@ const rankHeader = "X-Data-Parallel-Rank"
 // counts and health only exist to spread the requests of this process, so
 // every instance of llmhop decides alone and none shares state.
 type model struct {
+	// name is the configured name, and label its metric label.
+	name    string
 	headers http.Header
 	// host overrides the outgoing Host when set, since Go carries Host
 	// outside the header map.
@@ -41,8 +41,8 @@ type model struct {
 	// targets are the targets of requests with an affinity key, the ranks of
 	// every server if it has several, else the servers.
 	targets []*target
-	// slots bounds the proxied requests over all servers.
-	slots        *semaphore.Weighted
+	// queue admits the proxied requests over all servers.
+	queue        *queue
 	queueTimeout time.Duration
 	failover     time.Duration
 	proxy        *httputil.ReverseProxy
@@ -68,7 +68,7 @@ type target struct {
 
 // newModel builds the model of m. With stripCORS, llmhop alone decides which
 // pages may read a response, as it does whenever tokens are required.
-func newModel(m config.Model, slots *semaphore.Weighted, stripCORS bool) (*model, error) {
+func newModel(name string, m config.Model, q *queue, stripCORS bool) (*model, error) {
 	headers := make(http.Header, len(m.Headers))
 
 	for k, v := range m.Headers {
@@ -76,10 +76,11 @@ func newModel(m config.Model, slots *semaphore.Weighted, stripCORS bool) (*model
 	}
 
 	md := &model{
+		name:         name,
 		headers:      headers,
 		host:         headers.Get("Host"),
 		health:       m.HealthPath,
-		slots:        slots,
+		queue:        q,
 		queueTimeout: time.Duration(m.QueueTimeoutSeconds) * time.Second,
 		failover:     time.Duration(m.FailoverSeconds) * time.Second,
 	}
@@ -117,8 +118,13 @@ func newModel(m config.Model, slots *semaphore.Weighted, stripCORS bool) (*model
 			r.Out.Header.Del(clientHeader)
 			r.Out.Header.Del(rankHeader)
 
-			if client := entryOf(r.In).client; client != "" {
-				r.Out.Header.Set(clientHeader, client)
+			// ReverseProxy clears the headers set before the proxy, such as the
+			// rate limits, on a 1xx, while llmhop reads or streams the body
+			// anyway.
+			r.Out.Header.Del("Expect")
+
+			if c := entryOf(r.In).client; c != nil && c.name != "" {
+				r.Out.Header.Set(clientHeader, c.name)
 			}
 		},
 		Transport: md,
@@ -133,6 +139,14 @@ func newModel(m config.Model, slots *semaphore.Weighted, stripCORS bool) (*model
 				})
 			}
 
+			// The rate limits of a backend are those of llmhop's upstream
+			// credential, never of the client, whose limits llmhop reports.
+			maps.DeleteFunc(resp.Header, func(name string, _ []string) bool {
+				return strings.HasPrefix(name, "X-Ratelimit-")
+			})
+
+			readUsage(resp)
+
 			return nil
 		},
 		ErrorHandler: proxyError,
@@ -141,35 +155,25 @@ func newModel(m config.Model, slots *semaphore.Weighted, stripCORS bool) (*model
 	return md, nil
 }
 
-// acquire takes a slot, waiting up to the queue timeout for one, or rejects
-// the request with 429 and reports false.
-func (m *model) acquire(w http.ResponseWriter, req *http.Request) bool {
-	if m.slots.TryAcquire(1) {
-		return true
-	}
+// serve proxies req to a server picked by the affinity of a once t holds
+// its slots, waiting up to the queue timeout for them, or rejects it with 429,
+// or 499 if its client left meanwhile.
+func (m *model) serve(w http.ResponseWriter, req *http.Request, a *attempt, t *ticket) {
+	admitted := m.queue.admit(req.Context(), t, m.queueTimeout)
 
-	if m.queueTimeout > 0 {
-		ctx, cancel := context.WithTimeout(req.Context(), m.queueTimeout)
-		defer cancel()
+	switch {
+	case !admitted && req.Context().Err() != nil:
+		w.WriteHeader(statusClientClosed)
 
-		if m.slots.Acquire(ctx, 1) == nil {
-			return true
-		}
-	}
+		return
+	case !admitted:
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "too_many_requests", "too many concurrent requests")
 
-	w.Header().Set("Retry-After", "1")
-	writeError(w, http.StatusTooManyRequests, "too_many_requests", "too many concurrent requests for this model")
-
-	return false
-}
-
-// serve proxies req to a server picked by its affinity once it holds a slot.
-func (m *model) serve(w http.ResponseWriter, req *http.Request, aff affinity) {
-	if !m.acquire(w, req) {
 		return
 	}
 
-	defer m.slots.Release(1)
+	defer t.release()
 
 	a := &attempt{affinity: aff, target: m.pick(aff, nil)}
 	defer func() {

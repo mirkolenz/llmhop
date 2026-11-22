@@ -8,8 +8,6 @@
   mkContainer,
   mkExposed,
   mkRoutable,
-  tokenGateway,
-  apiKeys,
   ...
 }:
 let
@@ -36,11 +34,6 @@ let
       needle = "is loopback";
       count = 1;
       system = mkRoutable { vllm.models.qwen.openFirewall = true; };
-    };
-    llmhopListenSetting = {
-      needle = "sets `listen`";
-      count = 1;
-      system = mkRoutable { gateway.settings.listen = [ ":8080" ]; };
     };
     portClash = {
       needle = "is claimed by";
@@ -199,22 +192,6 @@ let
       needle = "which a container publishes";
       count = 1;
       system = mkContainer { vllm.models.test.port = null; };
-    };
-    trustedPort = {
-      needle = "is trusted";
-      count = 1;
-      system = tokenGateway {
-        listen.ssh = {
-          trusted = true;
-          port = 2222;
-        };
-      };
-    };
-    # Any other credential matching the glob would become a client token.
-    tokenClash = {
-      needle = "client token";
-      count = 1;
-      system = tokenGateway { credentials."llmhop.token.backend" = apiKeys; };
     };
   };
 in

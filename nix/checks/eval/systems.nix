@@ -81,8 +81,8 @@ rec {
   container = mkContainer {
     gateway = {
       enable = true;
-      credentials."llmhop.client-token" = null;
-      settings.authTokens.client = "\${cred:llmhop.client-token}";
+      credentials."llmhop.api-key.client" = null;
+      settings.clients.client.key = "\${cred:llmhop.api-key.client}";
     };
     vllm = {
       models.test = {
@@ -134,23 +134,6 @@ rec {
     vllm.models.test.credentials.api-keys = apiKeys;
   };
   unmappedWorker = unmapped.virtualisation.quadlet.containers.vllm-test.containerConfig;
-
-  # Client tokens imported by glob, with further gateway options.
-  tokenGateway =
-    extra:
-    mkSystem {
-      gateway = {
-        enable = true;
-        settings.authTokenCredentials = "llmhop.token.*";
-      }
-      // extra;
-      vllm = nativeVllm // {
-        models.test = {
-          model = "example/test";
-          port = 21101;
-        };
-      };
-    };
 
   # The VM test covers the native llama.cpp path end to end.
   native = mkSystem {
@@ -287,4 +270,25 @@ rec {
     );
   routable = mkRoutable { };
   routedModels = routable.services.llmhop.gateway.settings.models;
+  # A policy, a client on its listener, set zeros, a
+  # metrics port and no `default` listener.
+  policed = mkRoutable {
+    gateway = {
+      listen = {
+        default.enable = false;
+        ssh = { };
+      };
+      settings = {
+        defaults.requestsPerMinute = 0;
+        policies.guest.models = [ "qwen*" ];
+        clients = {
+          ci = {
+            key = "\${env:CI_KEY}";
+            policy = "guest";
+          };
+          ssh.listener = "ssh";
+        };
+      };
+    };
+  };
 }

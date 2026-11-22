@@ -23,6 +23,7 @@
   managed,
   routable,
   routedModels,
+  policed,
   lib,
   pkgs,
   ...
@@ -277,6 +278,49 @@
         };
       };
       kernels = "1";
+    };
+  };
+
+  # Unset options stay out of the config, while set zeros stay in.
+  testClients = {
+    expr = {
+      settings = lib.removeAttrs (util.withoutNulls policed.services.llmhop.gateway.settings) [
+        "listen"
+        "models"
+      ];
+    };
+    expected = {
+      settings = {
+        defaults.requestsPerMinute = 0;
+        policies.guest.models = [ "qwen*" ];
+        clients = {
+          ci = {
+            key = "\${env:CI_KEY}";
+            policy = "guest";
+          };
+          ssh.listener = "ssh";
+        };
+      };
+    };
+  };
+
+  # Every enabled listener reaches llmhop under its name with its fields,
+  testListeners = {
+    expr = {
+      inherit (policed.services.llmhop.gateway.settings) listen;
+      names = lib.mapAttrs (_: unit: unit.socketConfig.FileDescriptorName) (
+        lib.filterAttrs (name: _: lib.hasPrefix "llmhop-" name) policed.systemd.sockets
+      );
+    };
+    expected = {
+      listen = {
+        ssh = {
+          socket = "/run/llmhop/ssh.sock";
+        };
+      };
+      names = {
+        llmhop-ssh = "ssh";
+      };
     };
   };
 

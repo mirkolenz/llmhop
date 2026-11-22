@@ -10,18 +10,19 @@
   ...
 }:
 let
-  util = import ../lib lib;
-  wl = import ../backends/workload lib;
-  llmhop = config.services.llmhop;
-  cfg = llmhop.gateway;
-  owner = "services.llmhop.gateway";
-
-  workloads = wl.allWorkloads llmhop;
+  inherit (import ./common.nix { inherit config lib; })
+    util
+    llmhop
+    cfg
+    owner
+    workloads
+    listeners
+    ;
   containerCredentials = util.containerCredentials llmhop cfg.credentials;
 
   # The socket units of the listeners, which the gateway service holds.
   socketUnit = listenerName: "llmhop-${listenerName}";
-  socketUnits = map socketUnit (lib.attrNames cfg.listen);
+  socketUnits = map socketUnit (lib.attrNames listeners);
   sockets = map (unit: "${unit}.socket") socketUnits;
 
   # A stable path, so a changed config reloads the native gateway in place,
@@ -32,7 +33,7 @@ let
   # The config file of `settings`, validated by `package` itself, so a typo
   # fails the build instead of the service. Secret references stay
   # unexpanded, since what they name does not exist in a build sandbox.
-  unchecked = (pkgs.formats.json { }).generate "llmhop.json" cfg.settings;
+  unchecked = (pkgs.formats.json { }).generate "llmhop.json" (util.withoutNulls cfg.settings);
   file =
     if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
       pkgs.runCommandLocal "llmhop.json" { } ''
@@ -47,11 +48,14 @@ let
     RestartSec = 5;
   };
 
-  tcpListeners = lib.filterAttrs (_: listener: listener.port != null) cfg.listen;
-  trustedListeners = lib.filterAttrs (_: listener: listener.trusted) cfg.listen;
-  # The glob of credentials loaded as auth tokens, imported from the system
-  # credential store.
-  tokenCredentials = cfg.settings.authTokenCredentials or null;
+  tcpListeners = lib.filterAttrs (_: listener: listener.port != null) listeners;
+  # The replicas of every served name, in the order of their backends and
+  # keys, and the model of the gateway that each of them describes.
+  replicas = lib.groupBy (w: w.name) workloads;
+  gatewayModel = w: {
+    inherit (w) unlisted dataParallelSize aliases;
+    inherit (util) healthPath;
+  };
   baseServiceConfig = util.accountServiceConfig cfg;
   containerConfigFile = "${util.containerRuntimeDirectory}/llmhop.json";
   # The image of the binary that validated `file`, unless `container.image`
@@ -67,41 +71,26 @@ in
 
   config = lib.mkMerge [
     (lib.mkIf cfg.active {
-      assertions = [
-        {
-          assertion = !cfg.settings ? listen;
-          message = "services.llmhop: `${owner}.settings` sets `listen`, which the sockets of `${owner}.listen` replace.";
-        }
-      ]
-      ++ lib.mapAttrsToList (
-        listenerName: util.firewallAssertion "${owner}.listen.${listenerName}"
-      ) tcpListeners
-      ++ lib.mapAttrsToList (listenerName: _: {
-        assertion = false;
-        message = "services.llmhop: `${owner}.listen.${listenerName}` is trusted, which only a unix socket may be, so unset `port`.";
-      }) (lib.intersectAttrs trustedListeners tcpListeners)
-      ++ map (w: {
-        assertion = !w.exposed;
-        message = "services.llmhop: `${w.owner}` is routed by the gateway, but binds a `host` beyond loopback, so clients could bypass it.";
-      }) workloads
-      ++ lib.optional (tokenCredentials != null) {
-        # Any other credential matching the glob would become a client token.
-        assertion = lib.all (
-          credential:
-          credential == tokenCredentials || !lib.hasPrefix (lib.removeSuffix "*" tokenCredentials) credential
-        ) (lib.attrNames cfg.credentials);
-        message = "services.llmhop: `${owner}.credentials` names a credential matching `settings.authTokenCredentials`, which would make it a client token.";
-      };
+      assertions =
+        lib.mapAttrsToList (
+          listenerName: util.firewallAssertion "${owner}.listen.${listenerName}"
+        ) tcpListeners
+        ++ map (w: {
+          assertion = !w.exposed;
+          message = "services.llmhop: `${w.owner}` is routed by the gateway, but binds a `host` beyond loopback, so clients could bypass it.";
+        }) workloads
+        ++ lib.mapAttrsToList (name: ws: {
+          assertion = lib.length (lib.unique (map gatewayModel ws)) == 1;
+          message = "services.llmhop: the replicas ${
+            lib.concatMapStringsSep ", " (w: "`${w.owner}`") ws
+          } of `${name}` differ in their `aliases`, `dataParallelSize` or `unlisted`, which the gateway routes once per name.";
+        }) replicas;
 
       services.llmhop = {
         gateway = {
-          listen.default.port = lib.mkDefault 8080;
-          credentials = lib.mkIf (tokenCredentials != null) {
-            ${tokenCredentials} = lib.mkDefault null;
+          listen = {
+            default.port = lib.mkDefault 8080;
           };
-          settings.trustedSockets = lib.mkIf (trustedListeners != { }) (
-            lib.mapAttrs (_: listener: listener.socket) trustedListeners
-          );
           # Every workload is probed by readiness, and pinned to its ranks.
           settings.models = lib.genAttrs' workloads (
             w:
@@ -112,6 +101,9 @@ in
               inherit (util) healthPath;
             }
           );
+          credentials = lib.mkIf (cfg.settings.clientCredentials == true) {
+            "llmhop.api-key.*" = lib.mkDefault null;
+          };
         };
         claims = {
           unit.llmhop = [ owner ];
@@ -133,37 +125,28 @@ in
       ];
 
       systemd = {
-        # Its socket listeners share the root of the worker sockets.
-        tmpfiles.settings."10-llmhop" = lib.mkIf (lib.any (listener: listener.port == null) (
-          lib.attrValues cfg.listen
-        )) (util.rootDirectoryRule llmhop.socketDirectory);
-
         sockets = lib.mapAttrs' (
           listenerName: listener:
           lib.nameValuePair (socketUnit listenerName) {
             wantedBy = [ "sockets.target" ];
-            # `ListenStream=` takes IP literals only.
-            listenStreams = [
-              (
-                if listener.port == null then
-                  listener.socket
-                else if listener.host == "" then
-                  toString listener.port
-                else
-                  util.hostPort listener.host listener.port
-              )
-            ];
+            listenStreams = [ (util.listenStream listener) ];
             socketConfig = {
               Service = "llmhop.service";
+              FileDescriptorName = listenerName;
             }
             // lib.optionalAttrs (listener.port == null) {
               SocketUser = listener.socketUser;
               SocketGroup = listener.socketGroup;
               SocketMode = listener.socketMode;
+              # Its socket listeners share the root of the worker sockets,
+              # which anyone may pass but not list, also in a bundle that
+              # has no tmpfiles. See "Unix sockets" in the module internals
+              # documentation.
+              DirectoryMode = "0711";
               RemoveOnStop = true;
             };
           }
-        ) cfg.listen;
+        ) listeners;
       };
     })
 
@@ -220,7 +203,7 @@ in
 
     # Podman hands the sockets to the container, which pairs with the
     # binary's sd_notify call as natively. Its credential mount keeps the
-    # credentials of the start, so only a restart picks up new tokens. An
+    # credentials of the start, so only a restart picks up new keys. An
     # archive loads through the image unit, which restarts the gateway with
     # it.
     (lib.mkIf (cfg.active && llmhop.runtime == "container") {

@@ -16,20 +16,24 @@ const requestIDHeader = "X-Request-Id"
 
 // entry collects what the access log reports beyond the request itself.
 type entry struct {
-	client string
+	client *client
 	model  string
 	server string
+	// stripUsage drops the usage event of a stream, which only llmhop asked for.
+	stripUsage bool
 }
 
 type entryKey struct{}
 
-// entryOf returns the log entry of req, or a discarded one outside the log.
+// entryOf returns the log entry of req, which carries its client, so a
+// request outside logRequests is a wiring bug.
 func entryOf(req *http.Request) *entry {
-	if e, ok := req.Context().Value(entryKey{}).(*entry); ok {
-		return e
+	e, ok := req.Context().Value(entryKey{}).(*entry)
+	if !ok {
+		panic("router: request outside logRequests")
 	}
 
-	return &entry{}
+	return e
 }
 
 // logRequests assigns every request an ID, unless it carries one, and logs

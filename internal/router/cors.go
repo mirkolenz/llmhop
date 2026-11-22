@@ -9,7 +9,7 @@ import (
 // cors lets the pages of origins, or of every origin with `*`, call the API
 // with a bearer token, answering their preflights itself, since these carry
 // none. It never allows credentials, so a page can only send a token it was
-// given, and leaves trusted sockets alone, whose requests need no token.
+// given, and leaves client listeners alone, whose requests need no token.
 func (a *authenticator) cors(origins []string, next http.Handler) http.Handler {
 	withCORS := cors.New(cors.Options{
 		AllowedOrigins: origins,
@@ -23,7 +23,7 @@ func (a *authenticator) cors(origins []string, next http.Handler) http.Handler {
 	}).Handler(next)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if _, trusted := a.socketClient(req); trusted {
+		if _, onListener := a.socketClient(req); onListener {
 			next.ServeHTTP(w, req)
 
 			return

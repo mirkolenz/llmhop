@@ -10,8 +10,8 @@ let
   config = {
     gateway = {
       enable = true;
-      credentials."llmhop.client-token" = null;
-      settings.authTokens.client = "\${cred:llmhop.client-token}";
+      credentials."llmhop.api-key.client" = null;
+      settings.clients.client.key = "\${cred:llmhop.api-key.client}";
     };
     vllm = {
       enable = true;

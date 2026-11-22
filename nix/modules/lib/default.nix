@@ -24,6 +24,17 @@ rec {
     message = "services.llmhop: `${owner}` sets `openFirewall`, but its `host` ${listener.host} is loopback, so set `host` to an address remote clients reach.";
   };
 
+  # `value` without the null members of its attribute sets, recursively,
+  # which leaves the unset options of a JSON config out of it.
+  withoutNulls =
+    value:
+    if lib.isList value then
+      map withoutNulls value
+    else if lib.isAttrs value && !lib.isDerivation value then
+      lib.mapAttrs (_: withoutNulls) (lib.filterAttrs (_: member: member != null) value)
+    else
+      value;
+
   # Whether `model` names a repository to fetch rather than a local path.
   isRepository = model: !lib.hasPrefix "/" model;
 
@@ -33,6 +44,22 @@ rec {
   # The address of a server listening on `socket`, or else on its bind
   # address, loopback for a wildcard, as `llmhop internal wait-healthy` takes
   # it.
+  # The `ListenStream=` of a listener, its `socket` without a `port`, or its
+  # `port` on `host`, alone for every interface.
+  listenStream =
+    {
+      host,
+      port,
+      socket,
+      ...
+    }:
+    if port == null then
+      socket
+    else if host == "" then
+      toString port
+    else
+      hostPort host port;
+
   probeUrl =
     {
       socket,

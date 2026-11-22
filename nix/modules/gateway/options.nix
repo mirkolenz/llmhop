@@ -8,12 +8,52 @@
 }:
 let
   inherit (lib) mkOption types;
-  util = import ../lib lib;
-  wl = import ../backends/workload lib;
-  llmhop = config.services.llmhop;
-  cfg = llmhop.gateway;
-  owner = "services.llmhop.gateway";
-  workloads = wl.allWorkloads llmhop;
+  inherit (import ./common.nix { inherit config lib; })
+    util
+    llmhop
+    cfg
+    owner
+    workloads
+    listeners
+    ;
+
+  # A field of llmhop's JSON config, left out of it while null, since a set
+  # one, even `0` or empty, replaces the layers below it.
+  field =
+    type: description:
+    mkOption {
+      type = types.nullOr type;
+      default = null;
+      inherit description;
+    };
+  # The fields of every layer of a client's policy, `0` meaning no limit.
+  policyOptions = {
+    models = field (types.listOf types.str) ''
+      Allowlist of model names, aliases and detectors, also for
+      `/llmhop/proxy/<model>/`, with wildcards such as `qwen3-*`.
+    '';
+    maxConcurrentRequests = field types.ints.u32 "Requests in flight at once, beyond which a request waits in the model's queue.";
+    requestsPerMinute = field types.ints.u32 "Requests per minute, refilled as a token bucket.";
+    weight = field types.ints.u32 "Share of a client among those waiting for a saturated model, one by default.";
+  };
+  policy = types.submodule { options = policyOptions; };
+  client = types.submodule {
+    options = policyOptions // {
+      key = field types.str ''
+        Bearer key of the client, typically a `''${cred:<name>}` reference.
+        Exactly one of `key` and `listener` must be set.
+      '';
+      listener = field types.str ''
+        Name of a unix socket listener of `listen` whose requests count as
+        the client's without a key, since its `socketUser`, `socketGroup`
+        and `socketMode` decide who may connect. Browsers must send
+        same-origin requests to a loopback host, so web pages cannot use a
+        port forward of it.
+      '';
+      policy = field types.str "Name of the entry of `policies` below the client's own fields.";
+      expiresAt = field types.str "RFC 3339 time after which the client is rejected.";
+    };
+  };
 in
 {
   options.services.llmhop.gateway =
@@ -57,22 +97,72 @@ in
       };
 
       settings = mkOption {
-        type = with types; attrsOf json;
+        type = types.submodule {
+          freeformType = with types; attrsOf json;
+          options = {
+            defaults = field policy ''
+              Policy below every client and its `policy`, which alone limits
+              the anonymous client while no client exists.
+            '';
+            policies = field (types.attrsOf policy) "Named policies, each below the clients naming it in `policy`.";
+            clients = field (types.attrsOf client) ''
+              Clients by name, which the backends learn from `X-Llmhop-Client`.
+              With any client or `clientCredentials`, every route but
+              `/llmhop/health`, `/llmhop/readiness` and the metrics requires one.
+            '';
+            listen = mkOption {
+              type = with types; attrsOf (attrsOf json);
+              readOnly = true;
+              default = lib.mapAttrs (
+                _: listener:
+                lib.getAttrs (
+                    if listener.port == null then
+                      [ "socket" ]
+                    else
+                      [
+                        "host"
+                        "port"
+                      ]
+                ) listener
+              ) listeners;
+              defaultText = lib.literalMD "the `host` and `port`, or the `socket`, and `metrics` of the enabled listeners of `listen`";
+              description = ''
+                Listeners by name, whose sockets systemd passes by the same
+                `FileDescriptorName=`, with the fields llmhop knows of the
+                enabled ones of `listen`, which tools such as `llmhopctl`
+                read.
+              '';
+            };
+            clientCredentials = field types.bool ''
+              Whether every credential `llmhop.api-key.<client>` of the
+              system credential store becomes the client `<client>`, unless
+              declared in `clients`. It holds a bare key or a JSON object
+              with a `key` and optionally its `policy` and `expiresAt`.
+            '';
+          };
+        };
         default = { };
         example = {
-          authTokens.client = "\${cred:llmhop.client-token}";
+          defaults.models = [ "qwen3-8b" ];
+          policies.research = {
+            models = [ "qwen3-*" ];
+            maxConcurrentRequests = 16;
+          };
+          clientCredentials = true;
           models."openai/*".urls = [ "https://api.openai.com" ];
         };
         description = ''
           llmhop's JSON config, validated at build time by the binary itself,
-          with every workload of the backends as a model. Its listeners come
-          from `listen`, so `settings` must not set it.
+          with every workload of the backends as a model. Its `listen` comes
+          from the listeners of the gateway. Every key without an
+          option of its own is passed through as is, while an option left
+          `null` stays out of the config.
         '';
       };
 
       ctl = {
         enable =
-          lib.mkEnableOption "`llmhopctl`, which manages the client tokens of `settings.authTokenCredentials`"
+          lib.mkEnableOption "`llmhopctl`, which manages the client keys of `settings.clientCredentials`"
           // {
             default = true;
           };
@@ -102,6 +192,9 @@ in
             { name, ... }:
             {
               options = {
+                enable = lib.mkEnableOption "the listener" // {
+                  default = true;
+                };
                 port = mkOption {
                   type = with types; nullOr port;
                   default = null;
@@ -148,17 +241,6 @@ in
                   default = "0660";
                   description = "Mode of `socket`. Connecting needs write permission.";
                 };
-                trusted = mkOption {
-                  type = types.bool;
-                  default = false;
-                  description = ''
-                    Whether requests on `socket` need no token and count as the client
-                    named after the listener, since `socketUser`, `socketGroup` and
-                    `socketMode` decide who may connect. Browsers must send same-origin
-                    requests to a loopback host, so web pages cannot use a port forward
-                    of it. Requires `settings.authTokens` or `settings.authTokenCredentials`.
-                  '';
-                };
               };
             }
           )
@@ -167,15 +249,16 @@ in
         example = {
           default.host = "";
           caddy.socketGroup = "caddy";
-          ssh = {
-            socketGroup = "wheel";
-            trusted = true;
-          };
+          ssh.socketGroup = "wheel";
         };
         description = ''
           Listeners of the gateway, each a `llmhop-<name>.socket` unit handing
-          its socket to it through socket activation. The `default` one always
-          exists, on port `8080` unless configured otherwise.
+          its socket to it through socket activation under the name of the
+          listener. The `default` one serves port `8080` unless configured
+          otherwise, and `metrics` serves the metrics on the unix socket
+          `metrics.sock` for the group `wheel` on NixOS, where `llmhopctl top`
+          finds it. `settings.clients.<name>.listener` makes the requests on a
+          unix socket count as a client's.
         '';
       };
     }

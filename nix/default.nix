@@ -62,7 +62,8 @@ in
     {
       checks = {
         inherit (config.packages) llmhop;
-        inherit check-elf llmhopctl;
+        inherit check-elf;
+        llmhopctl = llmhopctl.tests.doctest;
         cli = pkgs.callPackage ./checks/cli.nix { inherit mkEvalCheck; };
       }
       // lib.optionalAttrs isLinux {

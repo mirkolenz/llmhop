@@ -277,6 +277,10 @@ rec {
       listen = {
         default.enable = false;
         ssh = { };
+        prometheus = {
+          port = 9464;
+          metrics = true;
+        };
       };
       settings = {
         defaults.requestsPerMinute = 0;

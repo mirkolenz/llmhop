@@ -34,12 +34,15 @@ import (
 )
 
 // New returns the handler of cfg, which serves the OpenAI models API from
-// the configured models and proxies every other request to the model named
-// by its /route/{model} path prefix or else its body, all guarded by the
-// auth tokens or trusted sockets. Only GET /health and GET /readiness are
-// served unauthenticated and unlogged. It is immutable, so a reload replaces
-// it, sharing the limits with the router it replaces.
-func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
+// the configured models and proxies every request below
+// /llmhop/proxy/{model}/ to the model of its path, and every other
+// one outside /llmhop/ to the model named by its body, each within the
+// policy of its client. Health, readiness and, on the listeners with
+// metrics, the metrics of llmhop are served unauthenticated and unlogged.
+// It is immutable, so a reload replaces it, sharing the limits and metrics
+// with the router it replaces, which drop the models and clients it lacks.
+// Its probes run until it is closed.
+func New(cfg *config.Config, limits *Limits) (*Router, error) {
 	rt := &routes{rewrites: make(map[string]jsontext.Value), affinity: cfg.Affinity, limits: limits}
 	var models []*model
 
@@ -81,15 +84,33 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 		api = auth.cors(cfg.CORSOrigins, api)
 	}
 
+	// Health, readiness and metrics sit outside the auth middleware: probes,
+	// load balancers and Prometheus must be able to check the proxy without
+	// a token.
 	logged := logRequests(api, &limits.metrics)
 	root := http.NewServeMux()
 	registerHealth(root, len(objects))
-	registerReadiness(root, models)
+	probes := startProber(models)
+	registerReadiness(root, probes)
+	root.Handle("GET "+reservedPrefix+"metrics", metricsOnly(cfg.Listen, &exporter{limits: limits, models: models, prober: probes}))
 	root.Handle(proxyPrefix, logged)
 	root.HandleFunc(reservedPrefix, notFound)
 	root.Handle("/", logged)
 
-	return root, nil
+	limits.retain(cfg)
+
+	return &Router{root, probes}, nil
+}
+
+// Router is the handler of one config.
+type Router struct {
+	http.Handler
+	probes *prober
+}
+
+// Close stops the probes of r, while its requests in flight finish.
+func (r *Router) Close() {
+	r.probes.stop()
 }
 
 // reservedPrefix starts the paths of llmhop's own API, which no backend
@@ -118,11 +139,11 @@ const bodyTimeout = time.Minute
 
 // proxyHandler forwards each request to the model named by the "model"
 // field of its body, which is buffered within the `buffered` budget until
-// the backend starts its response and edited for the policy of its client
-// and the usage of a stream, or if routed by its path, which is stripped up
-// to its proxy segment and the body streamed verbatim. The limits apply only
-// once the model is resolved, so a saturated model never blocks requests to
-// another.
+// the backend starts its response and edited for a rewriting alias,
+// or if routed by its path, which is stripped up to its proxy segment,
+// and the body streamed verbatim.
+// The limits apply only once the model is resolved,
+// so a saturated model never blocks requests to another.
 func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, routed bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 {
@@ -160,7 +181,7 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 		}
 
 		e := entryOf(req)
-		e.model = name
+		e.model = clip(name)
 
 		if m == nil {
 			unknownModel(w, name)
@@ -168,6 +189,7 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 			return
 		}
 
+		e.served = m.name
 		c := e.client
 
 		if !c.allows(name) {
@@ -204,9 +226,6 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 
 			req, a.accept = b.forward(req, body)
 		}
-
-		// A compressed response would hide its usage.
-		req.Header.Del("Accept-Encoding")
 
 		// Computed before queueing, so a large body holds no slot meanwhile.
 		if len(m.targets) > 1 {

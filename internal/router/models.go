@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 )
@@ -126,7 +127,20 @@ func registerModels(mux *http.ServeMux, objects map[string]modelObject) {
 }
 
 func unknownModel(w http.ResponseWriter, name string) {
-	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model %q", name))
+	writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model %q", clip(name)))
+}
+
+// maxEchoed bounds the bytes of a model name that a log or an error repeats,
+// since a body may hold one of any size, which a wildcard may match.
+const maxEchoed = 256
+
+// clip cuts name to maxEchoed bytes, dropping a rune it splits.
+func clip(name string) string {
+	if len(name) <= maxEchoed {
+		return name
+	}
+
+	return strings.ToValidUTF8(name[:maxEchoed], "")
 }
 
 func modelNotAllowed(w http.ResponseWriter, name string) {

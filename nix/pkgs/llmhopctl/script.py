@@ -7,9 +7,14 @@ name. Each holds a JSON object with its `key`, `policy` and `expiresAt`, and a
 rotated one stays in the store holding it. Changes apply through
 `try-reload-or-restart`, which reloads a native gateway in place and restarts
 a container, whose credentials are those of its start.
+
+`top` shows the present from the metrics of the first unix socket listener
+with `metrics`, read from the config, and `usage` the past from the request
+lines of the gateway's journal.
 """
 
 import json
+import math
 import os
 import secrets
 import sys
@@ -19,15 +24,25 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from subprocess import PIPE, Popen, run
 from tempfile import mkstemp
+from time import monotonic, sleep
 from typing import Annotated, Any, Literal, NoReturn, NotRequired, TypedDict
 
+import httpx2
 import typer
+from prometheus_client.parser import text_string_to_metric_families
+from prometheus_client.samples import Sample
+from rich import print as rprint
+from rich.console import Group
+from rich.live import Live
+from rich.table import Table
 
 __all__ = ["app"]
 
 CONFIG = Path("/etc/llmhop/config.json")
 UNIT = "llmhop.service"
 PREFIX = "llmhop.api-key."
+# Seconds between two polls of `top`.
+INTERVAL = 2
 UNITS = {
     "h": timedelta(hours=1),
     "d": timedelta(days=1),
@@ -36,6 +51,7 @@ UNITS = {
 
 # The gateway's config.
 type Settings = Mapping[str, Any]
+type Samples = Sequence[Sample]
 
 
 def fail(message: str) -> NoReturn:
@@ -376,6 +392,239 @@ def key_revoke(name: Name) -> None:
         store.path(name).unlink()
 
     apply()
+
+
+def select(samples: Samples, name: str, **labels: str) -> list[Sample]:
+    """Return the samples of the metric `name` that carry `labels`."""
+    return [
+        sample
+        for sample in samples
+        if sample.name == name and labels.items() <= sample.labels.items()
+    ]
+
+
+def total(samples: Samples, name: str, **labels: str) -> float:
+    r"""Sum the samples of the metric `name` that carry `labels`.
+
+    >>> total(parse_metrics('x{a="1",b="2"} 1\nx{a="1"} 2\nx 4'), "x", a="1")
+    3.0
+    """
+    return math.fsum(s.value for s in select(samples, name, **labels))
+
+
+def label_values(samples: Samples, name: str, label: str) -> set[str]:
+    """Return the values of `label` of the metric `name`."""
+    return {
+        s.labels[label] for s in select(samples, name) if label in s.labels
+    }
+
+
+def parse_metrics(text: str) -> list[Sample]:
+    """Parse the samples of the Prometheus text format."""
+    return [
+        sample
+        for family in text_string_to_metric_families(text)
+        for sample in family.samples
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class Poll:
+    """The metrics of llmhop at a time."""
+
+    time: float
+    samples: Samples
+
+    @classmethod
+    def load(cls, http: httpx2.Client) -> Poll:
+        """Poll the metrics of llmhop with `http`."""
+        response = http.get("/llmhop/metrics").raise_for_status()
+
+        return cls(monotonic(), parse_metrics(response.text))
+
+    def rate(self, old: Poll, **labels: str) -> float:
+        """Return the requests per second since `old`, zero on restarts."""
+        name = "llmhop_requests_total"
+        increase = total(self.samples, name, **labels) - total(
+            old.samples, name, **labels
+        )
+
+        return max(0.0, increase) / (self.time - old.time)
+
+    def error_rate(self, old: Poll, **labels: str) -> float:
+        """Return the requests per second failed with a status >= 400."""
+        codes = label_values(self.samples, "llmhop_requests_total", "code")
+
+        return sum(
+            self.rate(old, code=code, **labels)
+            for code in codes
+            if int(code) >= 400
+        )
+
+
+def table(
+    columns: Sequence[str], rows: Iterable[Sequence[str]], title: str = ""
+) -> Table:
+    """Return a table of `rows`, aligning all but the first column right."""
+    result = Table(box=None, title=title or None, title_justify="left")
+
+    for i, column in enumerate(columns):
+        result.add_column(column, justify="right" if i else "left")
+
+    for row in rows:
+        result.add_row(*row)
+
+    return result
+
+
+# The columns of `activity`.
+ACTIVITY = ["FLIGHT", "REQ/S", "ERR/S"]
+
+
+def activity(last: Poll, now: Poll, **labels: str) -> list[str]:
+    """Return the requests in flight, and all and failed ones per second."""
+    flight = total(now.samples, "llmhop_requests_in_flight", **labels)
+
+    return [
+        f"{flight:.0f}",
+        f"{now.rate(last, **labels):.1f}",
+        f"{now.error_rate(last, **labels):.1f}",
+    ]
+
+
+def model_table(last: Poll, now: Poll) -> Table:
+    """Return the table of the models, with rates since `last`."""
+    samples = now.samples
+    models = (
+        label_values(samples, "llmhop_queue_depth", "model")
+        | label_values(samples, "llmhop_requests_total", "model")
+    ) - {""}
+
+    def row(model: str) -> list[str]:
+        up = [
+            s.value for s in select(samples, "llmhop_backend_up", model=model)
+        ]
+
+        return [
+            model,
+            f"{sum(up):.0f}/{len(up)}" if up else "-",
+            f"{total(samples, 'llmhop_queue_depth', model=model):.0f}",
+            *activity(last, now, model=model),
+        ]
+
+    columns = ["MODEL", "READY", "QUEUE", *ACTIVITY]
+
+    return table(columns, map(row, sorted(models)), "Models")
+
+
+def client_table(last: Poll, now: Poll) -> Table:
+    """Return the table of the clients, with rates since `last`."""
+    # A client whose first requests still run has only those in flight.
+    clients = label_values(
+        now.samples, "llmhop_requests_total", "client"
+    ) | label_values(now.samples, "llmhop_requests_in_flight", "client")
+
+    def row(client: str) -> list[str]:
+        return [client or "-", *activity(last, now, client=client)]
+
+    return table(["CLIENT", *ACTIVITY], map(row, sorted(clients)), "Clients")
+
+
+def metrics_socket(settings: Settings) -> str:
+    """Return the first unix socket listener with metrics of the config."""
+    for listener in (settings.get("listen") or {}).values():
+        if listener.get("metrics") and (socket_path := listener.get("socket")):
+            return socket_path
+
+    fail("the gateway has no unix socket listener with metrics")
+
+
+@app.command()
+def top() -> None:
+    """Show what the models and clients of the gateway do right now."""
+    socket_path = metrics_socket(config())
+    transport = httpx2.HTTPTransport(uds=socket_path)
+    http = httpx2.Client(transport=transport, base_url="http://localhost")
+
+    with http:
+        try:
+            last = Poll.load(http)
+
+            with Live(f"polling {socket_path}", screen=True) as live:
+                while True:
+                    sleep(INTERVAL)
+                    now = Poll.load(http)
+                    live.update(
+                        Group(
+                            f"llmhop on {socket_path}, Ctrl+C quits",
+                            model_table(last, now),
+                            client_table(last, now),
+                        )
+                    )
+                    last = now
+        except httpx2.HTTPError as error:
+            fail(f"cannot poll {socket_path}: {error}")
+        except KeyboardInterrupt:
+            pass
+
+
+@dataclass(slots=True)
+class Usage:
+    """The requests of a group and their errors."""
+
+    requests: int = 0
+    errors: int = 0
+
+
+def aggregate(lines: Iterable[str], by: str) -> dict[str, Usage]:
+    """Sum the request lines of llmhop's log by their field `by`.
+
+    >>> line = '{"msg": "request", "client": "a", "status": 429}'
+    >>> aggregate([line, "Started llmhop.", line], "client")
+    {'a': Usage(requests=2, errors=2)}
+    """
+    groups: dict[str, Usage] = {}
+
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+
+        if not isinstance(entry, dict) or entry.get("msg") != "request":
+            continue
+
+        usage = groups.setdefault(entry.get(by) or "-", Usage())
+        usage.requests += 1
+        usage.errors += entry.get("status", 0) >= 400
+
+    return groups
+
+
+@app.command()
+def usage(
+    since: Annotated[
+        timedelta | None,
+        typer.Option(parser=duration, help="Period, such as 7d, 12h or 2w."),
+    ] = None,
+    by: Literal["client", "model", "policy"] = "client",
+) -> None:
+    """Print the requests and errors of a period by group."""
+    command = ["journalctl", "--output=cat", f"--unit={UNIT}", "--no-pager"]
+
+    if since:
+        start = datetime.now(UTC) - since
+        command.append(f"--since=@{start.timestamp():.0f}")
+
+    with Popen(command, stdout=PIPE, text=True) as journal:
+        groups = aggregate(journal.stdout or (), by)
+
+    if journal.returncode:
+        fail(f"journalctl failed with exit code {journal.returncode}")
+
+    columns = [by.upper(), "REQUESTS", "ERRORS"]
+    rows = ([k, *map(str, astuple(v))] for k, v in sorted(groups.items()))
+    rprint(table(columns, rows))
 
 
 if __name__ == "__main__":

@@ -14,13 +14,23 @@ import (
 // such as vLLM, which adopt it. A client may set it.
 const requestIDHeader = "X-Request-Id"
 
-// entry collects what the access log reports beyond the request itself.
+// entry collects what the access log and the metrics report beyond the
+// request itself.
 type entry struct {
 	client *client
+	// model is the requested name, and served that of the model serving it.
 	model  string
+	served string
 	server string
-	// stripUsage drops the usage event of a stream, which only llmhop asked for.
-	stripUsage bool
+}
+
+// names returns the names of the client of e and its policy.
+func (e *entry) names() (client, policy string) {
+	if e.client == nil {
+		return "", ""
+	}
+
+	return e.client.name, e.client.policy
 }
 
 type entryKey struct{}
@@ -37,8 +47,8 @@ func entryOf(req *http.Request) *entry {
 }
 
 // logRequests assigns every request an ID, unless it carries one, and logs
-// it once answered.
-func logRequests(next http.Handler) http.Handler {
+// and counts it once answered. Durations are in seconds.
+func logRequests(next http.Handler, met *metrics) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
 		// Path routing strips the prefix in place.
@@ -54,19 +64,26 @@ func logRequests(next http.Handler) http.Handler {
 
 		e := &entry{}
 		rec := &recorder{ResponseWriter: w, id: id}
-		next.ServeHTTP(rec, req.WithContext(context.WithValue(req.Context(), entryKey{}, e)))
 
-		slog.Info("request",
-			"id", id,
-			"method", method,
-			"path", path,
-			"status", rec.status(),
-			"bytes", rec.bytes,
-			"duration", time.Since(start).Round(time.Millisecond),
-			"client", e.client,
-			"model", e.model,
-			"server", e.server,
-		)
+		// Deferred, since ReverseProxy panics once the client aborts.
+		defer func() {
+			client, policy := e.names()
+			slog.LogAttrs(req.Context(), slog.LevelInfo, "request",
+				slog.String("id", id),
+				slog.String("method", method),
+				slog.String("path", path),
+				slog.Int("status", rec.status()),
+				slog.Int64("bytes", rec.bytes),
+				slog.Float64("duration", time.Since(start).Seconds()),
+				slog.String("client", client),
+				slog.String("policy", policy),
+				slog.String("model", e.model),
+				slog.String("server", e.server),
+			)
+			met.request(e, rec.status())
+		}()
+
+		next.ServeHTTP(rec, req.WithContext(context.WithValue(req.Context(), entryKey{}, e)))
 	})
 }
 

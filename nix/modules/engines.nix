@@ -15,11 +15,10 @@
 # is its server command, natively from its package or in its image,
 # followed by `positional` and the settings, among them `modelSettings` and
 # `shutdownSettings`, which renders how long its server drains requests on
-# a stop. `fetch` renders the argv downloading one repository with its
-# package into the hub cache below `HF_HOME`, after which its servers get
-# `offlineEnvironment`. `implicitConfig` lists the files it reads beside
-# its arguments, which every unit hides, and `environment` is set on every
-# server.
+# a stop. `fetch` renders the argv downloading one repository with its package into the hub cache
+# below `HF_HOME`, after which its servers get `offlineEnvironment`.
+# `implicitConfig` lists the files it reads beside its arguments, which every
+# unit hides, and `environment` is set on every server.
 lib:
 let
   inherit (import ./lib lib) isRepository;

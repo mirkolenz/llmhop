@@ -2,19 +2,19 @@ package router
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-// probeTimeout bounds each backend probe of GET /readiness.
+// probeTimeout bounds each probe round of the backends.
 const probeTimeout = 5 * time.Second
 
-// readinessTTL is how long a probe round answers GET /readiness, so that
-// frequent or concurrent callers of the unauthenticated endpoint cost at most
-// one round of backend requests per interval.
-const readinessTTL = time.Second
+// probeInterval is how often the servers are probed, so that frequent
+// callers of the unauthenticated endpoints cost no backend requests.
+const probeInterval = time.Second
 
 // readiness is the payload of the readiness endpoint. It reports counts only,
 // since the endpoint is unauthenticated and must not reveal model names.
@@ -24,22 +24,19 @@ type readiness struct {
 	Probed int    `json:"probed"`
 }
 
-// prober runs and caches probe rounds over the models with a health path.
+// prober probes the servers of the models with a health path in the
+// background, recording the result of each server for routing, readiness
+// and the metrics, until stopped.
 type prober struct {
 	models []*model
-
-	mu     sync.Mutex
-	at     time.Time
-	status int
-	body   []byte
+	// ready is closed once the first round finished.
+	ready chan struct{}
+	stop  context.CancelFunc
 }
 
-// registerReadiness wires GET /readiness, which concurrently probes every
-// server of every model with a health path and succeeds only if every such
-// model has a server answering, so that a restarting replica leaves llmhop
-// ready.
-func registerReadiness(mux *http.ServeMux, models []*model) {
-	p := &prober{}
+func startProber(models []*model) *prober {
+	ctx, stop := context.WithCancel(context.Background())
+	p := &prober{ready: make(chan struct{}), stop: stop}
 
 	for _, m := range models {
 		if m.health != "" {
@@ -47,50 +44,84 @@ func registerReadiness(mux *http.ServeMux, models []*model) {
 		}
 	}
 
-	mux.HandleFunc("GET /readiness", func(w http.ResponseWriter, _ *http.Request) {
-		status, body := p.result()
-		writeJSON(w, status, body)
-	})
-}
+	if len(p.models) == 0 {
+		close(p.ready)
 
-// result returns the latest probe round, running a new one once it expired.
-// Callers arriving during a round wait for it instead of starting their own.
-// The round is shared by every waiting caller, so no single caller's context
-// bounds it.
-func (p *prober) result() (int, []byte) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if time.Since(p.at) < readinessTTL {
-		return p.status, p.body
+		return p
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	go p.run(ctx)
+
+	return p
+}
+
+// run probes every interval until ctx is done.
+func (p *prober) run(ctx context.Context) {
+	p.round(ctx)
+	close(p.ready)
+
+	ticker := time.NewTicker(probeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.round(ctx)
+		}
+	}
+}
+
+// round probes every server once.
+func (p *prober) round(ctx context.Context) {
+	timeout, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	var ready atomic.Int64
 	var wg sync.WaitGroup
 
 	for _, m := range p.models {
-		wg.Go(func() {
-			if m.ready(ctx) {
-				ready.Add(1)
-			}
-		})
+		for _, t := range m.servers {
+			wg.Go(func() {
+				err := m.probe(timeout, t)
+
+				// A stopped prober's results no longer matter.
+				if ctx.Err() != nil {
+					return
+				}
+
+				if err != nil {
+					slog.Warn("probe", "model", m.name, "server", t.up.Label, "err", err)
+				}
+
+				m.probed(t.server, err)
+			})
+		}
 	}
 
 	wg.Wait()
+}
 
-	body := readiness{Status: "ok", Ready: int(ready.Load()), Probed: len(p.models)}
-	p.status = http.StatusOK
+// registerReadiness wires GET /llmhop/readiness, which succeeds only if
+// every model with a health path has a server answering, so that a
+// restarting replica leaves llmhop ready.
+func registerReadiness(mux *http.ServeMux, p *prober) {
+	mux.HandleFunc("GET "+reservedPrefix+"readiness", func(w http.ResponseWriter, _ *http.Request) {
+		<-p.ready
+		body := readiness{Status: "ok", Probed: len(p.models)}
+		status := http.StatusOK
 
-	if body.Ready < body.Probed {
-		body.Status = "unavailable"
-		p.status = http.StatusServiceUnavailable
-	}
+		for _, m := range p.models {
+			if slices.ContainsFunc(m.servers, func(t *target) bool { return m.healthy(t.server) }) {
+				body.Ready++
+			}
+		}
 
-	p.at = time.Now()
-	p.body = jsonBody(body)
+		if body.Ready < body.Probed {
+			body.Status = "unavailable"
+			status = http.StatusServiceUnavailable
+		}
 
-	return p.status, p.body
+		writeJSON(w, status, jsonBody(body))
+	})
 }

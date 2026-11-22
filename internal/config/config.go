@@ -116,6 +116,8 @@ type Listener struct {
 	Host   string `json:"host,omitempty"`
 	Port   uint16 `json:"port,omitempty"`
 	Socket string `json:"socket,omitempty"`
+	// Metrics serves the metrics of llmhop without a key.
+	Metrics bool `json:"metrics,omitempty"`
 }
 
 // Network returns the network and address that net.Listen takes, both

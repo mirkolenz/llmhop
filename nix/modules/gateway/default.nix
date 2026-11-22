@@ -90,6 +90,7 @@ in
         gateway = {
           listen = {
             default.port = lib.mkDefault 8080;
+            metrics.metrics = lib.mkDefault true;
           };
           # Every workload is probed by readiness, and pinned to its ranks.
           settings.models = lib.genAttrs' workloads (

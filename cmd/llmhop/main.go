@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -37,7 +35,7 @@ const usage = `usage:
 func main() {
 	// journald stamps every line itself. The standard logger, which
 	// net/http writes to, forwards to this handler too.
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if len(groups) == 0 && a.Key == slog.TimeKey {
 				return slog.Attr{}
@@ -119,19 +117,30 @@ func configPath(args []string) (string, error) {
 // error short of binding surfaces.
 func check(args []string) error {
 	path, err := configPath(args)
+	if err != nil {
+		return err
+	}
+
+	_, rt, err := load(path, false, &router.Limits{}, nil)
 	if err == nil {
-		_, _, err = load(path, false, &router.Limits{})
+		rt.Close()
 	}
 
 	return err
 }
 
 // load builds the router of the config at path with limits, expanding its
-// secrets unless only checking.
-func load(path string, expand bool, limits *router.Limits) (*config.Config, http.Handler, error) {
+// secrets unless only checking. A config replacing prev must keep its
+// listeners bound as they are, since their sockets stay open while their
+// names select the client policies.
+func load(path string, expand bool, limits *router.Limits, prev *config.Config) (*config.Config, *router.Router, error) {
 	cfg, err := config.Load(path, expand)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config: %w", err)
+	}
+
+	if prev != nil && !config.SameBindings(prev.Listen, cfg.Listen) {
+		return nil, nil, errors.New("listen: rebinding listeners takes a restart")
 	}
 
 	rt, err := router.New(cfg, limits)
@@ -391,21 +400,30 @@ func reload(path string, current *swappable) {
 // swappable serves with the latest router, while requests in flight keep
 // the one they started on, sharing its limits.
 type swappable struct {
-	atomic.Pointer[http.Handler]
+	atomic.Pointer[router.Router]
 	limits router.Limits
+	// cfg is that of the latest router, which only reloads replace.
+	cfg *config.Config
 }
 
 func (s *swappable) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	(*s.Load()).ServeHTTP(w, req)
+	s.Load().ServeHTTP(w, req)
 }
 
 // load swaps in the router of the config at path, sharing the limits with
-// the router it replaces, or keeps the current one if it fails.
+// the router it replaces and closing that, or keeps the current one if it
+// fails.
 func (s *swappable) load(path string) (*config.Config, error) {
-	cfg, rt, err := load(path, true, &s.limits)
-	if err == nil {
-		s.Store(&rt)
+	cfg, rt, err := load(path, true, &s.limits, s.cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	return cfg, err
+	if old := s.Swap(rt); old != nil {
+		old.Close()
+	}
+
+	s.cfg = cfg
+
+	return cfg, nil
 }

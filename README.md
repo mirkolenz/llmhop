@@ -6,9 +6,9 @@ LLMhop reads the `model` field of an incoming request and reverse-proxies it to 
 It is built for single-model servers like [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang), but works with any OpenAI-compatible backend, self-hosted or remote.
 
 - Pure Go, no CGO, stateless and safe behind any load balancer.
-- Body and path routing with aliases and wildcards, a models API served from the config, health and readiness endpoints, graceful draining and reloading.
 - Balancing over several servers or data-parallel ranks with stateless prefix-cache affinity, failover, queueing and timeouts.
-- Clients authenticated by a key or a unix socket, each with a policy deciding its models, concurrency, request rate and share of a saturated model, while token usage is accounted per client.
+- Body and path routing with aliases and wildcards, a models API served from the config, health, readiness and Prometheus metrics, graceful draining and reloading.
+- Clients authenticated by a key or a unix socket, each with a policy deciding its models, concurrency, request rate and share of a saturated model.
 - Ships as a static binary, a Docker image and a hardened NixOS module running llama.cpp, SGLang or vLLM behind llmhop or no gateway, natively or in containers.
 
 ## How it works
@@ -30,12 +30,14 @@ llmhop reserves the prefix `/llmhop/` for its own routes and answers an unknown 
 | `GET /llmhop/health`              | none   | `{ "status": "ok", "models": 3 }`, the listed models and aliases |
 | `GET /llmhop/readiness`           | none   | the readiness of the backends                                  |
 | `/llmhop/proxy/{model}/{path}`    | client | any path of the backend of a model, with the prefix stripped    |
+| `GET /llmhop/metrics`             | none   | the [metrics](#metrics) of llmhop, on metrics listeners only    |
 
 A request under `/llmhop/proxy/{model}/` is routed by its path, with the prefix stripped and the body left unparsed, for requests without a `model` in their body.
 The longest configured model name or alias that prefixes the path wins, wildcards do not apply, and a `/` in a model name may be written raw or as `%2F`.
 A model marked `"unlisted": true` is routed but left out of the models API, which suits services such as a watermark detector.
 
-Every other request gets an `X-Request-Id`, unless it carries one, which reaches the backend and the response, and is logged once answered with its model, server, status, size, duration and the name of its auth token.
+Every other request gets an `X-Request-Id`, unless it carries one, which reaches the backend and the response, and is logged once answered.
+`/llmhop/readiness` answers `200` only if every model with a `healthPath` has a URL that is not [avoided](#balancing-and-affinity), such as one answering its latest probe with `2xx`, else `503`, so a restarting replica keeps llmhop ready.
 Health, readiness and metrics never require a key and are not logged.
 LLMhop sends `READY=1` to systemd once its listeners are bound, reloads its config on `SIGHUP`, keeping the current one if the new one fails, and drains in-flight requests on `SIGTERM` or `SIGINT`.
 A reload applies everything but `listen`, while requests in flight finish on the config they started with.
@@ -110,6 +112,7 @@ Under systemd socket activation, each passed socket serves the listener named by
 A listener without `port` and `socket` takes the socket of its name, which must be passed, while a passed socket without a listener serves with the defaults, unless it has the address of a listener, which fails the start as a misnamed socket.
 A client of a `listener` requires its passed sockets to be unix sockets.
 A reload that would bind a listener elsewhere fails, since only a restart rebinds.
+A listener with `metrics` serves the [metrics](#metrics) without a key, so it should be a loopback port for Prometheus or a unix socket.
 Without any listener or passed socket, `serve` fails, while `check` does not require one.
 Each of `urls` is an absolute `http(s)` URL or `unix:///<socket path>`.
 `corsOrigins` lists the origins, as in `https://chat.example`, whose pages may call the API with a bearer key, or `*` for every origin, which is safe since browsers never send a key on their own.
@@ -159,7 +162,7 @@ Without any client, every request belongs to the anonymous client `""`, which `d
 `0`, `[]` or an absent field means no limit.
 A request must pass the limits of its client beside the `maxConcurrentRequests` of its model.
 Responses of a client with `requestsPerMinute` carry OpenAI's `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests` and `x-ratelimit-reset-requests`, while those of a backend, which describe llmhop's own upstream credential, are dropped.
-Every limit is exact and needs nothing from a request body or a response, while token usage is only [accounted](#token-accounting).
+Every limit is exact and needs nothing from a request body or a response.
 The limiters live in the memory of each instance, survive a reload and reset on a restart, so N instances behind a load balancer each enforce their own share, and a limit should be divided by N.
 
 `"clientCredentials": true` imports every systemd credential named `llmhop.api-key.<client>` as the client `<client>`, read at startup and on every reload, which keeps keys required while there is none.
@@ -169,11 +172,24 @@ A credential holds the bare key or a JSON object with the `key` and optionally i
 Any other member is an error, so limits belong to policies.
 Every credential llmhop defines is named `llmhop.<kind>[.<instance>]`, as the API key `llmhop.api-key.<client>`, since `/etc/credstore` is shared by the whole host.
 
-### Token accounting
+### Metrics
 
-llmhop reads the token usage of every JSON or event stream response from a copy while it passes unchanged to the client, in constant memory, whatever the endpoint or backend, for its logs and metrics.
-It knows the usage of OpenAI, the Responses API, Anthropic with its cache tokens as input, SGLang, llama.cpp and transcriptions, and counts a response without token usage as zero.
-llmhop never edits a request for this, so an OpenAI-style stream counts its tokens only if the client sets `stream_options.include_usage` or the backend always reports them, as vLLM does with `--enable-force-include-usage`.
+A listener with `metrics` serves `GET /llmhop/metrics` in the Prometheus text format.
+
+| Metric                      | Type    | Labels              |
+| --------------------------- | ------- | ------------------- |
+| `llmhop_requests_total`     | counter | client, model, code |
+| `llmhop_requests_in_flight` | gauge   | client, model       |
+| `llmhop_queue_depth`        | gauge   | model               |
+| `llmhop_backend_up`         | gauge   | model, url          |
+
+A rate limit shows as `code` `429`.
+llmhop only reports what it decides itself, while token counts and latencies such as the time to the first token come from the metrics of the backends.
+`llmhop_backend_up` reports whether a server is [avoided](#balancing-and-affinity), as readiness and routing do.
+The counters survive a reload and reset on a restart.
+
+llmhop logs JSON lines, among them one per answered request with `msg` `request`, its `id`, `method`, `path`, `status`, `bytes`, `duration` in seconds, `client`, `policy`, the requested `model` and `server`.
+Prompts and responses are never logged.
 
 ### Secret references
 
@@ -263,6 +279,24 @@ A reload keeps the in-memory limiters of the clients, while the restart of a con
 `llmhopctl`, installed unless `ctl.enable` is false, does both as root with `llmhopctl key list`, `create <client>`, `update <client>`, `rotate <client>` and `revoke <client>`.
 `create` and `update` take `--policy <name>`, which must name an entry of `policies`, and `--expires` with a validity such as `12h`, `30d` or `2w`, while `update` clears them with `--policy ''` and `--no-expires`.
 It creates JSON credentials named `llmhop.api-key.<client>`, prints new keys, keeps the key on `update`, the policy, expiry and store on `rotate`, and lists every client of `clientCredentials` with its policy and expiry as one JSON object per line.
+
+`llmhopctl top` shows the gateway live, without root for the group of the metrics socket and remotely as `ssh <host> llmhopctl top`.
+It polls the metrics of llmhop on the first unix socket listener with `metrics` every two seconds and draws a table of the models, with their ready backends and queued requests, and a table of the clients, each with their requests in flight and their requests and errors per second since the previous poll.
+`llmhopctl usage [--since 7d] [--by client|model|policy]` totals the requests and errors of a period from the request lines in the journal of the gateway, natively and in a container alike, so `top` shows the present and `usage` the past.
+An error is a response with a status from `400`, including the `429` of a rate limit.
+
+The read-only `services.llmhop.gateway.scrapeConfigs` holds the Prometheus job of llmhop on the ports of the listeners with `metrics`, which Prometheus needs since it cannot scrape a unix socket, and the package ships a Grafana dashboard, while the module configures neither:
+
+```nix
+services.llmhop.gateway.listen.prometheus = {
+  port = 9464;
+  metrics = true;
+};
+services.prometheus.scrapeConfigs = config.services.llmhop.gateway.scrapeConfigs;
+services.grafana.provision.dashboards.settings.providers = [
+  { options.path = "${config.services.llmhop.gateway.package}/share/grafana/dashboards"; }
+];
+```
 
 Without the gateway, each model serves clients on its own socket or `port`, and `socketClients` lists the users, such as a reverse proxy, that may connect to every native model socket.
 

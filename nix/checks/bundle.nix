@@ -56,6 +56,9 @@ runCommand "llmhop-bundle-tests" { } ''
   grep -qx 'PartOf=llmhop-image.service' etc/containers/systemd/llmhop.container
   grep -qx 'Sockets=llmhop-default.socket' etc/containers/systemd/llmhop.container
   grep -qx 'ListenStream=127.0.0.1:8080' etc/systemd/system/llmhop-default.socket
+  grep -qx 'ListenStream=/run/llmhop/metrics.sock' etc/systemd/system/llmhop-metrics.socket
+  grep -qx 'FileDescriptorName=metrics' etc/systemd/system/llmhop-metrics.socket
+  grep -qx 'DirectoryMode=0711' etc/systemd/system/llmhop-metrics.socket
   grep -qx 'Wants=llmhop-default.socket' etc/systemd/system/sockets.target.d/llmhop.conf
   grep -qE '^Image=docker-archive:/usr/local/lib/llmhop/[^ ]+\.tar\.gz$' etc/containers/systemd/llmhop.image
   grep -qx 'Volume=%d:/run/llmhop/credentials:ro,idmap' etc/containers/systemd/llmhop.container

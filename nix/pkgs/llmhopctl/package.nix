@@ -9,6 +9,7 @@
 let
   libraries = with python3Packages; [
     httpx2
+    prometheus-client
     rich
     typer
   ];

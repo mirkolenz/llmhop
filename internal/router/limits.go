@@ -33,6 +33,7 @@ type Limits struct {
 	clients map[string]*limiters
 	// seq orders the tickets by arrival.
 	seq     uint64
+	metrics metrics
 }
 
 // bufferBudget returns the budget of buffered bytes, reusing that of a
@@ -245,6 +246,7 @@ type queue struct {
 	// shares holds the waiting tickets by client, and running the number
 	// of its admitted ones.
 	shares  map[string]*share
+	running map[string]int
 	// pass is that of the latest admission, where a client starts waiting.
 	pass float64
 }
@@ -321,6 +323,7 @@ func (t *ticket) release() {
 	defer l.mu.Unlock()
 
 	q.slots.used--
+	q.running[t.client.name]--
 	t.client.slots.used--
 	q.dispatch()
 
@@ -364,6 +367,7 @@ func (q *queue) dispatch() {
 		from.pass += 1 / next.client.weight
 		q.leave(from, next)
 		q.slots.used++
+		ensure(&q.running)[next.client.name]++
 		next.client.slots.used++
 		next.admitted = true
 		close(next.ready)
@@ -377,4 +381,29 @@ func (q *queue) leave(s *share, t *ticket) {
 	if len(s.waiting) == 0 {
 		delete(q.shares, t.client.name)
 	}
+}
+
+// occupancy is the requests of a model waiting for its slots and those
+// holding them by client.
+type occupancy struct {
+	waiting int
+	running map[string]int
+}
+
+// occupancy returns the occupancy of each of models.
+func (l *Limits) occupancy(models []*model) []occupancy {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	out := make([]occupancy, len(models))
+
+	for i, m := range models {
+		for _, s := range m.queue.shares {
+			out[i].waiting += len(s.waiting)
+		}
+
+		out[i].running = maps.Clone(m.queue.running)
+	}
+
+	return out
 }

@@ -6,11 +6,11 @@ import (
 	"errors"
 	"hash/fnv"
 	"io"
-	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,7 +29,6 @@ const rankHeader = "X-Data-Parallel-Rank"
 // counts and health only exist to spread the requests of this process, so
 // every instance of llmhop decides alone and none shares state.
 type model struct {
-	// name is the configured name, and label its metric label.
 	name    string
 	headers http.Header
 	// host overrides the outgoing Host when set, since Go carries Host
@@ -53,9 +52,11 @@ type model struct {
 
 // server is one URL of a model.
 type server struct {
-	up        *upstream.Upstream
-	inflight  int
-	downUntil time.Time
+	up       *upstream.Upstream
+	inflight int
+	// avoidUntil is when a server avoided after failed requests or a failed
+	// probe serves again.
+	avoidUntil time.Time
 }
 
 // target is a server or one of its data-parallel ranks.
@@ -145,8 +146,6 @@ func newModel(name string, m config.Model, q *queue, stripCORS bool) (*model, er
 				return strings.HasPrefix(name, "X-Ratelimit-")
 			})
 
-			readUsage(resp)
-
 			return nil
 		},
 		ErrorHandler: proxyError,
@@ -233,22 +232,38 @@ func (m *model) release(t *target) {
 	t.inflight--
 }
 
-// fail avoids s for the failover duration.
-func (m *model) fail(s *server) {
+// probed records the latest probe of s. A failed one avoids s until the
+// next round surely reported, a passed one ends any avoidance.
+func (m *model) probed(s *server, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	s.downUntil = time.Now().Add(m.failover)
+	s.avoidUntil = time.Time{}
+
+	if err != nil {
+		s.avoidUntil = time.Now().Add(probeInterval + probeTimeout)
+	}
 }
 
-// address points req at s, joining its path onto the URL of s, with the
-// configured headers and Host, else host.
-func (m *model) address(req *http.Request, s *server, host string) {
-	(&httputil.ProxyRequest{Out: req}).SetURL(s.up.URL)
-	req.Host = cmp.Or(m.host, host)
+// healthy reports whether s is not avoided.
+func (m *model) healthy(s *server) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	for k, v := range m.headers {
-		req.Header[k] = v
+	return !time.Now().Before(s.avoidUntil)
+}
+
+// address points req at t, joining the path of u onto the URL of t, with the
+// configured headers and Host, else the one of req, and the rank of t.
+func (m *model) address(req *http.Request, u url.URL, t *target) {
+	host := req.Host
+	req.URL = &u
+	(&httputil.ProxyRequest{Out: req}).SetURL(t.up.URL)
+	req.Host = cmp.Or(m.host, host)
+	maps.Copy(req.Header, m.headers)
+
+	if t.rank != "" {
+		req.Header.Set(rankHeader, t.rank)
 	}
 }
 
@@ -312,48 +327,16 @@ func (m *model) send(out *http.Request, t *target) (*http.Response, error) {
 	return t.up.Transport.RoundTrip(req)
 }
 
-// ready reports whether any server of the model answers on its health
-// path, probing them concurrently and cancelling the rest once one answers.
-func (m *model) ready(ctx context.Context) bool {
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(errAnswered)
-
-	// Buffered, so that the cancelled probes never block.
-	failed := make(chan bool, len(m.servers))
-
-	for _, t := range m.servers {
-		go func() {
-			err := m.probe(ctx, t.server)
-			if err != nil && context.Cause(ctx) != errAnswered {
-				slog.Warn("readiness", "server", t.up.Label, "err", err)
-			}
-
-			failed <- err != nil
-		}()
-	}
-
-	for range m.servers {
-		if !<-failed {
-			return true
-		}
-	}
-
-	return false
-}
-
-// errAnswered cancels the probes of a model that another server answered.
-var errAnswered = errors.New("another server answered")
-
-// probe sends GET to the health path of the model on s.
-func (m *model) probe(ctx context.Context, s *server) error {
+// probe sends GET to the health path of the model on t.
+func (m *model) probe(ctx context.Context, t *target) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.health, nil)
 	if err != nil {
 		return err
 	}
 
-	m.address(req, s, "")
+	m.address(req, *req.URL, t)
 
-	return s.up.Probe(req)
+	return t.up.Probe(req)
 }
 
 // hashOf hashes parts with FNV-1a, separated so that they cannot shift.

@@ -305,22 +305,57 @@
   };
 
   # Every enabled listener reaches llmhop under its name with its fields,
+  # the default `metrics` one on a unix socket, and Prometheus scrapes only
+  # ports.
   testListeners = {
     expr = {
       inherit (policed.services.llmhop.gateway.settings) listen;
       names = lib.mapAttrs (_: unit: unit.socketConfig.FileDescriptorName) (
         lib.filterAttrs (name: _: lib.hasPrefix "llmhop-" name) policed.systemd.sockets
       );
+      metrics = {
+        inherit (policed.systemd.sockets.llmhop-metrics) listenStreams;
+        inherit (policed.systemd.sockets.llmhop-metrics.socketConfig) SocketGroup SocketMode;
+      };
+      scrape = map (job: {
+        inherit (job) metrics_path;
+        targets = (lib.head job.static_configs).targets;
+      }) policed.services.llmhop.gateway.scrapeConfigs;
+      unscraped = routable.services.llmhop.gateway.scrapeConfigs;
     };
     expected = {
       listen = {
+        metrics = {
+          socket = "/run/llmhop/metrics.sock";
+          metrics = true;
+        };
+        prometheus = {
+          host = "127.0.0.1";
+          port = 9464;
+          metrics = true;
+        };
         ssh = {
           socket = "/run/llmhop/ssh.sock";
+          metrics = false;
         };
       };
       names = {
+        llmhop-metrics = "metrics";
+        llmhop-prometheus = "prometheus";
         llmhop-ssh = "ssh";
       };
+      metrics = {
+        listenStreams = [ "/run/llmhop/metrics.sock" ];
+        SocketGroup = "wheel";
+        SocketMode = "0660";
+      };
+      scrape = [
+        {
+          metrics_path = "/llmhop/metrics";
+          targets = [ "127.0.0.1:9464" ];
+        }
+      ];
+      unscraped = [ ];
     };
   };
 

@@ -34,7 +34,12 @@ in
     formatter = "dev";
   };
   flake = {
-    nixosModules.default = mkModule inputs.quadlet-nix.nixosModules.default;
+    # Administrators of NixOS read the metrics, while other distributions
+    # name them differently, so only root does unless a host chooses.
+    nixosModules.default = {
+      imports = [ (mkModule inputs.quadlet-nix.nixosModules.default) ];
+      services.llmhop.gateway.listen.metrics.socketGroup = lib.mkDefault "wheel";
+    };
     # The host's systemd runs the units, not the store one of system-manager.
     systemManagerModules.default = {
       imports = [ (mkModule inputs.quadlet-nix.systemManagerModules.default) ];
@@ -114,7 +119,7 @@ in
           inputs.quadlet-nix.lib.mkBundle {
             inherit pkgs;
             modules = [
-              self.nixosModules.default
+              (mkModule inputs.quadlet-nix.nixosModules.default)
               # Not a default, so a native backend or gateway fails to evaluate.
               { services.llmhop.runtime = "container"; }
             ]

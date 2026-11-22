@@ -224,6 +224,13 @@ testers.nixosTest {
           assert machine.get_unit_property("llmhop", "MainPID") == pid
           assert machine.succeed(curl("client-secret")) == "socket ok"
 
+      with subtest("the metrics socket counts requests, which the journal sums by client"):
+          metrics = machine.succeed("curl -fsS --unix-socket /run/llmhop/metrics.sock http://localhost/llmhop/metrics")
+          assert 'llmhop_requests_total{client="client",' in metrics, metrics
+          machine.fail("curl -fsS http://127.0.0.1:8080/llmhop/metrics")
+          usage = machine.succeed("llmhopctl usage --since 1h").splitlines()
+          assert any(line.split()[0] == "client" for line in usage[1:]), usage
+
       containers.wait_for_unit("llmhop.service")
       containers.wait_for_unit("llama-cpp-fake-model.service")
 

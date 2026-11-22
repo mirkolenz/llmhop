@@ -16,6 +16,13 @@ let
     workloads
     listeners
     ;
+  # The ports of the listeners with metrics, as reached from the host, since
+  # Prometheus cannot scrape a unix socket.
+  metricsTargets = lib.pipe listeners [
+    lib.attrValues
+    (lib.filter (listener: listener.metrics && listener.port != null))
+    (map (listener: util.listenStream (listener // { host = util.reachableHost listener.host; })))
+  ];
 
   # A field of llmhop's JSON config, left out of it while null, since a set
   # one, even `0` or empty, replaces the layers below it.
@@ -116,6 +123,8 @@ in
               default = lib.mapAttrs (
                 _: listener:
                 lib.getAttrs (
+                  [ "metrics" ]
+                  ++ (
                     if listener.port == null then
                       [ "socket" ]
                     else
@@ -123,6 +132,7 @@ in
                         "host"
                         "port"
                       ]
+                  )
                 ) listener
               ) listeners;
               defaultText = lib.literalMD "the `host` and `port`, or the `socket`, and `metrics` of the enabled listeners of `listen`";
@@ -195,6 +205,15 @@ in
                 enable = lib.mkEnableOption "the listener" // {
                   default = true;
                 };
+                metrics = mkOption {
+                  type = types.bool;
+                  default = false;
+                  description = ''
+                    Whether the listener serves `/llmhop/metrics` without a
+                    key, so it should be a loopback port for Prometheus or a
+                    unix socket.
+                  '';
+                };
                 port = mkOption {
                   type = with types; nullOr port;
                   default = null;
@@ -249,6 +268,10 @@ in
         example = {
           default.host = "";
           caddy.socketGroup = "caddy";
+          prometheus = {
+            port = 9464;
+            metrics = true;
+          };
           ssh.socketGroup = "wheel";
         };
         description = ''
@@ -259,6 +282,21 @@ in
           `metrics.sock` for the group `wheel` on NixOS, where `llmhopctl top`
           finds it. `settings.clients.<name>.listener` makes the requests on a
           unix socket count as a client's.
+        '';
+      };
+      scrapeConfigs = mkOption {
+        type = with types; listOf (attrsOf json);
+        readOnly = true;
+        default = lib.optional (cfg.active && metricsTargets != [ ]) {
+          job_name = "llmhop";
+          metrics_path = "/llmhop/metrics";
+          static_configs = [ { targets = metricsTargets; } ];
+        };
+        defaultText = lib.literalMD "the job of the gateway on the ports of `listen` with `metrics`";
+        description = ''
+          Prometheus scrape jobs of the gateway, for
+          `services.prometheus.scrapeConfigs`, on the ports of the listeners
+          with `metrics`, or none without one.
         '';
       };
     }

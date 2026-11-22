@@ -41,9 +41,6 @@ rec {
   # The path every server answers with success once it is ready.
   healthPath = "/health";
 
-  # The address of a server listening on `socket`, or else on its bind
-  # address, loopback for a wildcard, as `llmhop internal wait-healthy` takes
-  # it.
   # The `ListenStream=` of a listener, its `socket` without a `port`, or its
   # `port` on `host`, alone for every interface.
   listenStream =
@@ -60,6 +57,19 @@ rec {
     else
       hostPort host port;
 
+  # The address reaching a server bound to `host` on the same host, loopback
+  # for a wildcard.
+  reachableHost =
+    host:
+    if host == "" || host == "0.0.0.0" then
+      "127.0.0.1"
+    else if host == "::" then
+      "::1"
+    else
+      host;
+
+  # The URL reaching a server on `port`, or else on `socket`, on the same
+  # host, as llmhop takes it.
   probeUrl =
     {
       socket,
@@ -67,16 +77,7 @@ rec {
       port,
       ...
     }:
-    let
-      probeHost =
-        if host == "0.0.0.0" then
-          "127.0.0.1"
-        else if host == "::" then
-          "::1"
-        else
-          host;
-    in
-    if socket != null then "unix://${socket}" else "http://${hostPort probeHost port}";
+    if port == null then "unix://${socket}" else "http://${hostPort (reachableHost host) port}";
 
   # Render `settings` into the argv of a parser with the given `negateBools`
   # and `listStyle`, flag and value as separate entries. Strings, paths and

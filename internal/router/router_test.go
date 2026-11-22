@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httptrace"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -56,6 +55,7 @@ func newRouter(t *testing.T, cfg *config.Config) http.Handler {
 		t.Fatal(err)
 	}
 
+	h.Start()
 	t.Cleanup(h.Close)
 
 	return h
@@ -467,6 +467,52 @@ func TestReadiness(t *testing.T) {
 	check(http.StatusServiceUnavailable, readiness{Status: "unavailable", Ready: 3, Probed: 4})
 }
 
+// Closing a router before its first probes unblocks its readiness.
+func TestReadinessUnblockedByClose(t *testing.T) {
+	hang := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-hang }))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(hang) })
+
+	rt, err := New(&config.Config{Models: map[string]config.Model{"m": {URLs: []string{srv.URL}, HealthPath: "/health"}}}, &Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt.Start()
+	rt.Close()
+	send(t, rt, http.MethodGet, "/llmhop/readiness", "", "")
+}
+
+// A reload changing the health path probes the new one before readiness.
+func TestReloadedHealthPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	limits := &Limits{}
+
+	for _, c := range []struct {
+		path string
+		want int
+	}{{"/health", http.StatusOK}, {"/missing", http.StatusServiceUnavailable}} {
+		rt, err := New(&config.Config{Models: map[string]config.Model{"m": {URLs: []string{srv.URL}, HealthPath: c.path}}}, limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rt.Start()
+		t.Cleanup(rt.Close)
+
+		if rec := send(t, rt, http.MethodGet, "/llmhop/readiness", "", ""); rec.Code != c.want {
+			t.Errorf("%s: got status %d, want %d", c.path, rec.Code, c.want)
+		}
+	}
+}
+
 func TestBufferedBytesLimit(t *testing.T) {
 	srv, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
@@ -525,19 +571,16 @@ func TestBufferedBytesReleasedOnceResponding(t *testing.T) {
 		Models:           map[string]config.Model{"slow": {URLs: []string{streaming.URL}}, "fast": {URLs: []string{fast.URL}}},
 	})
 
-	// The router's own hook, which releases the bytes, runs before this outer one.
-	sent, done := make(chan struct{}), make(chan struct{})
-	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
-		GotFirstResponseByte: func() { close(sent) },
-	})
+	// The router releases the bytes once it accepts the response, before it
+	// writes the header.
+	rec, done := &headerSignal{httptest.NewRecorder(), make(chan struct{})}, make(chan struct{})
 
 	go func() {
-		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(`{"model":"slow"}`))
-		h.ServeHTTP(httptest.NewRecorder(), req)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"slow"}`)))
 		close(done)
 	}()
 
-	<-sent
+	<-rec.wrote
 
 	// The slow response still streams, but its body can no longer be resent.
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"fast"}`, ""); rec.Code != http.StatusOK {
@@ -548,6 +591,16 @@ func TestBufferedBytesReleasedOnceResponding(t *testing.T) {
 	<-done
 }
 
+// headerSignal closes wrote once the header is written.
+type headerSignal struct {
+	*httptest.ResponseRecorder
+	wrote chan struct{}
+}
+
+func (h *headerSignal) WriteHeader(code int) {
+	h.ResponseRecorder.WriteHeader(code)
+	close(h.wrote)
+}
 
 func TestProxyPreservesRequestTrailer(t *testing.T) {
 	var trailer string
@@ -730,6 +783,113 @@ func TestFailover(t *testing.T) {
 	}
 }
 
+// statusBackends starts servers answering a status each, and counts the
+// requests of each.
+func statusBackends(t *testing.T, statuses ...int) ([]string, []atomic.Int32) {
+	t.Helper()
+	urls, hits := make([]string, len(statuses)), make([]atomic.Int32, len(statuses))
+
+	for i, status := range statuses {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				hits[i].Add(1)
+			}
+
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(status)
+		}))
+		t.Cleanup(srv.Close)
+		urls[i] = srv.URL
+	}
+
+	return urls, hits
+}
+
+// A 503 moves a buffered request on to the next server.
+func TestRetryUnavailable(t *testing.T) {
+	urls, hits := statusBackends(t, http.StatusServiceUnavailable, http.StatusOK)
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: urls}}})
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusOK || hits[0].Load() != 1 || hits[1].Load() != 1 {
+		t.Fatalf("got status %d after %d and %d requests", rec.Code, hits[0].Load(), hits[1].Load())
+	}
+}
+
+// Three 503 in a row eject a server, each retried on the next one, while a
+// 429 or 500, which may concern the request alone, never does. Keyless
+// requests take the first of equally idle servers.
+func TestEjection(t *testing.T) {
+	for status, ejected := range map[int]bool{http.StatusServiceUnavailable: true, http.StatusInternalServerError: false, http.StatusTooManyRequests: false} {
+		urls, hits := statusBackends(t, status, http.StatusOK)
+		h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: urls, FailoverSeconds: 5}}})
+
+		for range 4 {
+			send(t, h, http.MethodPost, "/", `{"model":"m"}`, "")
+		}
+
+		if got := [2]int32{hits[0].Load(), hits[1].Load()}; ejected && got != [2]int32{ejectAfter, 4} || !ejected && got != [2]int32{4, 0} {
+			t.Errorf("status %d: servers got %v requests", status, got)
+		}
+	}
+}
+
+// A keyed request spills from its server beyond the bound of its load.
+func TestBoundedLoads(t *testing.T) {
+	cfg := config.Model{URLs: []string{"http://a", "http://b"}}
+	m, err := newModel("m", cfg, nil, (&Limits{}).pool("m", cfg), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pick := func() *target {
+		a := &attempt{affinity: affinity{key: hashOf("c"), keyed: true}}
+		m.pick(a)
+
+		return a.target
+	}
+	first := pick()
+
+	// With six in flight on one server and none on the other, the bound
+	// is ceil(1.25 * 3) + 1 = 5.
+	for i := range 6 {
+		if got := pick(); (got == first) != (i < 5) {
+			t.Fatalf("request %d went to %s", i+2, got.up.Label)
+		}
+	}
+
+	// A pinned request stays beyond the bound.
+	a := &attempt{affinity: affinity{key: hashOf("c"), keyed: true, pinned: true}}
+	if m.pick(a); a.target != first {
+		t.Fatalf("pinned request went to %s", a.target.up.Label)
+	}
+}
+
+// A server failing its probe serves only once no other one can.
+func TestProbedServerSkipped(t *testing.T) {
+	var hits [2]atomic.Int32
+	urls := make([]string, 2)
+
+	for i := range urls {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && i == 0 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+
+			if r.Method == http.MethodPost {
+				hits[i].Add(1)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		urls[i] = srv.URL
+	}
+
+	h := newRouter(t, &config.Config{Models: map[string]config.Model{"m": {URLs: urls, HealthPath: "/health"}}})
+	send(t, h, http.MethodGet, "/llmhop/readiness", "", "")
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusOK || hits[0].Load() != 0 || hits[1].Load() != 1 {
+		t.Fatalf("got status %d after %d and %d requests", rec.Code, hits[0].Load(), hits[1].Load())
+	}
+}
 
 
 func TestDataParallelRanks(t *testing.T) {
@@ -900,6 +1060,30 @@ func TestLimitsSharedAcrossRouters(t *testing.T) {
 
 	close(release)
 	<-done
+}
+
+// A reload keeps the servers ejected before it.
+func TestEjectionSurvivesReload(t *testing.T) {
+	urls, hits := statusBackends(t, http.StatusServiceUnavailable, http.StatusOK)
+	limits := &Limits{}
+	cfg := &config.Config{Models: map[string]config.Model{"m": {URLs: urls, FailoverSeconds: 5}}}
+
+	for range 2 {
+		rt, err := New(cfg, limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(rt.Close)
+
+		for range ejectAfter {
+			send(t, rt, http.MethodPost, "/", `{"model":"m"}`, "")
+		}
+	}
+
+	if hits[0].Load() != ejectAfter {
+		t.Errorf("servers got %d and %d requests", hits[0].Load(), hits[1].Load())
+	}
 }
 
 // Informational responses keep the request ID of the final one.

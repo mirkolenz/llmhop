@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mirkolenz/llmhop/internal/config"
@@ -25,9 +27,12 @@ import (
 // server.
 const rankHeader = "X-Data-Parallel-Rank"
 
-// model is a configured model with the servers serving it. Its in-flight
+// ejectAfter is how many failed requests in a row make a server avoided.
+const ejectAfter = 3
+
+// model is a configured model with the servers serving it. Their in-flight
 // counts and health only exist to spread the requests of this process, so
-// every instance of llmhop decides alone and none shares state.
+// every instance of llmhop decides alone, while a reload keeps them.
 type model struct {
 	name    string
 	headers http.Header
@@ -46,22 +51,34 @@ type model struct {
 	failover     time.Duration
 	proxy        *httputil.ReverseProxy
 
-	// mu guards the in-flight counts and health of every server and target.
-	mu sync.Mutex
+	// mu guards the in-flight counts and health of every server, that of
+	// its pool.
+	mu *sync.Mutex
 }
 
-// server is one URL of a model.
+// server is the state of one URL of a model, which its pool keeps across
+// reloads that keep its health path.
 type server struct {
-	up       *upstream.Upstream
 	inflight int
-	// avoidUntil is when a server avoided after failed requests or a failed
-	// probe serves again.
+	// failures counts the requests it failed in a row.
+	failures int
+	// avoidUntil is when a server avoided after failed requests serves
+	// again.
 	avoidUntil time.Time
+	// probed is whether a probe reported, and probeFailed avoids a server
+	// until a probe passes.
+	probed, probeFailed bool
+}
+
+// avoided reports whether s serves only once no other server can.
+func (s *server) avoided(now time.Time) bool {
+	return s.probeFailed || now.Before(s.avoidUntil)
 }
 
 // target is a server or one of its data-parallel ranks.
 type target struct {
 	*server
+	up   *upstream.Upstream
 	rank string
 	// id seeds the rendezvous hash, the same in every llmhop instance.
 	id uint64
@@ -69,7 +86,7 @@ type target struct {
 
 // newModel builds the model of m. With stripCORS, llmhop alone decides which
 // pages may read a response, as it does whenever tokens are required.
-func newModel(name string, m config.Model, q *queue, stripCORS bool) (*model, error) {
+func newModel(name string, m config.Model, q *queue, p *pool, stripCORS bool) (*model, error) {
 	headers := make(http.Header, len(m.Headers))
 
 	for k, v := range m.Headers {
@@ -82,19 +99,26 @@ func newModel(name string, m config.Model, q *queue, stripCORS bool) (*model, er
 		host:         headers.Get("Host"),
 		health:       m.HealthPath,
 		queue:        q,
+		mu:           &p.mu,
 		queueTimeout: time.Duration(m.QueueTimeoutSeconds) * time.Second,
 		failover:     time.Duration(m.FailoverSeconds) * time.Second,
 	}
 	headers.Del("Host")
 
-	for _, raw := range m.URLs {
+	for i, raw := range m.URLs {
 		up, err := upstream.Parse(raw, time.Duration(m.ResponseTimeoutSeconds)*time.Second)
 		if err != nil {
 			return nil, err
 		}
 
-		s := &server{up: up}
-		whole := &target{server: s, id: hashOf(raw)}
+		// The position tells apart the URLs that differ only in their query,
+		// which a label leaves out.
+		if slices.ContainsFunc(md.servers, func(t *target) bool { return t.up.Label == up.Label }) {
+			up.Label += "#" + strconv.Itoa(i)
+		}
+
+		s := p.servers[serverKey{raw, m.HealthPath}]
+		whole := &target{server: s, up: up, id: hashOf(raw)}
 		md.servers = append(md.servers, whole)
 
 		// Unset is zero, a single rank like one.
@@ -105,7 +129,7 @@ func newModel(name string, m config.Model, q *queue, stripCORS bool) (*model, er
 
 		for rank := range m.DataParallelSize {
 			r := strconv.FormatUint(uint64(rank), 10)
-			md.targets = append(md.targets, &target{server: s, rank: r, id: hashOf(raw, r)})
+			md.targets = append(md.targets, &target{server: s, up: up, rank: r, id: hashOf(raw, r)})
 		}
 	}
 
@@ -127,6 +151,10 @@ func newModel(name string, m config.Model, q *queue, stripCORS bool) (*model, er
 			if c := entryOf(r.In).client; c != nil && c.name != "" {
 				r.Out.Header.Set(clientHeader, c.name)
 			}
+
+			a := attemptOf(r.In)
+			a.path = *r.Out.URL
+			md.address(r.Out, a.path, a.target)
 		},
 		Transport: md,
 		ModifyResponse: func(resp *http.Response) error {
@@ -174,83 +202,172 @@ func (m *model) serve(w http.ResponseWriter, req *http.Request, a *attempt, t *t
 
 	defer t.release()
 
-	a := &attempt{affinity: aff, target: m.pick(aff, nil)}
+	m.pick(a)
 	defer func() {
 		entryOf(req).server = a.target.up.Label
-		m.release(a.target)
+		m.done(a)
 	}()
 
 	m.proxy.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), attemptKey{}, a)))
 }
 
-// pick takes a target for a request, skipping the servers tried before. A
-// keyed request takes the first target in the rendezvous order of its key,
-// the same in every llmhop instance, and a keyless one the least busy
-// server, leaving the choice of a rank to the server. Servers that refused a
-// connection recently serve only once no other one can. It returns nil once
-// every server was tried.
-func (m *model) pick(a affinity, tried []*server) *target {
+// outcome is what a request tells about its server.
+type outcome uint8
+
+const (
+	// unknown is the outcome of a request not sent or cancelled by its client.
+	unknown outcome = iota
+	succeeded
+	failed
+	// refused is a failed dial, which avoids a server at once.
+	refused
+)
+
+// pick records the outcome of the current target of a, then moves a to the
+// best target it has not tried and reports whether there was one. A keyed
+// request takes the first target in the rendezvous order of its key, the
+// same in every llmhop instance, and a keyless one the least busy server,
+// leaving the choice of a rank to the server. A server serves only once no
+// other one can if it is avoided, and a keyed request skips one beyond 1.25
+// times the average load plus one, as in consistent hashing with bounded
+// loads. A pinned request takes its first target regardless and never
+// moves, since no other server holds its state.
+func (m *model) pick(a *attempt) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := time.Now()
+
+	if a.target != nil {
+		m.record(a.target.server, a.outcome, now)
+		a.outcome = unknown
+		a.tried = append(a.tried, a.target.server)
+
+		if a.pinned {
+			return false
+		}
+	}
+
 	candidates := m.servers
 	// The best candidate scores highest, the first one on a tie.
 	score := func(t *target) uint64 { return ^uint64(t.inflight) }
+	// The least busy server never exceeds the bound, which only keyed
+	// requests need.
+	bound := math.MaxInt
 
 	if a.keyed {
 		candidates = m.targets
 		score = func(t *target) uint64 { return mix(a.key ^ t.id) }
-	}
 
-	// The second pass relaxes the health.
-	for pass := range 2 {
-		var best *target
+		// The bound is ceil(1.25 * average in-flight) + 1.
+		load, n := 0, 4*len(m.servers)
 
-		for _, t := range candidates {
-			eligible := !slices.Contains(tried, t.server) && (pass > 0 || now.After(t.downUntil))
-			if eligible && (best == nil || score(t) > score(best)) {
-				best = t
-			}
+		for _, t := range m.servers {
+			load += t.inflight
 		}
 
-		if best != nil {
-			best.inflight++
+		bound = (5*load+n-1)/n + 1
+	}
 
-			return best
+	// Health ranks above the bound, which ranks above the score.
+	var best *target
+	var bestTier int
+	var bestScore uint64
+
+	for _, t := range candidates {
+		if slices.Contains(a.tried, t.server) {
+			continue
+		}
+
+		tier := 0
+
+		if !t.avoided(now) {
+			tier += 2
+		}
+
+		if t.inflight <= bound {
+			tier++
+		}
+
+		// A pinned request ranks by its score alone.
+		if a.pinned {
+			tier = 0
+		}
+
+		if s := score(t); best == nil || tier > bestTier || tier == bestTier && s > bestScore {
+			best, bestTier, bestScore = t, tier, s
 		}
 	}
 
-	return nil
+	if best == nil {
+		return false
+	}
+
+	if a.target != nil {
+		a.target.inflight--
+	}
+
+	best.inflight++
+	a.target = best
+
+	return true
 }
 
-// release ends a request picked for t.
-func (m *model) release(t *target) {
+// done records the outcome of the target of a and ends its request.
+func (m *model) done(a *attempt) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	t.inflight--
+	m.record(a.target.server, a.outcome, time.Now())
+	a.target.inflight--
 }
 
-// probed records the latest probe of s. A failed one avoids s until the
-// next round surely reported, a passed one ends any avoidance.
+// record notes the outcome of a request to s. A refused dial avoids s for
+// the failover duration at once, other failures once s failed ejectAfter
+// requests in a row. m.mu must be held.
+func (m *model) record(s *server, o outcome, now time.Time) {
+	switch o {
+	case unknown:
+	case succeeded:
+		s.failures = 0
+	default:
+		s.failures++
+
+		if o == refused || s.failures >= ejectAfter {
+			s.avoidUntil = now.Add(m.failover)
+		}
+	}
+}
+
+// probed records the latest probe of s. A failed one avoids s until a probe
+// passes, which ends any avoidance and starts counting failures afresh.
 func (m *model) probed(s *server, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	s.avoidUntil = time.Time{}
+	s.probed, s.probeFailed = true, err != nil
 
-	if err != nil {
-		s.avoidUntil = time.Now().Add(probeInterval + probeTimeout)
+	if err == nil {
+		s.avoidUntil, s.failures = time.Time{}, 0
 	}
 }
 
-// healthy reports whether s is not avoided.
+// healthy reports whether s passed its latest probe, regardless of the
+// requests it failed, which may be those of one client alone.
 func (m *model) healthy(s *server) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return !time.Now().Before(s.avoidUntil)
+	return !s.probeFailed
+}
+
+// unprobed reports whether no probe of s reported yet, not even one of the
+// router a reload replaced.
+func (m *model) unprobed(s *server) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return !s.probed
 }
 
 // address points req at t, joining the path of u onto the URL of t, with the
@@ -271,41 +388,51 @@ func (m *model) address(req *http.Request, u url.URL, t *target) {
 // model may move to another server.
 type attempt struct {
 	affinity
-	target *target
-	tried  []*server
+	target  *target
+	outcome outcome
+	tried   []*server
+	// path is the outgoing URL before a server is joined onto it.
+	path url.URL
+	// accept lets go of a buffered body once a response is accepted, unless
+	// nil.
+	accept func()
 }
 
 type attemptKey struct{}
 
-// RoundTrip sends out to the target of its attempt. A server refusing the
-// connection is avoided for a while, and a body that can be resent moves on
-// to the next server.
+// attemptOf returns the attempt of a proxied request.
+func attemptOf(req *http.Request) *attempt {
+	return req.Context().Value(attemptKey{}).(*attempt)
+}
+
 func (m *model) RoundTrip(out *http.Request) (*http.Response, error) {
-	a := out.Context().Value(attemptKey{}).(*attempt)
+	a := attemptOf(out)
+
+	if a.accept != nil {
+		defer a.accept()
+	}
 
 	for {
-		resp, err := m.send(out, a.target)
+		resp, err := a.target.up.Transport.RoundTrip(out)
 
-		// Only a failed dial certainly left the request unsent, and one
-		// the client cancelled says nothing about the server.
-		if opErr, ok := errors.AsType[*net.OpError](err); !ok || opErr.Op != "dial" || out.Context().Err() != nil {
+		// One the client cancelled says nothing about the server.
+		if out.Context().Err() != nil {
 			return resp, err
 		}
 
-		m.fail(a.target.server)
-		a.tried = append(a.tried, a.target.server)
+		var retry bool
+		a.outcome, retry = classify(resp, err)
 
-		if out.Body != nil && out.GetBody == nil {
-			return nil, err
+		if !retry || out.Body != nil && out.GetBody == nil || !m.pick(a) {
+			return resp, err
 		}
 
-		next := m.pick(a.affinity, a.tried)
-		if next == nil {
-			return nil, err
+		if resp != nil {
+			_ = resp.Body.Close()
 		}
 
-		m.release(a.target)
-		a.target = next
+		out = out.Clone(out.Context())
+		m.address(out, a.path, a.target)
 
 		if out.GetBody != nil {
 			if out.Body, err = out.GetBody(); err != nil {
@@ -315,16 +442,28 @@ func (m *model) RoundTrip(out *http.Request) (*http.Response, error) {
 	}
 }
 
-// send sends out to t, pinned to the rank of t if it has one.
-func (m *model) send(out *http.Request, t *target) (*http.Response, error) {
-	req := out.Clone(out.Context())
-	m.address(req, t.server, out.Host)
-
-	if t.rank != "" {
-		req.Header.Set(rankHeader, t.rank)
+// classify returns what a response or error tells about its server and
+// whether the request may move on to another one. A refused dial, a reset
+// before responding and 502, 503 and 504 fail the server and are retried,
+// and any other error fails it. A 429 and any other 5xx may concern the
+// request alone, so they tell nothing.
+func classify(resp *http.Response, err error) (outcome, bool) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok && opErr.Op == "dial" {
+		return refused, true
 	}
 
-	return t.up.Transport.RoundTrip(req)
+	if err != nil {
+		return failed, errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF)
+	}
+
+	switch code := resp.StatusCode; {
+	case code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout:
+		return failed, true
+	case code == http.StatusTooManyRequests || code >= http.StatusInternalServerError:
+		return unknown, false
+	}
+
+	return succeeded, false
 }
 
 // probe sends GET to the health path of the model on t.

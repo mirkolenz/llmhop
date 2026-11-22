@@ -93,7 +93,11 @@ type exporter struct {
 	prober *prober
 }
 
-func (x *exporter) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+func (x *exporter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if !x.prober.wait(req.Context()) {
+		return
+	}
+
 	occupancy := x.limits.occupancy(x.models)
 	var e exposition
 
@@ -118,8 +122,6 @@ func (x *exporter) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	e.family("llmhop_backend_up", "gauge", "Whether a server of a model answers on its health path.")
-
-	<-x.prober.ready
 
 	for _, m := range x.prober.models {
 		for _, t := range m.servers {

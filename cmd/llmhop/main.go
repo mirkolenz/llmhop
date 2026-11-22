@@ -419,6 +419,8 @@ func (s *swappable) load(path string) (*config.Config, error) {
 		return nil, err
 	}
 
+	rt.Start()
+
 	if old := s.Swap(rt); old != nil {
 		old.Close()
 	}

@@ -41,7 +41,8 @@ import (
 // metrics, the metrics of llmhop are served unauthenticated and unlogged.
 // It is immutable, so a reload replaces it, sharing the limits and metrics
 // with the router it replaces, which drop the models and clients it lacks.
-// Its probes run until it is closed.
+// Its probes run from Start until it is closed, so that only serving
+// reaches the backends.
 func New(cfg *config.Config, limits *Limits) (*Router, error) {
 	rt := &routes{
 		rewrites:     make(map[string]jsontext.Value),
@@ -52,7 +53,7 @@ func New(cfg *config.Config, limits *Limits) (*Router, error) {
 	var models []*model
 
 	for name, m := range cfg.Models {
-		md, err := newModel(name, m, limits.queue(name, m.MaxConcurrentRequests), cfg.RequiresAuth())
+		md, err := newModel(name, m, limits.queue(name, m.MaxConcurrentRequests), limits.pool(name, m), cfg.RequiresAuth())
 		if err != nil {
 			return nil, fmt.Errorf("models.%s: %w", name, err)
 		}
@@ -95,7 +96,7 @@ func New(cfg *config.Config, limits *Limits) (*Router, error) {
 	logged := logRequests(api, &limits.metrics)
 	root := http.NewServeMux()
 	registerHealth(root, len(objects))
-	probes := startProber(models)
+	probes := newProber(models)
 	registerReadiness(root, probes)
 	root.Handle("GET "+reservedPrefix+"metrics", metricsOnly(cfg.Listen, &exporter{limits: limits, models: models, prober: probes}))
 	root.Handle(proxyPrefix, logged)
@@ -111,6 +112,11 @@ func New(cfg *config.Config, limits *Limits) (*Router, error) {
 type Router struct {
 	http.Handler
 	probes *prober
+}
+
+// Start probes the servers of r in the background, before it serves.
+func (r *Router) Start() {
+	r.probes.start()
 }
 
 // Close stops the probes of r, while its requests in flight finish.
@@ -581,9 +587,10 @@ func (c *chargedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// replayBody hands a buffered body to the transport, which resends it on a
-// fresh connection until the response starts. Then drop lets go of the buffer
-// and releases its budget, so a response streamed for long holds neither.
+// replayBody hands a buffered body to the transport, which resends it to
+// the same or another server until a response is accepted. Then drop lets go
+// of the buffer and releases its budget, so a response streamed for long
+// holds neither.
 type replayBody struct {
 	buf  atomic.Pointer[[]byte]
 	drop func()

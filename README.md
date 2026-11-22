@@ -6,8 +6,8 @@ LLMhop reads the `model` field of an incoming request and reverse-proxies it to 
 It is built for single-model servers like [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang), but works with any OpenAI-compatible backend, self-hosted or remote.
 
 - Pure Go, no CGO, stateless and safe behind any load balancer.
-- Balancing over several servers or data-parallel ranks with stateless prefix-cache affinity, failover, queueing and timeouts.
 - Body and path routing with aliases and wildcards, a models API served from the config, health, readiness and Prometheus metrics, graceful draining and reloading.
+- Balancing over several servers or data-parallel ranks with stateless prefix-cache affinity under bounded loads, failover, retries, passive and active health checks, queueing and timeouts.
 - Clients authenticated by a key or a unix socket, each with a policy deciding its models, concurrency, request rate and share of a saturated model.
 - Ships as a static binary, a Docker image and a hardened NixOS module running llama.cpp, SGLang or vLLM behind llmhop or no gateway, natively or in containers.
 
@@ -38,7 +38,7 @@ The longest configured model name or alias that prefixes the path wins, wildcard
 A model marked `"unlisted": true` is routed but left out of the models API, which suits services such as a watermark detector.
 
 Every other request gets an `X-Request-Id`, unless it carries one, which reaches the backend and the response, and is logged once answered.
-`/llmhop/readiness` answers `200` only if every model with a `healthPath` has a URL that is not [avoided](#balancing-and-affinity), such as one answering its latest probe with `2xx`, else `503`, so a restarting replica keeps llmhop ready.
+`/llmhop/readiness` answers `200` only if every model with a `healthPath` has a URL that passed its latest [probe](#balancing-and-affinity), else `503`, so a restarting replica keeps llmhop ready and failed requests, which may be those of one client, never make it unready.
 Health, readiness and metrics never require a key and are not logged.
 LLMhop sends `READY=1` to systemd once its listeners are bound, reloads its config on `SIGHUP`, keeping the current one if the new one fails, and drains in-flight requests on `SIGTERM` or `SIGINT`.
 A reload applies everything but `listen`, while requests in flight finish on the config they started with.
@@ -47,19 +47,24 @@ A reload applies everything but `listen`, while requests in flight finish on the
 
 A model's `urls` are servers of the same model, such as replicas on several GPUs or hosts.
 A request without an affinity key goes to the server with the fewest requests in flight.
-A request with a key always goes to the first server in the [rendezvous hashing](https://en.wikipedia.org/wiki/Rendezvous_hashing) order of its key, so the turns of a conversation reuse the prefix cache of one server and a chain of stored responses of the Responses API that keeps its key stays with the server storing it.
+A request with a key goes to the first server in the [rendezvous hashing](https://en.wikipedia.org/wiki/Rendezvous_hashing) order of its key, so the turns of a conversation reuse the prefix cache of one server and a chain of stored responses of the Responses API that keeps its key stays with the server storing it.
+As in [consistent hashing with bounded loads](https://arxiv.org/abs/1608.01350), it skips a server with more requests in flight than 1.25 times the average of the model's servers, rounded up, plus one, and takes the next server in its order within that bound, so a busy conversation cannot overload one server.
+A pinned request never leaves its first server, under any load, avoidance or failure, since no other server holds its state: one whose source sets `"pinned": true` or one continuing a stored response with `previous_response_id`.
 Every llmhop instance computes the same order without sharing any state, so affinity holds behind any load balancer.
 The key comes from the first of the `affinity` sources a request carries, which clients set to name their conversation.
-Each source sets exactly one of `header`, the name of a header, or `body`, the path of member names to a string in the JSON body, by default:
+Each source sets exactly one of `header`, the name of a header, or `body`, the path of member names to a string in the JSON body, and optionally `pinned`, by default:
 
 1. `{"header": "X-Session-Id"}`, where Open WebUI's `X-OpenWebUI-Chat-Id` also fits,
 2. `{"body": ["prompt_cache_key"]}`, the body's member meant for this by OpenAI,
-3. `{"body": ["session_params", "id"]}`, the session of SGLang, whose state lives on one server.
+3. `{"body": ["session_params", "id"], "pinned": true}`, the session of SGLang, whose state lives on one server.
 
 `"affinity": []` disables affinity.
 
 `dataParallelSize`, at most 256, hashes keyed requests over the ranks of every URL and pins them through the `X-Data-Parallel-Rank` header of vLLM and SGLang, which llmhop never takes from a client, so affinity also works across the data-parallel ranks of one server, which balances keyless requests itself.
-A server refusing a connection is avoided for `failoverSeconds`, by default 5, and a request with a body routed by its `model` moves on to the next server.
+A request whose body can be resent, one that llmhop buffered or one without a body, moves on to the next server in its order when a server refuses the connection, resets it before responding, or answers `502`, `503` or `504`, trying each server once, while a response that reached the client is never retried.
+A server is avoided for `failoverSeconds`, by default 5, once it refuses a connection or fails three requests in a row with a `502`, `503`, `504`, a reset or a response timeout, while a `429` or another `5xx`, which may concern the request alone, never counts and any other response resets the count.
+llmhop probes the `healthPath` of a model on each of its servers every second in the background, each on its own, avoiding a server from a failed probe until one passes, which also ends an avoidance after failed requests.
+An avoided server serves only once every other one is avoided or tried.
 
 ### Errors
 
@@ -188,7 +193,7 @@ A listener with `metrics` serves `GET /llmhop/metrics` in the Prometheus text fo
 
 A rate limit shows as `code` `429`.
 llmhop only reports what it decides itself, while token counts and latencies such as the time to the first token come from the metrics of the backends.
-`llmhop_backend_up` reports whether a server is [avoided](#balancing-and-affinity), as readiness and routing do.
+`llmhop_backend_up` reports whether a server passed its latest [probe](#balancing-and-affinity), as readiness does.
 The counters survive a reload and reset on a restart.
 
 llmhop logs JSON lines, among them one per answered request with `msg` `request`, its `id`, `method`, `path`, `status`, `bytes`, `duration` in seconds, `client`, `policy`, the requested `model` and `server`.

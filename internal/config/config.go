@@ -57,8 +57,8 @@ type Model struct {
 	// which requests with an affinity key are pinned to through the
 	// `X-Data-Parallel-Rank` header of vLLM and SGLang, one by default.
 	DataParallelSize uint `json:"dataParallelSize,omitempty"`
-	// FailoverSeconds is how long a server that refused a connection is
-	// avoided.
+	// FailoverSeconds is how long a server is avoided once it refused a
+	// connection or failed several requests in a row.
 	FailoverSeconds uint32 `json:"failoverSeconds"`
 	// HealthPath is the backend path that GET /llmhop/readiness and the
 	// metrics probe. Empty skips the model.

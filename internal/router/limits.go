@@ -17,11 +17,12 @@ import (
 	"github.com/mirkolenz/llmhop/internal/config"
 )
 
-// Limits carries the admission limits and the metrics from one router to the
-// next, so that a reload neither resets nor doubles them while the requests
-// of the previous router drain. A reload resizes the queues of models and the
-// limiters of clients in place, while a byte budget whose size changes starts
-// afresh. The zero value is ready to use.
+// Limits carries the admission limits, the state of the servers and the
+// metrics from one router to the next, so that a reload neither resets nor
+// doubles them while the requests of the previous router drain. A reload
+// resizes the queues of models and the limiters of clients in place, while
+// a byte budget whose size changes starts afresh. The zero value is ready
+// to use.
 type Limits struct {
 	// mu guards the admission to the queues and the slots of clients.
 	mu sync.Mutex
@@ -29,6 +30,7 @@ type Limits struct {
 	buffered     *semaphore.Weighted
 	bufferedSize int64
 	queues       map[string]*queue
+	pools        map[string]*pool
 	// clients holds the limiters by client.
 	clients map[string]*limiters
 	// seq orders the tickets by arrival.
@@ -60,6 +62,38 @@ func (l *Limits) queue(name string, size uint32) *queue {
 	return q
 }
 
+// pool is the state of the servers of a model.
+type pool struct {
+	mu      sync.Mutex
+	servers map[serverKey]*server
+}
+
+// serverKey identifies a server by its URL and health path, so that the
+// probes of another path, or of none, never apply to it.
+type serverKey struct{ url, health string }
+
+// pool returns the pool of the model m called name with a server for each
+// of its URLs, keeping the state of those it already had.
+func (l *Limits) pool(name string, m config.Model) *pool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	p := getOrInsert(&l.pools, name, func() *pool { return &pool{} })
+	servers := make(map[serverKey]*server, len(m.URLs))
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, raw := range m.URLs {
+		key := serverKey{raw, m.HealthPath}
+		servers[key] = cmp.Or(p.servers[key], &server{})
+	}
+
+	p.servers = servers
+
+	return p
+}
+
 // limiters returns the limiters of a client, resized to its policy.
 func (l *Limits) limiters(client string, p config.Policy) *limiters {
 	l.mu.Lock()
@@ -77,18 +111,25 @@ func (l *Limits) limiters(client string, p config.Policy) *limiters {
 	return lim
 }
 
-// retain drops the queues and limiters of the models and clients that cfg
-// no longer has, which the requests holding them keep for themselves, and
-// admits the tickets that resized limits allow.
+// retain retires the queues of the models that cfg no longer has, which
+// stay until their requests finish, drops their pools and the limiters of
+// the clients it no longer has, which the requests holding them keep for
+// themselves, and admits the tickets that resized limits allow.
 func (l *Limits) retain(cfg *config.Config) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	maps.DeleteFunc(l.queues, func(name string, _ *queue) bool {
+	maps.DeleteFunc(l.pools, func(name string, _ *pool) bool {
 		_, ok := cfg.Models[name]
 
 		return !ok
 	})
+
+	for name, q := range l.queues {
+		_, kept := cfg.Models[name]
+		q.retired = !kept
+		q.prune()
+	}
 
 	maps.DeleteFunc(l.clients, func(name string, _ *limiters) bool {
 		_, ok := cfg.Clients[name]

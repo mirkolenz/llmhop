@@ -17,7 +17,8 @@ The `model` is read from a JSON body or a `multipart/form-data` one, as `/v1/aud
 Unknown models return `404`, an invalid body or a missing `model` return `400`.
 `GET /v1/models` and `GET /v1/models/{model}` are answered from the config and never proxied, with every model's `metadata` as further members, such as `max_model_len`, or replacing `created`, which is `0`, and `owned_by`, which is `llmhop`.
 Model names may contain `/`, as in Hugging Face names such as `org/name`.
-A model's `aliases` are further names routed to it and listed beside it, as vLLM serves LoRA adapters.
+A model's `aliases` are further names routed to it and listed beside it, each forwarded verbatim, as vLLM serves LoRA adapters, or with the `model` of a JSON body replaced by the alias's `model`, as SGLang serves an adapter as `<served>:<adapter>`.
+A multipart body sent to such an alias gets `400`.
 A name ending in `*`, such as `openai/*`, is a wildcard routing every name it prefixes, the longest one winning over shorter ones but never over an exact name, and is not listed.
 
 A request under `/route/{model}/` is routed by path instead, with the prefix stripped and the body left unparsed, so `POST /route/production/detect` reaches `production` as `POST /detect`.
@@ -44,7 +45,7 @@ The key comes from the first of the `affinity` sources a request carries, which 
 
 `"affinity": []` disables affinity.
 
-`dataParallelSize`, at most 256, hashes keyed requests over the ranks of every URL and pins them through vLLM's `X-data-parallel-rank` header, which llmhop never takes from a client, so affinity also works across the data-parallel ranks of one vLLM server, which balances keyless requests itself.
+`dataParallelSize`, at most 256, hashes keyed requests over the ranks of every URL and pins them through the `X-Data-Parallel-Rank` header of vLLM and SGLang, which llmhop never takes from a client, so affinity also works across the data-parallel ranks of one server, which balances keyless requests itself.
 A server refusing a connection is avoided for `failoverSeconds`, by default 5, and a request with a body routed by its `model` moves on to the next server.
 
 ### Errors
@@ -53,7 +54,7 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
 
 | Status | Meaning                                                           |
 | ------ | ----------------------------------------------------------------- |
-| `400`  | an invalid body, a missing `model` or an unreadable body           |
+| `400`  | an invalid body, a missing `model`, an unreadable body, or a multipart body to an alias rewriting the `model` |
 | `401`  | missing or invalid bearer token, with `WWW-Authenticate: Bearer`   |
 | `403`  | a cross-site request or foreign host on a trusted socket          |
 | `404`  | unknown model                                                      |
@@ -78,7 +79,7 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
     },
     "qwen3-8b": {
       "urls": ["unix:///run/llmhop/vllm-qwen3-8b/http.sock"],
-      "aliases": ["qwen3-8b-sql"],
+      "aliases": { "qwen3-8b-sql": {} },
       "dataParallelSize": 4,
       "maxConcurrentRequests": 64,
       "queueTimeoutSeconds": 30

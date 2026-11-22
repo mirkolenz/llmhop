@@ -103,7 +103,7 @@ func TestCatalog(t *testing.T) {
 		"b":        {URLs: []string{backend.URL}},
 		"a":        {URLs: []string{backend.URL}},
 		"detector": {URLs: []string{backend.URL}, Unlisted: true},
-		"openai/*": {URLs: []string{backend.URL}, Aliases: []string{"c"}},
+		"openai/*": {URLs: []string{backend.URL}, Aliases: map[string]config.Alias{"c": {}}},
 	}})
 
 	t.Run("health needs no token and counts listed models", func(t *testing.T) {
@@ -596,7 +596,11 @@ func TestNames(t *testing.T) {
 	base, captured := startBackend(t)
 	remote, remoteCaptured := startBackend(t)
 	h := newRouter(t, &config.Config{Models: map[string]config.Model{
-		"base":     {URLs: []string{base.URL}, Aliases: []string{"base:lora"}, Metadata: map[string]jsontext.Value{"max_model_len": jsontext.Value("4096")}},
+		"base": {
+			URLs:     []string{base.URL},
+			Aliases:  map[string]config.Alias{"base:lora": {}, "sql": {Model: "base:sql"}},
+			Metadata: map[string]jsontext.Value{"max_model_len": jsontext.Value("4096")},
+		},
 		"openai/*": {URLs: []string{remote.URL}},
 	}})
 
@@ -605,12 +609,29 @@ func TestNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(got.Data) != 2 || string(got.Data[1]["id"]) != `"base:lora"` || string(got.Data[1]["max_model_len"]) != "4096" {
+	if len(got.Data) != 3 || string(got.Data[1]["id"]) != `"base:lora"` || string(got.Data[1]["max_model_len"]) != "4096" {
 		t.Fatalf("got models %v", got.Data)
 	}
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"base:lora"}`, ""); rec.Code != http.StatusOK || captured.body != `{"model":"base:lora"}` {
 		t.Fatalf("alias got status %d, backend saw %+v", rec.Code, captured)
+	}
+
+	if rec := send(t, h, http.MethodPost, "/", `{"n": {"model": 1}, "model" : "sql", "x": 2}`, ""); rec.Code != http.StatusOK || captured.body != `{"n": {"model": 1}, "model" : "base:sql", "x": 2}` {
+		t.Fatalf("rewriting alias got status %d, backend saw %+v", rec.Code, captured)
+	}
+
+	var form strings.Builder
+	writer := multipart.NewWriter(&form)
+	_ = writer.WriteField("model", "sql")
+	_ = writer.Close()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.String()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("multipart body of a rewriting alias got status %d", rec.Code)
 	}
 
 	if rec := send(t, h, http.MethodPost, "/", `{"model":"openai/gpt-5"}`, ""); rec.Code != http.StatusOK || remoteCaptured.body != `{"model":"openai/gpt-5"}` {

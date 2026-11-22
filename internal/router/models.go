@@ -68,9 +68,9 @@ func catalog(models map[string]config.Model) map[string]modelObject {
 			continue
 		}
 
-		ids := m.Aliases
+		ids := slices.Collect(maps.Keys(m.Aliases))
 		if _, wildcard := config.Pattern(name); !wildcard {
-			ids = append([]string{name}, ids...)
+			ids = append(ids, name)
 		}
 
 		for _, id := range ids {

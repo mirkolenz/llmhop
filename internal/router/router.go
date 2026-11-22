@@ -9,11 +9,13 @@ package router
 import (
 	"bytes"
 	"cmp"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -39,7 +41,7 @@ import (
 // served unauthenticated and unlogged. It is immutable, so a reload replaces
 // it, sharing the limits with the router it replaces.
 func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
-	rt := &routes{exact: make(map[string]*model), affinity: cfg.Affinity}
+	rt := &routes{exact: make(map[string]*model), rewrites: make(map[string]jsontext.Value), affinity: cfg.Affinity}
 	var models []*model
 
 	for name, m := range cfg.Models {
@@ -54,11 +56,16 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 			rt.exact[name] = md
 		}
 
-		for _, alias := range m.Aliases {
+		for alias, a := range m.Aliases {
 			rt.exact[alias] = md
+
+			if a.Model != "" {
+				// Quoting a string from valid JSON cannot fail.
+				rt.rewrites[alias], _ = jsontext.AppendQuote(nil, a.Model)
+			}
 		}
 
-		for _, n := range append([]string{name}, m.Aliases...) {
+		for _, n := range append(slices.Collect(maps.Keys(m.Aliases)), name) {
 			rt.segments = max(rt.segments, strings.Count(n, "/")+1)
 		}
 
@@ -97,6 +104,8 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 type routes struct {
 	// exact holds every model name and alias.
 	exact map[string]*model
+	// rewrites holds the encoded model name each rewriting alias forwards.
+	rewrites map[string]jsontext.Value
 	// patterns holds the wildcards, the longest prefix first.
 	patterns []pattern
 	// segments is the most path segments of an exact name, which bounds
@@ -158,7 +167,7 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) htt
 		if strings.HasPrefix(req.URL.Path, routePrefix) {
 			name, m = rt.routeModel(req.URL)
 		} else {
-			b := bodyModel(w, req, buffered)
+			b := bodyModel(w, req, buffered, rt.rewrites)
 			if b == nil {
 				return
 			}
@@ -221,12 +230,13 @@ type bufferedRequest struct {
 }
 
 // bodyModel buffers the body, charged to buffered, to read its "model"
-// field and returns the request carrying it as a replayBody, or writes an
-// error response and returns nil.
+// field, replaces that field with the name an alias rewrites it to, and
+// returns the request carrying the body as a replayBody, or writes an error
+// response and returns nil.
 //
 // Full buffering validates the entire JSON body before forwarding, which
 // also rejects a duplicate "model" that a backend might resolve differently.
-func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted) *bufferedRequest {
+func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Weighted, rewrites map[string]jsontext.Value) *bufferedRequest {
 	charged := &chargedReader{r: req.Body, budget: buffered}
 
 	body, err := readBody(w, charged)
@@ -248,7 +258,16 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Wei
 		return nil
 	}
 
-	name, invalid := modelField(req.Header.Get("Content-Type"), body)
+	name, span, invalid := modelField(req.Header.Get("Content-Type"), body)
+	if upstream, ok := rewrites[name]; ok && invalid == nil {
+		// A form would have to be rebuilt.
+		if span == nil {
+			invalid = errAliasRewrite
+		} else {
+			body = slices.Concat(body[:span[0]], upstream, body[span[1]:])
+		}
+	}
+
 	if invalid != nil {
 		charged.release()
 		writeError(w, http.StatusBadRequest, invalid.Code, invalid.Message)
@@ -275,26 +294,70 @@ func bodyModel(w http.ResponseWriter, req *http.Request, buffered *semaphore.Wei
 // maxModelField bounds the "model" field of a multipart body.
 const maxModelField = 4 << 10
 
-// modelField reads the "model" field of a JSON body, or of a multipart one
-// as uploads such as /v1/audio/transcriptions send, or describes why a body
-// lacks one.
-func modelField(contentType string, body []byte) (string, *apiErrorBody) {
+// modelField reads the "model" field of a JSON body with the span of its
+// value, or of a multipart one as uploads such as /v1/audio/transcriptions
+// send, without a span, or describes why a body lacks one.
+func modelField(contentType string, body []byte) (string, []int, *apiErrorBody) {
 	if mediaType, params, err := mime.ParseMediaType(contentType); err == nil && mediaType == "multipart/form-data" {
-		return multipartModel(multipart.NewReader(bytes.NewReader(body), params["boundary"]))
+		name, invalid := multipartModel(multipart.NewReader(bytes.NewReader(body), params["boundary"]))
+
+		return name, nil, invalid
 	}
 
-	var request struct {
-		Model *string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &request); err != nil {
-		return "", &apiErrorBody{Code: "invalid_json", Message: "invalid JSON request body"}
+	return jsonModel(body)
+}
+
+// jsonModel reads the "model" member of a JSON object in one pass, which
+// also validates the whole body and rejects duplicate members. The decoder
+// parses the buffer in place.
+func jsonModel(body []byte) (string, []int, *apiErrorBody) {
+	dec := jsontext.NewDecoder(bytes.NewBuffer(body))
+	if token, err := dec.ReadToken(); err != nil || token.Kind() != '{' {
+		return "", nil, errInvalidJSON
 	}
 
-	if request.Model == nil {
-		return "", errMissingModel
+	var model jsontext.Value
+	var end int
+
+	for dec.PeekKind() == '"' {
+		token, err := dec.ReadToken()
+		if err != nil {
+			return "", nil, errInvalidJSON
+		}
+
+		// Read before the value voids the token.
+		isModel := token.String() == "model"
+
+		value, err := dec.ReadValue()
+		if err != nil {
+			return "", nil, errInvalidJSON
+		}
+
+		if isModel {
+			model, end = value, int(dec.InputOffset())
+		}
 	}
 
-	return *request.Model, nil
+	if _, err := dec.ReadToken(); err != nil {
+		return "", nil, errInvalidJSON
+	}
+
+	if _, err := dec.ReadToken(); !errors.Is(err, io.EOF) {
+		return "", nil, errInvalidJSON
+	}
+
+	var name *string
+	if model != nil {
+		if err := json.Unmarshal(model, &name); err != nil {
+			return "", nil, errInvalidJSON
+		}
+	}
+
+	if name == nil {
+		return "", nil, errMissingModel
+	}
+
+	return *name, []int{end - len(model), end}, nil
 }
 
 // multipartModel reads the only "model" field of a form, which the whole
@@ -333,8 +396,10 @@ func multipartModel(r *multipart.Reader) (string, *apiErrorBody) {
 }
 
 var (
+	errInvalidJSON      = &apiErrorBody{Code: "invalid_json", Message: "invalid JSON request body"}
 	errMissingModel     = &apiErrorBody{Code: "missing_model", Message: "missing model"}
 	errInvalidMultipart = &apiErrorBody{Code: "invalid_multipart", Message: "invalid multipart request body or model field"}
+	errAliasRewrite     = &apiErrorBody{Code: "unsupported_alias_body", Message: "this alias rewrites the model of JSON bodies only"}
 )
 
 // readBody reads the whole body within bodyTimeout, growing the buffer as

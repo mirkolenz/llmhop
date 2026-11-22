@@ -26,9 +26,9 @@ type Model struct {
 	// URLs are the servers of the model, each an absolute http(s) URL or
 	// `unix:///<socket path>`, between which requests are balanced.
 	URLs []string `json:"urls"`
-	// Aliases are further names routed to the model and forwarded verbatim,
-	// such as the LoRA adapters a vLLM server serves under their own names.
-	Aliases []string          `json:"aliases,omitempty"`
+	// Aliases are further names routed to the model, such as its LoRA
+	// adapters, each forwarded verbatim or as the model name it rewrites to.
+	Aliases map[string]Alias  `json:"aliases,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
 	// Metadata adds members to the model's object in the models API,
 	// such as `max_model_len`, or replaces `created` and `owned_by`,
@@ -49,14 +49,22 @@ type Model struct {
 	// backend. Zero means unlimited.
 	ResponseTimeoutSeconds uint32 `json:"responseTimeoutSeconds,omitempty"`
 	// DataParallelSize is the number of data-parallel ranks of every URL,
-	// which requests with an affinity key are pinned to through vLLM's
-	// `X-data-parallel-rank` header, one by default.
+	// which requests with an affinity key are pinned to through the
+	// `X-Data-Parallel-Rank` header of vLLM and SGLang, one by default.
 	DataParallelSize uint `json:"dataParallelSize,omitempty"`
 	// FailoverSeconds is how long a server that refused a connection is
 	// avoided.
 	FailoverSeconds uint32 `json:"failoverSeconds"`
 	// HealthPath is the backend path GET /readiness probes. Empty skips the model.
 	HealthPath string `json:"healthPath,omitempty"`
+}
+
+// Alias is a further name of a model.
+type Alias struct {
+	// Model replaces the "model" of a JSON body routed by the alias, such as
+	// `<served>:<adapter>` for a LoRA adapter of SGLang. Empty forwards the
+	// body verbatim.
+	Model string `json:"model,omitempty"`
 }
 
 type Config struct {
@@ -299,7 +307,7 @@ func (cfg *Config) validate(load bool) error {
 		}
 
 		// Every name and alias routes to one model.
-		for _, alias := range model.Aliases {
+		for alias := range model.Aliases {
 			if _, ok := cfg.Models[alias]; ok {
 				return fmt.Errorf("models.%s.aliases: %q is already a model", name, alias)
 			}
@@ -332,9 +340,9 @@ func (m Model) validate(load bool) error {
 		}
 	}
 
-	for _, alias := range m.Aliases {
-		if _, wildcard := Pattern(alias); wildcard || !validModelName(alias) {
-			return fmt.Errorf("aliases: %q must be a model name without *", alias)
+	for name := range m.Aliases {
+		if _, wildcard := Pattern(name); wildcard || !validModelName(name) {
+			return fmt.Errorf("aliases: %q must be a model name without *", name)
 		}
 	}
 

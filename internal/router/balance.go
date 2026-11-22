@@ -23,7 +23,8 @@ import (
 	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
-// rankHeader pins a request to one data-parallel rank of a vLLM server.
+// rankHeader pins a request to one data-parallel rank of a vLLM or SGLang
+// server.
 const rankHeader = "X-Data-Parallel-Rank"
 
 // model is a configured model with the servers serving it. Its in-flight

@@ -82,7 +82,7 @@ let
           HOME = "/tmp";
         }
         // engine.implicitConfig.environment
-        // util.resolveCredentialRefs util.credentialDirectory cfg.fetch.credentials cfg.fetch.environment;
+        // util.systemdEnvironment cfg.fetch.credentials cfg.fetch.environment;
         serviceConfig =
           util.accountServiceConfig cfg
           // util.credentialServiceConfig cfg.fetch.credentials
@@ -93,7 +93,7 @@ let
             InaccessiblePaths = util.optionalPaths engine.implicitConfig.paths;
             ReadWritePaths = [ cache ];
             UMask = "0077";
-            EnvironmentFile = lib.optional (cfg.fetch.environmentFile != null) cfg.fetch.environmentFile;
+            EnvironmentFile = util.environmentFiles [ cfg.fetch ];
             ExecStart = pkgs.writeShellScript (fetchUnit workload) (fetchScript workload);
           };
       };

@@ -56,24 +56,6 @@ in
         '';
       };
 
-      environment = mkOption {
-        type = with types; attrsOf str;
-        default = { };
-        description = ''
-          Environment variables of the gateway. With `credentials`,
-          `''${cred:<name>}` expands to the path of one of them.
-        '';
-      };
-
-      environmentFile = mkOption {
-        type = with types; nullOr externalPath;
-        default = null;
-        description = ''
-          File outside the Nix store in `KEY=VALUE` format, loaded by
-          systemd or Podman and forwarded to the gateway.
-        '';
-      };
-
       settings = mkOption {
         type = with types; attrsOf json;
         default = { };
@@ -196,5 +178,15 @@ in
           exists, on port `8080` unless configured otherwise.
         '';
       };
+    }
+    // util.environmentOptions {
+      environment.description = ''
+        Environment variables of the gateway. With `credentials`,
+        `''${cred:<name>}` expands to the path of one of them.
+      '';
+      environmentFile.description = ''
+        File outside the Nix store in `KEY=VALUE` format, loaded by
+        systemd or Podman and forwarded to the gateway.
+      '';
     };
 }

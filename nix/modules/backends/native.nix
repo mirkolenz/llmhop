@@ -132,7 +132,10 @@ let
           // {
             ReadWritePaths = [ cache ];
             ReadOnlyPaths = hubDirectories workload;
-            EnvironmentFile = wl.environmentFiles cfg workload;
+            EnvironmentFile = util.environmentFiles [
+              cfg
+              workload
+            ];
             InaccessiblePaths =
               util.optionalPaths engine.implicitConfig.paths
               ++ lib.optionals workload.offline (

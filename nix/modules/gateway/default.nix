@@ -42,8 +42,6 @@ let
     else
       unchecked;
 
-  environmentFiles = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
-
   restart = {
     Restart = "on-failure";
     RestartSec = 5;
@@ -203,7 +201,7 @@ in
                 RefreshOnReload = "credentials";
                 Sockets = sockets;
                 SystemCallFilter = baseServiceConfig.SystemCallFilter ++ [ "~@resources" ];
-                EnvironmentFile = environmentFiles;
+                EnvironmentFile = util.environmentFiles [ cfg ];
                 ExecStart = utils.escapeSystemdExecArgs [
                   (lib.getExe cfg.package)
                   "serve"
@@ -261,7 +259,7 @@ in
                 containerConfigFile
               ];
               Environment = containerCredentials.resolve cfg.environment // containerCredentials.environment;
-              EnvironmentFile = environmentFiles;
+              EnvironmentFile = util.environmentFiles [ cfg ];
               Volume = [
                 "${file}:${containerConfigFile}:ro"
               ]

@@ -1,7 +1,7 @@
 # The mounts, user namespaces and images of Quadlet containers.
 lib:
 let
-  inherit (import ./credentials.nix lib) resolveCredentialRefs;
+  inherit (import ./credentials.nix lib) resolveCredentialRefs escapeSpecifiers;
 in
 rec {
   # Root of everything llmhop mounts into a container.
@@ -29,6 +29,15 @@ rec {
     };
     resolve = resolveCredentialRefs containerCredentialDirectory credentials;
   };
+
+  # The `Exec=` of `args` and the `Environment=` of `environment`, which
+  # Quadlet copies into the `ExecStart=` of `podman run`, where systemd
+  # would expand `%` specifiers and `$` variables in them.
+  containerExec = args: escapeExecStart (lib.escapeShellArgs args);
+  containerEnvironment = lib.mapAttrs (_: escapeExecStart);
+  escapeExecStart =
+    value:
+    if lib.isString value then lib.replaceStrings [ "$" ] [ "$$" ] (escapeSpecifiers value) else value;
 
   # The `[Container]` keys every container starts from, with the global
   # `services.llmhop.container.config` merged last by each. Podman isolates

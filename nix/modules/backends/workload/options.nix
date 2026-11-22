@@ -168,24 +168,6 @@ rec {
           A container's published port bypasses the firewall either way.
         '';
       };
-      environment = mkOption {
-        type = with types; attrsOf str;
-        default = { };
-        description = ''
-          Environment variables of this ${noun}'s server, over the backend's
-          `environment`, where `''${cred:<name>}` expands to the path of a
-          credential.
-        '';
-      };
-      environmentFile = mkOption {
-        type = with types; nullOr externalPath;
-        default = null;
-        description = ''
-          File in `KEY=VALUE` format forwarded to this ${noun}'s server,
-          loaded after the backend's `environmentFile`. Prefer `credentials`
-          for any secret the server can read from a file.
-        '';
-      };
       credentials = util.credentialsOption;
       offline = mkOption {
         type = types.bool;
@@ -212,5 +194,17 @@ rec {
           ${util.runtimeOnly "native"}
         '';
       };
+    }
+    // util.environmentOptions {
+      environment.description = ''
+        Environment variables of this ${noun}'s server, over the backend's
+        `environment`, where `''${cred:<name>}` expands to the path of a
+        credential.
+      '';
+      environmentFile.description = ''
+        File in `KEY=VALUE` format forwarded to this ${noun}'s server,
+        loaded after the backend's `environmentFile`. Prefer `credentials`
+        for any secret the server can read from a file.
+      '';
     };
 }

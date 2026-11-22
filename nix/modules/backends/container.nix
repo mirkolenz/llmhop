@@ -35,7 +35,7 @@ let
           // {
             Image = cfg.container.image;
             Entrypoint = lib.toJSON workload.command;
-            Exec = lib.escapeShellArgs (util.renderCliArgs engine (credentials.resolve workload.settings));
+            Exec = util.containerExec (util.renderCliArgs engine (credentials.resolve workload.settings));
             Notify = "healthy";
             StopTimeout = wl.stopTimeout cfg;
             HealthCmd = "curl --fail --silent --show-error http://127.0.0.1:${toString workload.port}${util.healthPath}";
@@ -49,8 +49,11 @@ let
             ]
             ++ workload.mounts
             ++ credentials.volumes;
-            EnvironmentFile = wl.environmentFiles cfg workload;
-            Environment =
+            EnvironmentFile = util.environmentFiles [
+              cfg
+              workload
+            ];
+            Environment = util.containerEnvironment (
               wl.serverEnvironment {
                 inherit
                   engine
@@ -60,7 +63,8 @@ let
                   ;
                 inherit (credentials) resolve;
               }
-              // credentials.environment;
+              // credentials.environment
+            );
           }
           // lib.optionalAttrs (workload.gpu != null) {
             AddDevice = workload.gpu.containerDevices;

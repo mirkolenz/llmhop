@@ -1,9 +1,14 @@
-# systemd credentials and the `${cred:…}` references to them.
+# systemd credentials, the `${cred:…}` references to them and the
+# environment of a service, where they expand.
 lib:
 let
   inherit (lib) mkOption types;
 in
 rec {
+  # The credential names llmhop accepts, a subset of those systemd accepts
+  # that needs no escaping in a unit, as in llmhop and llmhopctl.
+  credentialNamePattern = "[[:alnum:]_][[:alnum:]_.-]{0,254}";
+
   credentialsOption = mkOption {
     type = with types; attrsOf (nullOr externalPath);
     default = { };
@@ -13,12 +18,11 @@ rec {
     apply = lib.mapAttrs (
       name: source:
       if
-        lib.match "[[:alnum:]_][[:alnum:]_.-]{0,254}${lib.optionalString (source == null) "[*]?"}" name
-        != null
+        lib.match "${credentialNamePattern}${lib.optionalString (source == null) "[*]?"}" name != null
       then
         source
       else
-        throw "services.llmhop: `${name}` is not a valid systemd credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters. Only an imported one may end in `*`."
+        throw "services.llmhop: `${name}` is not a valid credential name. Start with an alphanumeric character or `_`, continue with those plus `.` and `-`, and stay within 255 characters. Only an imported one may end in `*`."
     );
     example = lib.literalExpression ''
       {
@@ -36,10 +40,38 @@ rec {
     '';
   };
 
+  # The `environment` and `environmentFile` options of a service, from the
+  # further `mkOption` arguments of each, such as its description.
+  environmentOptions =
+    { environment, environmentFile }:
+    {
+      environment = mkOption (
+        {
+          type = with types; attrsOf str;
+          default = { };
+        }
+        // environment
+      );
+      environmentFile = mkOption (
+        {
+          type = with types; nullOr externalPath;
+          default = null;
+        }
+        // environmentFile
+      );
+    };
+
+  # The set `environmentFile` of each of `configs`, later ones overriding
+  # the entries of earlier ones.
+  environmentFiles = lib.concatMap (
+    cfg: lib.optional (cfg.environmentFile != null) cfg.environmentFile
+  );
+
   # The `[Service]` settings granting `credentials`. `toString` keeps a path
   # value from being copied into the Nix store.
+  # systemd expands specifiers in the source path.
   credentialServiceConfig = credentials: {
-    LoadCredential = lib.mapAttrsToList (name: source: "${name}:${toString source}") (
+    LoadCredential = lib.mapAttrsToList (name: source: escapeSpecifiers "${name}:${toString source}") (
       lib.filterAttrs (_: source: source != null) credentials
     );
     ImportCredential = lib.attrNames (lib.filterAttrs (_: source: source == null) credentials);
@@ -78,15 +110,24 @@ rec {
   # `Environment=` as well.
   credentialDirectory = "%d";
 
-  # The `ExecStart=` of `command` with every `${cred:…}` resolved to systemd's
-  # `%d`. A placeholder survives `utils.escapeSystemdExecArgs`, which would
-  # turn `%d` into a literal, and is swapped for it afterwards.
-  execStart =
-    utils: credentials: command:
+  # `value` with every `${cred:…}` resolved to systemd's `%d` in the syntax
+  # of a unit setting that `escape` renders. A placeholder survives
+  # `escape`, which would turn `%d` into a literal, and is swapped for it
+  # afterwards.
+  resolveForSystemd =
+    escape: credentials: value:
     let
       credentialPlaceholder = "@llmhopCredentialsDirectory@";
     in
     lib.replaceStrings [ credentialPlaceholder ] [ credentialDirectory ] (
-      utils.escapeSystemdExecArgs (resolveCredentialRefs credentialPlaceholder credentials command)
+      escape (resolveCredentialRefs credentialPlaceholder credentials value)
     );
+
+  # The `ExecStart=` of `command`.
+  execStart = utils: resolveForSystemd utils.escapeSystemdExecArgs;
+
+  # The `Environment=` of `environment`, where systemd expands specifiers.
+  systemdEnvironment = credentials: lib.mapAttrs (_: resolveForSystemd escapeSpecifiers credentials);
+
+  escapeSpecifiers = lib.replaceStrings [ "%" ] [ "%%" ];
 }

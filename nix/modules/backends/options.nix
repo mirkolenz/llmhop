@@ -65,24 +65,6 @@ in
             `null` disables scheduled fetching.
           '';
         };
-        environment = mkOption {
-          type = with types; attrsOf str;
-          default = { };
-          example.HTTPS_PROXY = "http://proxy.example:3128";
-          description = ''
-            Environment variables set on every fetcher, such as a proxy. Values
-            may reference `fetch.credentials` as `''${cred:<name>}`.
-            The servers never see them.
-          '';
-        };
-        environmentFile = mkOption {
-          type = with types; nullOr externalPath;
-          default = null;
-          description = ''
-            File in `KEY=VALUE` format forwarded to every fetcher, for
-            variables that only exist as values.
-          '';
-        };
         hfTokenCredential = mkOption {
           type = with types; nullOr str;
           default = null;
@@ -103,6 +85,20 @@ in
             as `''${cred:<name>}`.
           '';
         };
+      }
+      // util.environmentOptions {
+        environment = {
+          example.HTTPS_PROXY = "http://proxy.example:3128";
+          description = ''
+            Environment variables set on every fetcher, such as a proxy. Values
+            may reference `fetch.credentials` as `''${cred:<name>}`.
+            The servers never see them.
+          '';
+        };
+        environmentFile.description = ''
+          File in `KEY=VALUE` format forwarded to every fetcher, for
+          variables that only exist as values.
+        '';
       };
       cache.directory = mkOption {
         type = types.externalPath;
@@ -114,25 +110,6 @@ in
           fetcher writes its `hub/`, which the server only reads. Point it at
           a data disk for large models. A container keeps its cache in the
           Podman volume of its unit instead. ${nativeOnly}
-        '';
-      };
-      environment = mkOption {
-        type = with types; attrsOf str;
-        default = { };
-        description = ''
-          Environment variables set on every server, under the `environment`
-          of each workload, where `''${cred:<name>}` expands to the path of a
-          credential.
-        '';
-      };
-      environmentFile = mkOption {
-        type = with types; nullOr externalPath;
-        default = null;
-        example = "/etc/${name}/.env";
-        description = ''
-          File in `KEY=VALUE` format forwarded to every server, loaded before
-          the `environmentFile` of each workload. Prefer `credentials` for any
-          secret a server can read from a file.
         '';
       };
       modelSettings = mkOption {
@@ -247,6 +224,21 @@ in
           hardened system service beside its fetcher `${name}-<name>-fetch`,
           otherwise a container, whose units
           `virtualisation.quadlet.containers.<unit>` override.
+        '';
+      };
+    }
+    // util.environmentOptions {
+      environment.description = ''
+        Environment variables set on every server, under the `environment`
+        of each workload, where `''${cred:<name>}` expands to the path of a
+        credential.
+      '';
+      environmentFile = {
+        example = "/etc/${name}/.env";
+        description = ''
+          File in `KEY=VALUE` format forwarded to every server, loaded before
+          the `environmentFile` of each workload. Prefer `credentials` for any
+          secret a server can read from a file.
         '';
       };
     }

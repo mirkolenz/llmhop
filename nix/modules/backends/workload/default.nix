@@ -86,12 +86,6 @@ lib.mergeAttrsList (
     }
     // resolve (cfg.environment // workload.environment);
 
-  # The backend-wide file first, so the per-workload one overrides its entries.
-  environmentFiles =
-    cfg: workload:
-    lib.optional (cfg.environmentFile != null) cfg.environmentFile
-    ++ lib.optional (workload.environmentFile != null) workload.environmentFile;
-
   # Seconds a stopped server of the backend `cfg` has to drain its requests
   # and exit before it is killed.
   stopTimeout = cfg: cfg.shutdownTimeoutSeconds + 10;

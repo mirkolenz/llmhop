@@ -30,10 +30,18 @@ let
   etcConfigFile = "llmhop/config.json";
   configFile = "/etc/${etcConfigFile}";
 
+  # `settings` without the options left `null`, while the nulls in the
+  # metadata of a model are JSON values.
+  settings = util.withoutNulls cfg.settings // {
+    models = lib.mapAttrs (
+      _: model:
+      util.withoutNulls model // lib.optionalAttrs (model.metadata != null) { inherit (model) metadata; }
+    ) cfg.settings.models;
+  };
   # The config file of `settings`, validated by `package` itself, so a typo
   # fails the build instead of the service. Secret references stay
   # unexpanded, since what they name does not exist in a build sandbox.
-  unchecked = (pkgs.formats.json { }).generate "llmhop.json" (util.withoutNulls cfg.settings);
+  unchecked = (pkgs.formats.json { }).generate "llmhop.json" settings;
   file =
     if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
       pkgs.runCommandLocal "llmhop.json" { } ''

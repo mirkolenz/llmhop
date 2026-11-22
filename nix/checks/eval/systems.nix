@@ -269,7 +269,7 @@ rec {
       } overrides
     );
   routable = mkRoutable { };
-  routedModels = routable.services.llmhop.gateway.settings.models;
+  routedModels = util.withoutNulls routable.services.llmhop.gateway.settings.models;
   # A policy, a client on its listener, set zeros, a
   # metrics port and no `default` listener.
   policed = mkRoutable {

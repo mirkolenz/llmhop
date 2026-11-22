@@ -142,7 +142,8 @@ The `metrics` listener is a unix socket of the group `wheel` on NixOS, set by `n
 A credential holds only the key, policy and expiry, which rotate together, so llmhopctl checks the policy against the config itself, while limits belong to policies.
 Every client credential is named `llmhop.api-key.<client>`, a fixed prefix that llmhop and llmhopctl share without a per-entry policy, and the gateway imports it as the glob `llmhop.api-key.*`.
 
-`settings` is a freeform submodule, as in RFC 42, whose typed options for `defaults`, `policies`, `clients` and `clientCredentials` share one set of policy fields, beside typed `models`, into which every workload merges.
+`settings` types every field of llmhop's config without a freeform type, since llmhop rejects unknown keys and ships with the module, so a typo fails evaluation rather than the build.
+`defaults`, `policies` and `clients` share one set of policy fields, and every workload merges into `models`.
 Each defaults to `null` and is left out of the config while unset, since llmhop counts a field present in the JSON as set, even `0`, `{}` or `[]`, which replaces the layers below it.
 `llmhop check` rejects a client whose `listener` names no unix socket, since `settings.listen` renders the port or socket of every listener.
 

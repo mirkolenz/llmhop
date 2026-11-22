@@ -258,23 +258,28 @@
         "hf download example/llama"
         "hf download example/llama-lora"
       ] routable.systemd.services.sglang-llama-fetch.serviceConfig.ExecStart.text;
-      routed = lib.mapAttrs (_: model: {
-        inherit (model) aliases dataParallelSize;
-      }) routedModels;
+      routed = routedModels;
       kernels = routable.systemd.services.sglang-llama.environment.SGLANG_USE_SGL_FA3_KERNEL;
     };
     expected = {
       vllm = true;
       sglang = true;
       fetched = true;
+      # Unset fields stay out of the config.
       routed = {
         qwen = {
+          urls = [ "http://127.0.0.1:24001" ];
           aliases.qwen-sql = { };
+          unlisted = false;
           dataParallelSize = 2;
+          healthPath = "/health";
         };
         llama = {
+          urls = [ "http://127.0.0.1:24002" ];
           aliases.llama-sql.model = "llama:llama-sql";
+          unlisted = false;
           dataParallelSize = 4;
+          healthPath = "/health";
         };
       };
       kernels = "1";
@@ -309,7 +314,7 @@
   # ports.
   testListeners = {
     expr = {
-      inherit (policed.services.llmhop.gateway.settings) listen;
+      listen = util.withoutNulls policed.services.llmhop.gateway.settings.listen;
       names = lib.mapAttrs (_: unit: unit.socketConfig.FileDescriptorName) (
         lib.filterAttrs (name: _: lib.hasPrefix "llmhop-" name) policed.systemd.sockets
       );

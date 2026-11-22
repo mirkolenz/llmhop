@@ -260,7 +260,7 @@ The `default` listener serves `127.0.0.1:8080`, the `metrics` listener serves th
 Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
 Natively, a changed config reloads the gateway in place, without dropping a request.
 Reference secrets in `settings` as `${cred:name}` and grant them through `credentials`.
-`settings` declares typed options for `defaults`, `policies`, `clients`, `clientCredentials` and `models`, into which every workload merges, checked at evaluation time, which stay out of the config while `null`, and passes every other key through:
+`settings` declares a typed option for every field of the config, checked at evaluation time, which stays out of the config while `null`, and every workload merges into `models`:
 
 ```nix
 services.llmhop.gateway.settings = {

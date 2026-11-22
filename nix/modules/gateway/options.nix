@@ -61,6 +61,29 @@ let
       expiresAt = field types.str "RFC 3339 time after which the client is rejected.";
     };
   };
+  model = types.submodule {
+    options = {
+      urls = mkOption {
+        type = types.nonEmptyListOf types.str;
+        example = [ "http://127.0.0.1:8001" ];
+        description = "Servers of the model, each an absolute `http(s)` URL or `unix:///<socket path>`, between which requests are balanced.";
+      };
+      aliases = field (types.attrsOf (
+        types.submodule {
+          options.model = field types.str "`model` a JSON body routed by the alias is rewritten to, or `null` to forward it verbatim.";
+        }
+      )) "Further names routed to the model and listed beside it, such as its LoRA adapters.";
+      headers = field (types.attrsOf types.str) "Headers of every request to the model, applied last, with secret references such as `\${cred:<name>}`.";
+      metadata = field (types.attrsOf types.json) "Members of the model's object in the models API, such as `max_model_len`, or replacing `created` and `owned_by`.";
+      unlisted = field types.bool "Whether the model is routed but left out of the models API, such as a watermark detector.";
+      maxConcurrentRequests = field types.ints.u32 "Requests in flight over all `urls`, beyond which a request waits in the model's queue, `0` meaning no limit.";
+      queueTimeoutSeconds = field types.ints.u32 "Seconds a request waits for a free slot before it gets `429`, `0` rejecting it at once.";
+      responseTimeoutSeconds = field types.ints.u32 "Seconds a server may take until its response headers, before the request gets `504`, `0` meaning no limit.";
+      dataParallelSize = field (types.ints.between 1 256) "Data-parallel ranks of every URL, which requests with an affinity key are pinned to.";
+      failoverSeconds = field types.ints.u32 "Seconds a server is avoided after it refused a connection or failed three requests in a row, `5` by default.";
+      healthPath = field types.str "Path that readiness and `llmhop_backend_up` probe on every URL, or `null` to skip the model.";
+    };
+  };
 in
 {
   options.services.llmhop.gateway =
@@ -105,7 +128,6 @@ in
 
       settings = mkOption {
         type = types.submodule {
-          freeformType = with types; attrsOf json;
           options = {
             defaults = field policy ''
               Policy below every client and its `policy`, which alone limits
@@ -118,7 +140,16 @@ in
               `/llmhop/health`, `/llmhop/readiness` and the metrics requires one.
             '';
             listen = mkOption {
-              type = with types; attrsOf (attrsOf json);
+              type = types.attrsOf (
+                types.submodule {
+                  options = {
+                    host = field types.str "IP address `port` is bound to, every interface if empty.";
+                    port = field types.port "TCP port of the listener.";
+                    socket = field types.str "Unix socket of the listener.";
+                    metrics = field types.bool "Whether the listener serves the metrics without a key.";
+                  };
+                }
+              );
               readOnly = true;
               default = lib.mapAttrs (
                 _: listener:
@@ -143,6 +174,21 @@ in
                 read.
               '';
             };
+            models = mkOption {
+              type = types.attrsOf model;
+              default = { };
+              description = ''
+                Models by the name clients send, into which every workload of
+                the backends merges.
+              '';
+            };
+            maxBodyBytes = field types.ints.unsigned "Size of a request body, beyond which it gets `413`, 100 MiB by default, `0` meaning no limit.";
+            maxBufferedBytes = field types.ints.unsigned "Bytes of all bodies held in memory at once to read their `model`, beyond which a request gets `503`, 1 GiB by default, `0` meaning no limit.";
+            corsOrigins = field (types.listOf types.str) ''
+              Origins whose pages may call the API with a bearer key, such as
+              `https://chat.example`, or only `*` for every origin, which
+              requires `clients` or `clientCredentials`.
+            '';
             clientCredentials = field types.bool ''
               Whether every credential `llmhop.api-key.<client>` of the
               system credential store becomes the client `<client>`, unless
@@ -164,9 +210,8 @@ in
         description = ''
           llmhop's JSON config, validated at build time by the binary itself,
           with every workload of the backends as a model. Its `listen` comes
-          from the listeners of the gateway. Every key without an
-          option of its own is passed through as is, while an option left
-          `null` stays out of the config.
+          from the listeners of the gateway. An option left `null` stays out
+          of the config, so llmhop's default applies.
         '';
       };
 

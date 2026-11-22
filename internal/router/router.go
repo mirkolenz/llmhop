@@ -1,9 +1,9 @@
 // Package router builds the HTTP handler that authenticates incoming
 // requests, serves the OpenAI models API from the configured models and
 // forwards every other request through a per-model reverse proxy with
-// injected headers, selected by the /route/{model} path prefix or the
-// "model" field of a JSON or multipart body, and balanced over the servers
-// of the model.
+// injected headers, selected by the /llmhop/proxy/{model}/ path
+// prefix or the "model" field of a JSON or multipart body, and balanced over
+// the servers of the model.
 package router
 
 import (
@@ -63,7 +63,6 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 		models = append(models, md)
 	}
 
-	mux.Handle("/", rt.proxyHandler(cfg.MaxBodyBytes, limits.semaphore("maxBufferedBytes", cfg.MaxBufferedBytes)))
 	for name := range rt.models.exact {
 		rt.segments = max(rt.segments, strings.Count(name, "/")+1)
 	}
@@ -72,6 +71,8 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 	buffered := limits.bufferBudget(cfg.MaxBufferedBytes)
 	mux := http.NewServeMux()
 	registerModels(mux, objects)
+	mux.Handle("/", rt.proxyHandler(cfg.MaxBodyBytes, buffered, false))
+	mux.Handle(proxyPrefix, rt.proxyHandler(cfg.MaxBodyBytes, buffered, true))
 
 	auth := newAuthenticator(cfg, limits)
 	api := auth.wrap(mux)
@@ -80,13 +81,23 @@ func New(cfg *config.Config, limits *Limits) (http.Handler, error) {
 		api = auth.cors(cfg.CORSOrigins, api)
 	}
 
+	logged := logRequests(api, &limits.metrics)
 	root := http.NewServeMux()
 	registerHealth(root, len(objects))
 	registerReadiness(root, models)
-	root.Handle("/", logRequests(api))
+	root.Handle(proxyPrefix, logged)
+	root.HandleFunc(reservedPrefix, notFound)
+	root.Handle("/", logged)
 
 	return root, nil
 }
+
+// reservedPrefix starts the paths of llmhop's own API, which no backend
+// receives as they are.
+const reservedPrefix = "/llmhop/"
+
+// proxyPrefix starts the paths of the proxy to any path of a model.
+const proxyPrefix = reservedPrefix + "proxy/"
 
 // routes resolves a model name to its model.
 type routes struct {
@@ -101,21 +112,18 @@ type routes struct {
 	limits   *Limits
 }
 
-// routePrefix starts path-routed requests, chosen so it cannot collide with
-// OpenAI paths such as GET /v1/models/{model}.
-const routePrefix = "/route/"
-
 // bodyTimeout bounds reading a body buffered for its "model" field,
 // so a slow client cannot hold buffered bytes for long.
 const bodyTimeout = time.Minute
 
-// proxyHandler forwards each request to the model named by its
-// /route/{model} path prefix, which is stripped and the body streamed,
-// or else by the "model" field of its body, which is buffered within the
-// `buffered` budget until the backend starts its response. The concurrency
-// limit applies only once the model is resolved, so a saturated model never
-// blocks requests to another.
-func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) http.HandlerFunc {
+// proxyHandler forwards each request to the model named by the "model"
+// field of its body, which is buffered within the `buffered` budget until
+// the backend starts its response and edited for the policy of its client
+// and the usage of a stream, or if routed by its path, which is stripped up
+// to its proxy segment and the body streamed verbatim. The limits apply only
+// once the model is resolved, so a saturated model never blocks requests to
+// another.
+func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, routed bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if maxBytes > 0 {
 			if req.ContentLength > maxBytes {
@@ -132,7 +140,7 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) htt
 		var b *bufferedBody
 		var obj *object
 
-		if strings.HasPrefix(req.URL.Path, routePrefix) {
+		if routed {
 			name, m = rt.routeModel(req.URL)
 		} else {
 			if b = buffer(w, req, buffered); b == nil {
@@ -209,13 +217,13 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted) htt
 	}
 }
 
-// routeModel resolves the model of a /route/<model>/<path> URL and strips
-// the prefix and model from it. The longest model name wins, and a name with
-// `/` may be written raw or with `%2F`. The remainder keeps its escapes. An
-// unknown model is reported as its first segment. Wildcards do not apply,
-// since they leave the end of the name open.
+// routeModel resolves the model of a /llmhop/proxy/{model}/{path} URL and
+// strips all but the path from it, keeping its escapes. The model is the
+// longest name starting the escaped path, where a name with `/` may be
+// written raw or with `%2F`, and an unknown model is reported as the first
+// segment. Wildcards do not apply, since they leave the end of the name open.
 func (rt *routes) routeModel(u *url.URL) (string, *model) {
-	segments := strings.Split(strings.TrimPrefix(u.EscapedPath(), routePrefix), "/")
+	segments := strings.Split(strings.TrimPrefix(u.EscapedPath(), proxyPrefix), "/")
 
 	for n := min(len(segments), rt.segments); n > 0; n-- {
 		name, err := url.PathUnescape(strings.Join(segments[:n], "/"))

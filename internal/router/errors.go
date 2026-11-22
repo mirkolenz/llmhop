@@ -42,3 +42,8 @@ func errorType(status int) string {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, jsonBody(apiError{apiErrorBody{Message: message, Type: errorType(status), Code: code}}))
 }
+
+// notFound answers a path that llmhop does not serve.
+func notFound(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusNotFound, "not_found", "unknown path")
+}

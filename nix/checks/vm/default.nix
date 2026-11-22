@@ -154,9 +154,9 @@ testers.nixosTest {
       start_all()
       machine.wait_for_unit("llmhop.service")
 
-          assert json.loads(machine.succeed("curl -fsS http://127.0.0.1:8080/health")) == {"status": "ok", "models": 2}
-          machine.succeed("curl -fsS --unix-socket /run/llmhop/local.sock http://localhost/health")
       with subtest("both listeners serve health without a key"):
+          assert json.loads(machine.succeed("curl -fsS http://127.0.0.1:8080/llmhop/health")) == {"status": "ok", "models": 2}
+          machine.succeed("curl -fsS --unix-socket /run/llmhop/local.sock http://localhost/llmhop/health")
 
       with subtest("the imported client key is required"):
           machine.fail(curl())
@@ -171,8 +171,8 @@ testers.nixosTest {
           machine.succeed("systemctl restart llmhop-default.socket")
           # The restart of the service it is part of runs after the socket's returns.
           machine.wait_for_unit("llmhop.service")
-          machine.succeed("curl --max-time 5 -fsS http://127.0.0.1:8080/health")
-          machine.succeed("curl --max-time 5 -fsS --unix-socket /run/llmhop/local.sock http://localhost/health")
+          machine.succeed("curl --max-time 5 -fsS http://127.0.0.1:8080/llmhop/health")
+          machine.succeed("curl --max-time 5 -fsS --unix-socket /run/llmhop/local.sock http://localhost/llmhop/health")
 
       with subtest("a loading model holds its unit in activating after its fetch"):
           machine.succeed("systemctl start --no-block llama-cpp-fake-model")
@@ -273,7 +273,7 @@ testers.nixosTest {
           assert containers.get_unit_property("llmhop", "ActiveState") == "inactive"
 
       with subtest("readiness probes every worker"):
-          machine.fail("curl -fsS http://127.0.0.1:8080/readiness")
+          machine.fail("curl -fsS http://127.0.0.1:8080/llmhop/readiness")
 
       with subtest("the hub sandbox lets even root write only the hub and reach no socket"):
           machine.succeed("systemctl start jail-probe")

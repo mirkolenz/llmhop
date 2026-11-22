@@ -48,12 +48,12 @@ func writeJSON(w http.ResponseWriter, status int, body []byte) {
 	_, _ = w.Write(body)
 }
 
-// registerHealth wires GET /health. The catalog is immutable after startup, so
+// registerHealth wires GET /llmhop/health. The catalog is immutable after startup, so
 // the response is built once and reused.
 func registerHealth(mux *http.ServeMux, models int) {
 	body := jsonBody(health{Status: "ok", Models: models})
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET "+reservedPrefix+"health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, body)
 	})
 }

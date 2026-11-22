@@ -22,14 +22,21 @@ A model's `aliases` are further names routed to it and listed beside it, each fo
 A multipart body sent to such an alias gets `400`.
 A name ending in `*`, such as `openai/*`, is a wildcard routing every name it prefixes, the longest one winning over shorter ones but never over an exact name, and is not listed.
 
-A request under `/route/{model}/` is routed by path instead, with the prefix stripped and the body left unparsed, so `POST /route/production/detect` reaches `production` as `POST /detect`.
+llmhop reserves the prefix `/llmhop/` for its own routes and answers an unknown path below it with `404`, while every other path passes through unchanged, so the APIs of the engines outside `/v1/`, such as `/tokenize`, keep working.
+
+| Path                              | Key    | Purpose                                                        |
+| --------------------------------- | ------ | -------------------------------------------------------------- |
+| every path outside `/llmhop/`     | client | requests routed by their `model`, and the models API            |
+| `GET /llmhop/health`              | none   | `{ "status": "ok", "models": 3 }`, the listed models and aliases |
+| `GET /llmhop/readiness`           | none   | the readiness of the backends                                  |
+| `/llmhop/proxy/{model}/{path}`    | client | any path of the backend of a model, with the prefix stripped    |
+
+A request under `/llmhop/proxy/{model}/` is routed by its path, with the prefix stripped and the body left unparsed, for requests without a `model` in their body.
 The longest configured model name or alias that prefixes the path wins, wildcards do not apply, and a `/` in a model name may be written raw or as `%2F`.
 A model marked `"unlisted": true` is routed but left out of the models API, which suits services such as a watermark detector.
 
 Every other request gets an `X-Request-Id`, unless it carries one, which reaches the backend and the response, and is logged once answered with its model, server, status, size, duration and the name of its auth token.
-`GET /health` returns `{ "status": "ok", "models": 3 }` with the number of listed models and aliases.
-`GET /readiness` probes the `healthPath` on every URL of every model that sets one and answers `200` only if every such model has a URL responding `2xx`, else `503`, so a restarting replica keeps llmhop ready.
-Both never require a token and are not logged.
+Health, readiness and metrics never require a key and are not logged.
 LLMhop sends `READY=1` to systemd once its listeners are bound, reloads its config on `SIGHUP`, keeping the current one if the new one fails, and drains in-flight requests on `SIGTERM` or `SIGINT`.
 A reload applies everything but `listen`, while requests in flight finish on the config they started with.
 
@@ -56,9 +63,9 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
 | Status | Meaning                                                           |
 | ------ | ----------------------------------------------------------------- |
 | `400`  | an invalid body, a missing `model`, an unreadable body, or a multipart body to an alias rewriting the `model` |
-| `404`  | unknown model                                                      |
 | `401`  | missing, invalid or expired key, with `WWW-Authenticate: Bearer`   |
 | `403`  | a model the client may not use, or a cross-site request or foreign host on the listener of a client |
+| `404`  | unknown model, or an unknown path below `/llmhop/`                 |
 | `408`  | the body did not arrive within a minute                            |
 | `413`  | the body exceeds `maxBodyBytes`                                    |
 | `429`  | the model or client reached `maxConcurrentRequests`, with `Retry-After: 1`, or a rate limit of the client, with `Retry-After` |
@@ -497,4 +504,4 @@ Its `settings` are SGLang's watermark config without `key` and `key_b`, such as 
 The engines differ in their algorithms, so each detector only detects the watermarks of its own backend.
 A detector reports the most significant profile with its Bonferroni-corrected `p_value`, `score`, `num_scored_tokens` and `is_watermarked`.
 To rotate a key, provision it under a new credential name and keep a profile with the old one while old text still needs checking.
-The gateway routes detectors as unlisted models, as in `POST /route/production/detect`.
+The gateway routes detectors as unlisted models by the `model` of the body, as in `POST /detect` with `{"model": "production", "text": "..."}`, since a detector ignores the `model`, or else by path, as in `POST /llmhop/proxy/production/detect`.

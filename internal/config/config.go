@@ -60,7 +60,8 @@ type Model struct {
 	// FailoverSeconds is how long a server that refused a connection is
 	// avoided.
 	FailoverSeconds uint32 `json:"failoverSeconds"`
-	// HealthPath is the backend path GET /readiness probes. Empty skips the model.
+	// HealthPath is the backend path that GET /llmhop/readiness and the
+	// metrics probe. Empty skips the model.
 	HealthPath string `json:"healthPath,omitempty"`
 }
 

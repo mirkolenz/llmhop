@@ -114,7 +114,7 @@ func TestCatalog(t *testing.T) {
 
 	t.Run("health needs no token and counts listed models", func(t *testing.T) {
 		var got health
-		if err := json.Unmarshal(send(t, h, http.MethodGet, "/health", "", "").Body.Bytes(), &got); err != nil {
+		if err := json.Unmarshal(send(t, h, http.MethodGet, "/llmhop/health", "", "").Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
 
@@ -304,7 +304,7 @@ func TestPathRouting(t *testing.T) {
 		"detector": {URLs: []string{backend.URL + "/base"}, Unlisted: true},
 	}})
 
-	if rec := send(t, h, http.MethodPost, "/route/detector/detect?x=1", `{"text":"candidate"}`, "Bearer secret"); rec.Code != http.StatusOK {
+	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/detector/detect?x=1", `{"text":"candidate"}`, "Bearer secret"); rec.Code != http.StatusOK {
 		t.Fatalf("got status %d", rec.Code)
 	}
 
@@ -312,8 +312,10 @@ func TestPathRouting(t *testing.T) {
 		t.Fatalf("backend saw %+v", captured)
 	}
 
-	if rec := send(t, h, http.MethodPost, "/route/nope/detect", "", "Bearer secret"); rec.Code != http.StatusNotFound {
-		t.Fatalf("got status %d", rec.Code)
+	for _, path := range []string{"/llmhop/proxy/nope/detect", "/llmhop/models/detector/proxy/detect"} {
+		if rec := send(t, h, http.MethodPost, path, "", "Bearer secret"); rec.Code != http.StatusNotFound {
+			t.Fatalf("%s got status %d", path, rec.Code)
+		}
 	}
 }
 
@@ -328,7 +330,7 @@ func TestSlashModelNames(t *testing.T) {
 		t.Fatalf("retrieve got status %d", rec.Code)
 	}
 
-	for _, path := range []string{"/route/org/name/a%2Fb?x=1", "/route/org%2Fname/a%2Fb?x=1"} {
+	for _, path := range []string{"/llmhop/proxy/org/name/a%2Fb?x=1", "/llmhop/proxy/org%2Fname/a%2Fb?x=1"} {
 		if rec := send(t, h, http.MethodPost, path, "{}", ""); rec.Code != http.StatusOK {
 			t.Fatalf("%s got status %d", path, rec.Code)
 		}
@@ -338,7 +340,7 @@ func TestSlashModelNames(t *testing.T) {
 		}
 	}
 
-	if rec := send(t, h, http.MethodPost, "/route/org/other", "{}", ""); rec.Code != http.StatusOK || captured.path != "/short/other" {
+	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/org/other", "{}", ""); rec.Code != http.StatusOK || captured.path != "/short/other" {
 		t.Fatalf("shorter name got status %d, backend saw %+v", rec.Code, captured)
 	}
 
@@ -366,7 +368,6 @@ func TestBodyLimit(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", c.body)
 			req.ContentLength = c.contentLength
 			rec := httptest.NewRecorder()
-			(&routes{}).proxyHandler(c.maxBytes, newSemaphore(0))(rec, req)
 			h.ServeHTTP(rec, req)
 
 			if rec.Code != c.wantCode {
@@ -442,8 +443,8 @@ func TestReadiness(t *testing.T) {
 
 	check := func(wantCode int, want readiness) {
 		t.Helper()
-		rec := send(t, h, http.MethodGet, "/readiness", "", "")
 		h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: models})
+		rec := send(t, h, http.MethodGet, "/llmhop/readiness", "", "")
 
 		var got readiness
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -499,7 +500,7 @@ func TestBufferedBytesLimit(t *testing.T) {
 	}
 
 	// Path-routed bodies stream, so they need no budget.
-	if rec := send(t, h, http.MethodPost, "/route/m/", "{}", ""); rec.Code != http.StatusOK {
+	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/m/", "{}", ""); rec.Code != http.StatusOK {
 		t.Errorf("streamed request got status %d, want 200", rec.Code)
 	}
 
@@ -651,7 +652,7 @@ func TestNames(t *testing.T) {
 		t.Fatalf("wildcard got status %d, backend saw %+v", rec.Code, remoteCaptured)
 	}
 
-	if rec := send(t, h, http.MethodPost, "/route/openai/gpt-5/x", "", ""); rec.Code != http.StatusNotFound {
+	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/openai/gpt-5/x", "", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("path-routed wildcard got status %d", rec.Code)
 	}
 }

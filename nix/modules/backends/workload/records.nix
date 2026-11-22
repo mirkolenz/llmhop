@@ -1,5 +1,10 @@
-# The records of the enabled workloads of a backend, of the type of
-# `record.nix`, which every unit, the gateway and the assertions read.
+# The records of the enabled workloads of a backend, which every unit, the
+# gateway and the assertions read: `key`, `name`, `unit`, `owner`,
+# `description`, `port`, `host`, `socket`, `exposed`, `offline`,
+# `openFirewall`, `package`, `fetches`, `repositories`, `command`,
+# `settings`, `credentials`, `environment`, `environmentFile`, `mounts`,
+# `aliases`, `dataParallelSize`, `unlisted`, `gpu`, null for a detector, and
+# `assertions`.
 lib:
 let
   util = import ../../lib lib;
@@ -96,7 +101,8 @@ rec {
 
       # The record of `workload`, declared under `<collection>.<key>`, from
       # the fields `rest` of its kind, its settings `forced` and the flags
-      # `reserved` beside them, which `settings` must not set either.
+      # `reserved` beside them, which `settings` must not set either, and
+      # the `watermarks` whose keys it reads.
       record =
         {
           collection,
@@ -105,6 +111,7 @@ rec {
           workload,
           forced,
           reserved ? [ ],
+          watermarks ? [ ],
           assertions ? [ ],
         }:
         rest:
@@ -131,10 +138,10 @@ rec {
           description = "${engine.displayName} ${noun} ${workload.name}";
           exposed = exposed workload;
           settings = workload.settings // forced;
+          credentials = keyCredentials watermarks // workload.credentials;
           aliases = { };
           dataParallelSize = 1;
           unlisted = false;
-          chained = false;
           gpu = null;
           assertions = [
             (util.firewallAssertion owner workload)
@@ -159,9 +166,7 @@ rec {
             {
               # It would enter the Nix store and the command line.
               assertion =
-                !lib.any (
-                  watermark: lib.any (key: watermark.settings ? ${key}) engine.watermark.keys
-                ) rest.watermarks;
+                !lib.any (watermark: lib.any (key: watermark.settings ? ${key}) engine.watermark.keys) watermarks;
               message = "services.llmhop: `${owner}` configures a watermark key inline, which its `credential` provides.";
             }
           ]
@@ -172,9 +177,8 @@ rec {
       model =
         { key, workload }:
         let
-          watermarks = map normalize (lib.optional ((workload.watermark or null) != null) workload.watermark);
-          watermark = lib.head watermarks;
-          marked = watermarks != [ ];
+          watermark = lib.mapNullable normalize (workload.watermark or null);
+          marked = watermark != null;
           loras = engine.loras != null && workload.loras != { };
           aliases = lib.optionalAttrs loras (
             lib.mapAttrs (adapter: _: engine.loras.alias workload adapter) workload.loras
@@ -189,6 +193,7 @@ rec {
             collection = "models";
             noun = "model";
             reserved = watermarkFlags;
+            watermarks = lib.optional marked watermark;
             forced =
               listener engine.socketSettings workload
               // engine.modelSettings workload
@@ -209,35 +214,35 @@ rec {
               }
             ];
           }
-          {
-            inherit watermarks aliases;
-            repositories =
-              lib.optional (util.isRepository workload.model) (
-                repository engine workload.model (workload.revision or null)
-              )
-              ++ map (repo: repository engine repo null) (
-                workload.extraRepositories ++ lib.optionals loras (lib.attrValues workload.loras)
-              );
-            credentials = keyCredentials watermarks // workload.credentials;
-            command =
-              (
-                if wrapped then
-                  scriptCommand workload.package script [ "serve" ]
-                else if native then
-                  engine.command.native workload.package
-                else
-                  engine.command.container
-              )
-              ++ engine.positional workload;
-            mounts = lib.optionals wrapped (scriptMounts script);
-            dataParallelSize = workload.dataParallelSize or 1;
-            chained = true;
-            gpu = {
-              nativeDevices = workload.native.devices;
-              containerDevices = workload.container.devices;
-              inherit (workload.container) shmSize;
-            };
-          };
+          (
+            {
+              inherit aliases;
+              repositories =
+                lib.optional (util.isRepository workload.model) (
+                  repository engine workload.model (workload.revision or null)
+                )
+                ++ map (repo: repository engine repo null) (
+                  workload.extraRepositories ++ lib.optionals loras (lib.attrValues workload.loras)
+                );
+              command =
+                (
+                  if wrapped then
+                    scriptCommand workload.package script [ "serve" ]
+                  else if native then
+                    engine.command.native workload.package
+                  else
+                    engine.command.container
+                )
+                ++ engine.positional workload;
+              mounts = lib.optionals wrapped (scriptMounts script);
+              gpu = {
+                nativeDevices = workload.native.devices;
+                containerDevices = workload.container.devices;
+                inherit (workload.container) shmSize;
+              };
+            }
+            // lib.optionalAttrs engine.dataParallel { inherit (workload) dataParallelSize; }
+          );
 
       detector =
         { key, workload }:
@@ -246,6 +251,7 @@ rec {
             inherit key workload;
             collection = "detectors";
             noun = "watermark detector";
+            watermarks = lib.mapAttrsToList (_: profile: normalize profile.watermark) workload.profiles;
             forced = listener (path: { uds = path; }) workload // {
               engine = engine.name;
               profiles = lib.mapAttrs (_: profile: {
@@ -262,8 +268,7 @@ rec {
               }
             ];
           }
-          rec {
-            watermarks = lib.mapAttrsToList (_: profile: normalize profile.watermark) workload.profiles;
+          {
             # Only the files of a repository that a tokenizer may need.
             repositories = lib.pipe workload.profiles [
               lib.attrValues
@@ -284,7 +289,6 @@ rec {
               ))
               lib.unique
             ];
-            credentials = keyCredentials watermarks // workload.credentials;
             command = scriptCommand workload.package workload.script [ "detect" ];
             mounts = scriptMounts workload.script;
             unlisted = true;

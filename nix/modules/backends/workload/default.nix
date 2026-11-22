@@ -9,7 +9,6 @@ lib.mergeAttrsList (
     ./detector.nix
     ./model.nix
     ./options.nix
-    ./record.nix
     ./records.nix
   ]
 )
@@ -20,13 +19,13 @@ lib.mergeAttrsList (
     lib.concatMap (name: llmhop.${name}.workloads) (lib.attrNames (import ../../engines.nix lib));
 
   # `perWorkload` applied to each of `workloads` with the units it wants and
-  # starts after: for a chained one, the chained one before it while
+  # starts after: for one with a `gpu`, the one with a `gpu` before it while
   # `startupOrdering`, so GPU memory profiling never overlaps. See
   # "Lifecycle" in the module internals documentation.
   chain =
     startupOrdering: workloads: perWorkload:
     let
-      chained = lib.filter (w: w.chained) workloads;
+      chained = lib.filter (w: w.gpu != null) workloads;
     in
     lib.mkMerge (
       lib.imap0 (
@@ -35,7 +34,7 @@ lib.mergeAttrsList (
           lib.optional (startupOrdering && index > 0) "${(lib.elemAt chained (index - 1)).unit}.service"
         )
       ) chained
-      ++ map (workload: perWorkload workload [ ]) (lib.filter (w: !w.chained) workloads)
+      ++ map (workload: perWorkload workload [ ]) (lib.filter (w: w.gpu == null) workloads)
     );
 
   # The environment of the server of `workload` of the backend `cfg`, with

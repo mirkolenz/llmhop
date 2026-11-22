@@ -252,7 +252,7 @@ in
     }
     // {
       workloads = mkOption {
-        type = types.listOf (types.submodule wl.recordModule);
+        type = types.listOf types.attrs;
         internal = true;
         readOnly = true;
         default = wl.workloads {

@@ -8,8 +8,8 @@ The global `services.llmhop.runtime` runs every backend and the gateway either `
 
 `backends/engine.nix` instantiates one backend per entry of `engines.nix`, whose fields hold everything an engine does differently, from its CLI dialect to how it renders LoRA adapters and watermarks.
 `backends/workload` holds the submodules of models and detectors and derives one record per enabled workload, its settings, command, credentials, repositories, aliases and assertions among them.
-The records are the default of the internal, read-only `services.llmhop.<engine>.workloads`, typed by `workload/record.nix`, so the module system checks and evaluates them once, unlike the old `endpoints`, which several modules wrote into.
-Capabilities such as `gpu`, `chained` and `unlisted` tell every consumer what a workload needs, rather than what kind it is.
+The records are plain attribute sets, whose fields `workload/records.nix` lists, and the default of the internal, read-only `services.llmhop.<engine>.workloads`, so they are evaluated once.
+Capabilities such as `gpu` and `unlisted` tell every consumer what a workload needs, rather than what kind it is, so the workloads with a `gpu`, the models, start one after another.
 `native.nix` with `fetch.nix`, or `container.nix`, renders the units of a backend from its records, and `gateway` those of the gateway.
 
 ## CLI dialects

@@ -369,7 +369,7 @@
     ];
   };
 
-  # Every consumer reads the typed records, whose capabilities say what a
+  # Every consumer reads the records, whose capabilities say what a
   # workload needs, and a quantization tag stays off the repository.
   testRecords = {
     expr =
@@ -383,11 +383,10 @@
           "download -hf example/b:Q4_K_M"
         ] sockets.systemd.services.llama-cpp-b-fetch.serviceConfig.ExecStart.text;
         capabilities = {
-          inherit (llama) chained unlisted;
+          inherit (llama) unlisted;
           gpu = llama.gpu != null;
           detector = {
-            inherit (detector) chained unlisted;
-            gpu = detector.gpu;
+            inherit (detector) unlisted gpu;
           };
         };
       };
@@ -400,11 +399,9 @@
       ];
       fetch = true;
       capabilities = {
-        chained = true;
         unlisted = false;
         gpu = true;
         detector = {
-          chained = false;
           unlisted = true;
           gpu = null;
         };

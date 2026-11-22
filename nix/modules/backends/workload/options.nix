@@ -60,8 +60,8 @@ rec {
         };
         credential = mkOption {
           type = types.str;
-          default = "${engine.name}.watermark-key";
-          example = "${engine.name}.watermark-key.2026-10";
+          default = "llmhop.watermark-key.${engine.name}";
+          example = "llmhop.watermark-key.${engine.name}.2026-10";
           description = ''
             Credential holding the key, an unsigned 64-bit integer, imported
             from the system credential store unless the service's
@@ -75,7 +75,7 @@ rec {
         secondaryCredential = mkOption {
           type = with types; nullOr str;
           default = null;
-          example = "${engine.name}.watermark-key-b.2026-10";
+          example = "llmhop.watermark-key-b.${engine.name}.2026-10";
           description = ''
             Credential holding the second key of dual-key watermarking, in
             the format of `credential`, or `null` for a single key.

@@ -103,7 +103,7 @@
       vllm = {
         entrypoint = containerMarked.containerConfig.Entrypoint;
         config = containsAll [
-          "--watermark-config '{\"algorithm\":\"dual_key_gumbel\",\"key_file\":\"/run/llmhop/credentials/vllm.watermark-key\"}'"
+          "--watermark-config '{\"algorithm\":\"dual_key_gumbel\",\"key_file\":\"/run/llmhop/credentials/llmhop.watermark-key.vllm\"}'"
         ] containerMarked.containerConfig.Exec;
         inherit (containerMarked.serviceConfig) ImportCredential;
         native = native.systemd.services.vllm-marked.serviceConfig.LoadCredential;
@@ -118,8 +118,8 @@
             "/bin/python\" \"/nix/store/"
             "-sglang-watermark.py\" \"serve\" \"example/llama\""
             ''"--enable-watermark"''
-            ''"--watermark-key-file" "%d/sglang.watermark-key"''
-            ''"--watermark-key-b-file" "%d/sglang.watermark-key-b"''
+            ''"--watermark-key-file" "%d/llmhop.watermark-key.sglang"''
+            ''"--watermark-key-b-file" "%d/llmhop.watermark-key-b.sglang"''
             ''"--watermark-settings" "{\"context_window\":4}"''
           ] start;
           inherit (service.serviceConfig) ImportCredential;
@@ -129,14 +129,14 @@
       vllm = {
         entrypoint = ''["vllm","serve","example/marked"]'';
         config = true;
-        ImportCredential = [ "vllm.watermark-key" ];
-        native = [ "vllm.watermark-key:${watermarkKey}" ];
+        ImportCredential = [ "llmhop.watermark-key.vllm" ];
+        native = [ "llmhop.watermark-key.vllm:${watermarkKey}" ];
       };
       sglang = {
         serve = true;
         ImportCredential = [
-          "sglang.watermark-key"
-          "sglang.watermark-key-b"
+          "llmhop.watermark-key-b.sglang"
+          "llmhop.watermark-key.sglang"
         ];
       };
     };
@@ -147,8 +147,8 @@
       entrypoint = containerDetector.containerConfig.Entrypoint;
       profiles = containsAll [
         "--engine vllm"
-        ''"key_file":"/run/llmhop/credentials/vllm.watermark-key"''
-        ''"key_file":"/run/llmhop/credentials/vllm.watermark-key.retired"''
+        ''"key_file":"/run/llmhop/credentials/llmhop.watermark-key.vllm"''
+        ''"key_file":"/run/llmhop/credentials/llmhop.watermark-key.vllm.retired"''
       ] containerDetector.containerConfig.Exec;
       import = containerDetector.serviceConfig.ImportCredential;
       # Only the tokenizer files, not the weights.
@@ -167,8 +167,8 @@
       entrypoint = ''["python","/run/llmhop/watermark.py","detect"]'';
       profiles = true;
       import = [
-        "vllm.watermark-key"
-        "vllm.watermark-key.retired"
+        "llmhop.watermark-key.vllm"
+        "llmhop.watermark-key.vllm.retired"
       ];
       fetch = true;
       routed = true;

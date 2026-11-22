@@ -32,11 +32,12 @@ rec {
     '';
     description = ''
       Credentials granted exclusively to this service. A path outside the
-      Nix store is loaded with `LoadCredential=`, while `null` imports the
-      credential of the same name from the system credential store with
-      `ImportCredential=`, where a trailing `*` imports every credential
-      starting with the rest. Reference the read-only file from `settings` as
-      `''${cred:<name>}`.
+      Nix store is loaded with `LoadCredential=`, which does not decrypt, so
+      the file must be plaintext. `null` imports the credential of the same
+      name from the system credential store with `ImportCredential=`, such
+      as an encrypted one of `/etc/credstore.encrypted`, where a trailing `*`
+      imports every credential starting with the rest. Reference the
+      read-only file from `settings` as `''${cred:<name>}`.
     '';
   };
 

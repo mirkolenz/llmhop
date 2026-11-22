@@ -114,7 +114,7 @@ rec {
           };
           retired = current // {
             watermark = watermark // {
-              credential = "vllm.watermark-key.retired";
+              credential = "llmhop.watermark-key.vllm.retired";
             };
           };
         };
@@ -176,7 +176,7 @@ rec {
           model = "example/marked";
           port = 21003;
           inherit watermark;
-          credentials."vllm.watermark-key" = watermarkKey;
+          credentials."llmhop.watermark-key.vllm" = watermarkKey;
         };
       };
       detectors.watermark = {
@@ -279,7 +279,7 @@ rec {
             dataParallelSize = 4;
             watermark = {
               settings.context_window = 4;
-              secondaryCredential = "sglang.watermark-key-b";
+              secondaryCredential = "llmhop.watermark-key-b.sglang";
             };
           };
         };

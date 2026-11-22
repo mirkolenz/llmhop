@@ -390,7 +390,7 @@ services.llmhop.vllm = {
     model = "Qwen/Qwen3-8B";
     revision = "main";
     watermark = {
-      credential = "vllm.watermark-key.2026-10";
+      credential = "llmhop.watermark-key.vllm.2026-10";
       settings.algorithm = "dual_key_gumbel";
     };
   };
@@ -407,11 +407,12 @@ services.llmhop.vllm = {
 A key is an unsigned 64-bit integer credential, never entering the Nix store or a command line:
 
 ```sh
-(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/vllm.watermark-key.2026-10)
+(umask 077; od -An -N8 -tu8 /dev/urandom | tr -d ' \n' > /etc/credstore/llmhop.watermark-key.vllm.2026-10)
 ```
 
 vLLM reads the key through `key_file` of its `WatermarkConfig`, which requires a vLLM newer than 0.34.0.
-SGLang reads its keys from its config file, which the watermark script writes into the server's private `/tmp`, and takes a second key for dual-key watermarking as `secondaryCredential`.
+SGLang reads its keys from its config file, which the watermark script writes into the server's private `/tmp`, and takes a second key for dual-key watermarking as `secondaryCredential`, such as `llmhop.watermark-key-b.sglang.2026-10`.
+The keys default to `llmhop.watermark-key.<engine>`.
 Its `settings` are SGLang's watermark config without `key` and `key_b`, such as `context_window` and `enforce_all`, which keeps clients from opting out.
 The engines differ in their algorithms, so each detector only detects the watermarks of its own backend.
 A detector reports the most significant profile with its Bonferroni-corrected `p_value`, `score`, `num_scored_tokens` and `is_watermarked`.

@@ -17,14 +17,11 @@ import sys
 import tempfile
 from collections.abc import Callable, Container, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Protocol, get_args
 
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, TypeAdapter
-
-# SGLang still supports Python 3.11, which lacks `type` statements.
-Engine = Literal["vllm", "sglang"]
 
 # vLLM detector parameters without a generation-side counterpart.
 # The config's `deduplicate_contexts` shares a name but governs generation only,
@@ -103,10 +100,8 @@ def sglang_config(
     return merged
 
 
-def vllm_detector(
-    config: Mapping[str, Any], key: int, p_value_threshold: float
-) -> Detector:
-    """Detector matching the generation side of vLLM's `config`.
+def vllm_detector(profile: Profile, p_value_threshold: float) -> Detector:
+    """Detector matching the generation side of vLLM's `profile`.
 
     The class is the exported detector named after the algorithm,
     and each of its parameters takes the config field `config_field` names.
@@ -119,7 +114,9 @@ def vllm_detector(
     from vllm.v1.watermarking import WatermarkDetector
 
     try:
-        watermark = TypeAdapter(WatermarkConfig).validate_python({**config, "key": key})
+        watermark = TypeAdapter(WatermarkConfig).validate_python(
+            {**profile.config, "key": read_key(profile.key_file)}
+        )
     except ValidationError as error:
         messages = (
             f"{'.'.join(map(str, details['loc'])) or 'config'}: {details['msg']}"
@@ -162,17 +159,15 @@ def vllm_detector(
     return detect
 
 
-def sglang_detector(
-    config: Mapping[str, Any], key_file: Path, key_b_file: Path | None
-) -> Detector:
-    """Detector matching the generation side of SGLang's `config`.
+def sglang_detector(profile: Profile, p_value_threshold: float) -> Detector:
+    """Detector matching the generation side of SGLang's `profile`.
 
     It scores the combined statistic, which partitions the contexts by key
     for dual-key watermarks.
     """
     from sglang.srt.sampling.watermarking import WatermarkDetector
 
-    merged = sglang_config(config, key_file, key_b_file)
+    merged = sglang_config(profile.config, profile.key_file, profile.key_b_file)
     detector = WatermarkDetector(
         merged["key"],
         key_b=merged.get("key_b"),
@@ -208,57 +203,69 @@ def config_field(fields: Container[str], algorithm: str, parameter: str) -> str:
     )
 
 
-def create_detector(
-    engine: Engine, profile: Profile, p_value_threshold: float
-) -> Detector:
-    """Detector of `profile` for the watermarks of `engine`."""
-    match engine:
-        case "vllm":
-            if profile.key_b_file is not None:
-                raise ValueError("vLLM derives both keys of dual-key watermarks")
+def vllm_tokenizer(name: str, revision: str | None) -> Tokenizer:
+    """Tokenizer `name` as vLLM loads it."""
+    from vllm.tokenizers import get_tokenizer
 
-            return vllm_detector(
-                profile.config, read_key(profile.key_file), p_value_threshold
-            )
-        case "sglang":
-            return sglang_detector(profile.config, profile.key_file, profile.key_b_file)
+    return get_tokenizer(name, revision=revision)
 
 
-def load_tokenizer(engine: Engine, name: str, revision: str | None) -> Tokenizer:
-    """Tokenizer `name` as `engine` loads it."""
-    match engine:
-        case "vllm":
-            from vllm.tokenizers import get_tokenizer
+def sglang_tokenizer(name: str, revision: str | None) -> Tokenizer:
+    """Tokenizer `name` as SGLang loads it."""
+    from transformers import AutoTokenizer
 
-            return get_tokenizer(name, revision=revision)
-        case "sglang":
-            from transformers import AutoTokenizer
-
-            return AutoTokenizer.from_pretrained(name, revision=revision)
+    return AutoTokenizer.from_pretrained(name, revision=revision)
 
 
-def check(engine: Engine) -> None:
-    """Build and run a detector for every algorithm `engine` declares."""
+def vllm_profiles(key_file: Path) -> list[Profile]:
+    """A profile of every algorithm vLLM declares."""
+    from vllm.config.watermarking import WatermarkingAlgorithm
+
+    return [
+        Profile(tokenizer="", key_file=key_file, config={"algorithm": algorithm})
+        for algorithm in get_args(WatermarkingAlgorithm)
+    ]
+
+
+def sglang_profiles(key_file: Path) -> list[Profile]:
+    """A profile with a single key and one with two keys."""
+    return [
+        Profile(tokenizer="", key_file=key_file),
+        Profile(tokenizer="", key_file=key_file, key_b_file=key_file),
+    ]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Engine:
+    """How the watermarks of an engine are detected.
+
+    Attributes:
+        detector: The detector of a profile with a p-value threshold.
+        tokenizer: The tokenizer of a name and revision.
+        profiles: The profiles `check` tests with a key file.
+    """
+
+    detector: Callable[[Profile, float], Detector]
+    tokenizer: Callable[[str, str | None], Tokenizer]
+    profiles: Callable[[Path], list[Profile]]
+
+
+ENGINES = {
+    "vllm": Engine(vllm_detector, vllm_tokenizer, vllm_profiles),
+    "sglang": Engine(sglang_detector, sglang_tokenizer, sglang_profiles),
+}
+
+
+def check(name: str) -> None:
+    """Build and run a detector for every algorithm the engine `name` declares."""
+    engine = ENGINES[name]
+
     with tempfile.TemporaryDirectory() as directory:
         key_file = Path(directory, "key")
         key_file.write_text("18446744073709551615")
 
-        match engine:
-            case "vllm":
-                from vllm.config.watermarking import WatermarkingAlgorithm
-
-                profiles = [
-                    Profile(tokenizer="", key_file=key_file, config={"algorithm": a})
-                    for a in get_args(WatermarkingAlgorithm)
-                ]
-            case "sglang":
-                profiles = [
-                    Profile(tokenizer="", key_file=key_file),
-                    Profile(tokenizer="", key_file=key_file, key_b_file=key_file),
-                ]
-
-        for profile in profiles:
-            create_detector(engine, profile, 0.01)(list(range(16)))
+        for profile in engine.profiles(key_file):
+            engine.detector(profile, 0.01)(list(range(16)))
 
 
 def create_groups(
@@ -269,7 +276,7 @@ def create_groups(
 
     for name, profile in profiles.items():
         try:
-            detector = create_detector(engine, profile, p_value_threshold)
+            detector = engine.detector(profile, p_value_threshold)
         except ValueError as error:
             error.add_note(f"in profile {name!r}")
             raise
@@ -277,7 +284,7 @@ def create_groups(
         groups.setdefault((profile.tokenizer, profile.revision), {})[name] = detector
 
     return [
-        (load_tokenizer(engine, tokenizer, revision), detectors)
+        (engine.tokenizer(tokenizer, revision), detectors)
         for (tokenizer, revision), detectors in groups.items()
     ]
 
@@ -348,7 +355,7 @@ def serve(argv: Sequence[str]) -> None:
 def detect(argv: Sequence[str]) -> None:
     """Serve the detection of the watermarks of an engine."""
     parser = argparse.ArgumentParser(prog="watermark.py detect", allow_abbrev=False)
-    parser.add_argument("--engine", choices=get_args(Engine), required=True)
+    parser.add_argument("--engine", choices=ENGINES, required=True)
     parser.add_argument(
         "--profiles",
         type=json.loads,
@@ -369,7 +376,7 @@ def detect(argv: Sequence[str]) -> None:
         parser.error("--profiles must hold at least one profile")
 
     app = create_app(
-        create_groups(args.engine, profiles, args.p_value_threshold),
+        create_groups(ENGINES[args.engine], profiles, args.p_value_threshold),
         args.p_value_threshold,
     )
     uvicorn.run(app, host=args.host, port=args.port, uds=args.uds)

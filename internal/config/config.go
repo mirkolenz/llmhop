@@ -26,13 +26,16 @@ import (
 	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
+// Model is a backend served under a name, balanced over its URLs.
 type Model struct {
 	// URLs are the servers of the model, each an absolute http(s) URL or
 	// `unix:///<socket path>`, between which requests are balanced.
 	URLs []string `json:"urls"`
 	// Aliases are further names routed to the model, such as its LoRA
 	// adapters, each forwarded verbatim or as the model name it rewrites to.
-	Aliases map[string]Alias  `json:"aliases,omitempty"`
+	Aliases map[string]Alias `json:"aliases,omitempty"`
+	// Headers are set on every request to the model, last, so they replace
+	// those of the client. Their values may hold secret references.
 	Headers map[string]string `json:"headers,omitempty"`
 	// Metadata adds members to the model's object in the models API,
 	// such as `max_model_len`, or replaces `created` and `owned_by`,
@@ -59,7 +62,7 @@ type Model struct {
 	// DataParallelSize is the number of data-parallel ranks of every URL,
 	// which requests with an affinity key are pinned to through the
 	// `X-Data-Parallel-Rank` header of vLLM and SGLang, one by default.
-	DataParallelSize uint `json:"dataParallelSize,omitempty"`
+	DataParallelSize uint32 `json:"dataParallelSize,omitempty"`
 	// FailoverSeconds is how long a server is avoided once it refused a
 	// connection or failed several requests in a row.
 	FailoverSeconds uint32 `json:"failoverSeconds"`
@@ -76,11 +79,13 @@ type Alias struct {
 	Model string `json:"model,omitempty"`
 }
 
+// Config is the configuration file of llmhop.
 type Config struct {
 	// Listen holds the listeners by name, which socket activation matches
 	// to the names of the sockets it passes.
-	Listen       map[string]Listener `json:"listen,omitempty"`
-	MaxBodyBytes int64               `json:"maxBodyBytes,omitempty"`
+	Listen map[string]Listener `json:"listen,omitempty"`
+	// MaxBodyBytes bounds the size of a request body. Zero means unlimited.
+	MaxBodyBytes int64 `json:"maxBodyBytes,omitempty"`
 	// MaxBufferedBytes bounds the bytes of all bodies held in memory at once to
 	// read their JSON "model" field, until the backend starts its response.
 	// Zero means unlimited.
@@ -102,7 +107,8 @@ type Config struct {
 	// Affinity lists the sources of the key keeping the requests of a
 	// conversation on one server, tried in order.
 	Affinity []AffinitySource `json:"affinity,omitempty"`
-	Models   map[string]Model `json:"models"`
+	// Models are the backends by the name clients send, or a wildcard.
+	Models map[string]Model `json:"models"`
 }
 
 // AffinitySource carries the affinity key in exactly one of a request
@@ -119,8 +125,10 @@ type AffinitySource struct {
 // or without either a socket systemd passes by the name of the listener.
 type Listener struct {
 	// Host is the address Port is bound to, every interface if empty.
-	Host   string `json:"host,omitempty"`
-	Port   uint16 `json:"port,omitempty"`
+	Host string `json:"host,omitempty"`
+	// Port is the TCP port of the listener.
+	Port uint16 `json:"port,omitempty"`
+	// Socket is the absolute path of the unix socket of the listener.
 	Socket string `json:"socket,omitempty"`
 	// Metrics serves the metrics of llmhop without a key.
 	Metrics bool `json:"metrics,omitempty"`

@@ -85,18 +85,18 @@ in
         }
       ]
       ++ lib.mapAttrsToList (
-          listenerName: util.firewallAssertion "${owner}.listen.${listenerName}"
-        ) tcpListeners
+        listenerName: util.firewallAssertion "${owner}.listen.${listenerName}"
+      ) tcpListeners
       ++ map (w: {
-          assertion = !w.exposed;
-          message = "services.llmhop: `${w.owner}` is routed by the gateway, but binds a `host` beyond loopback, so clients could bypass it.";
-        }) workloads
+        assertion = !w.exposed;
+        message = "services.llmhop: `${w.owner}` is routed by the gateway, but binds a `host` beyond loopback, so clients could bypass it.";
+      }) workloads
       ++ lib.mapAttrsToList (name: ws: {
-          assertion = lib.length (lib.unique (map gatewayModel ws)) == 1;
-          message = "services.llmhop: the replicas ${
-            lib.concatMapStringsSep ", " (w: "`${w.owner}`") ws
-          } of `${name}` differ in their `aliases`, `dataParallelSize` or `unlisted`, which the gateway routes once per name.";
-        }) replicas;
+        assertion = lib.length (lib.unique (map gatewayModel ws)) == 1;
+        message = "services.llmhop: the replicas ${
+          lib.concatMapStringsSep ", " (w: "`${w.owner}`") ws
+        } of `${name}` differ in their `aliases`, `dataParallelSize` or `unlisted`, which the gateway routes once per name.";
+      }) replicas;
 
       services.llmhop = {
         gateway = {

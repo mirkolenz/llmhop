@@ -1,5 +1,5 @@
-// Package secrets resolves ${cred:NAME}, ${env:NAME} and ${file:PATH}
-// references inside config strings so credentials can stay out of the config file.
+// Package secrets resolves ${cred:NAME} and ${env:NAME} references inside
+// config strings so secrets can stay out of the config file.
 // `$$` stands for a literal `$`.
 package secrets
 
@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
-// credentialsDirectory is where systemd exposes the unit's credentials.
+// credentialsDirectory names the directory of the credentials, where
+// systemd exposes those of the unit and the image sets `/run/secrets`, the
+// secrets of Docker, Compose and Podman.
 const credentialsDirectory = "CREDENTIALS_DIRECTORY"
 
 // Expand resolves every secret reference inside s. Unresolved references
@@ -59,18 +60,12 @@ func resolve(key string, load bool) (string, error) {
 		read = Credential
 	case "env":
 		if arg == "" {
-			return "", fmt.Errorf("invalid env var name %q", arg)
+			return "", errors.New("empty env var name")
 		}
 
 		read = lookupEnv
-	case "file":
-		if !filepath.IsAbs(arg) {
-			return "", fmt.Errorf("secret file %q must be an absolute path", arg)
-		}
-
-		read = readFile
 	default:
-		return "", fmt.Errorf("%q is not a cred:, env: or file: reference, write $$ for a literal $", key)
+		return "", fmt.Errorf("%q is not a cred: or env: reference, write $$ for a literal $", key)
 	}
 
 	if !load {
@@ -93,8 +88,8 @@ func lookupEnv(name string) (string, error) {
 const maxCredentialName = 255
 
 // CheckCredentialName rejects a credential name outside the subset of those
-// systemd accepts that llmhop, llmhopctl and the NixOS module share: an
-// ASCII letter, digit or `_`, followed by those, `.` and `-`.
+// systemd accepts that llmhop and the NixOS module share: an ASCII letter,
+// digit or `_`, followed by those, `.` and `-`.
 func CheckCredentialName(name string) error {
 	valid := func(r rune) bool {
 		return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || strings.ContainsRune("_.-", r)
@@ -107,7 +102,7 @@ func CheckCredentialName(name string) error {
 	return nil
 }
 
-// CredentialNames lists the systemd credentials of the unit.
+// CredentialNames lists the credentials.
 func CredentialNames() ([]string, error) {
 	dir, err := credentialsDir()
 	if err != nil {
@@ -130,20 +125,30 @@ func CredentialNames() ([]string, error) {
 	return names, nil
 }
 
-// Credential reads the systemd credential called name. This is the same
-// reference the NixOS module rewrites at eval time for the model servers, which
-// receive a path because they read the file themselves. llmhop reads its own
-// config, so here the reference expands to the credential's contents.
+// Credential reads the credential called name without the trailing line
+// terminators that files and pipes usually end with.
 func Credential(name string) (string, error) {
 	dir, err := credentialsDir()
 	if err != nil {
 		return "", fmt.Errorf("credential %q: %w", name, err)
 	}
 
-	return readFile(filepath.Join(dir, name))
+	// A root keeps a name from escaping the directory.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", fmt.Errorf("credentials: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	data, err := root.ReadFile(name)
+	if err != nil {
+		return "", fmt.Errorf("read credential: %w", err)
+	}
+
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
-// credentialsDir is the directory systemd exposes the unit's credentials in.
+// credentialsDir is the directory of the credentials.
 func credentialsDir() (string, error) {
 	dir := os.Getenv(credentialsDirectory)
 	if dir == "" {
@@ -151,15 +156,4 @@ func credentialsDir() (string, error) {
 	}
 
 	return dir, nil
-}
-
-// readFile reads a secret from an absolute path, without the trailing line
-// terminators that files and pipes usually end with.
-func readFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read secret file %q: %w", path, err)
-	}
-
-	return strings.TrimRight(string(data), "\r\n"), nil
 }

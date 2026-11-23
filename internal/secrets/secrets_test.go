@@ -12,13 +12,12 @@ func TestExpand(t *testing.T) {
 	t.Setenv("LLMHOP_TEST_X", "secret")
 	_ = os.Unsetenv("LLMHOP_TEST_MISSING")
 
-	file := func(name, contents string) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(contents), 0o400); err != nil {
+	cred := func(name, contents string) string {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o400); err != nil {
 			t.Fatal(err)
 		}
 
-		return "${file:" + p + "}"
+		return "${cred:" + name + "}"
 	}
 
 	cases := []struct {
@@ -34,15 +33,14 @@ func TestExpand(t *testing.T) {
 		{"${env:LLMHOP_TEST_MISSING}", true, "", true},
 		{"${env:LLMHOP_TEST_MISSING}", false, "${env:LLMHOP_TEST_MISSING}", false},
 		{"${env:}", false, "", true},
-		{"${file:tok}", false, "", true},
+		{"${nope:x}", false, "", true},
 		{"${cred:sub/tok}", false, "", true},
 		{"${cred:..}", false, "", true},
 		{"${cred:openai+key}", false, "", true},
 		{"${cred:openai.key-1}", false, "${cred:openai.key-1}", false},
-		{file("tok", "a b\nc\r\n"), true, "a b\nc", false},
-		{"${cred:tok}", true, "a b\nc", false},
-		{file("lines", "secret\n\r\n"), true, "secret", false},
-		{"${file:/does/not/exist/llmhop-test}", true, "", true},
+		{cred("tok", "a b\nc\r\n"), true, "a b\nc", false},
+		{cred("lines", "secret\n\r\n"), true, "secret", false},
+		{"${cred:missing}", true, "", true},
 	}
 
 	for _, c := range cases {

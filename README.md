@@ -203,9 +203,8 @@ Prompts and responses are never logged.
 
 Keys of `clients` and strings in `models.*.headers` are expanded at startup, and an unresolved reference is a startup error:
 
-- `${cred:name}`: the systemd credential `name` from `$CREDENTIALS_DIRECTORY`, whose name starts with an ASCII letter, digit or `_` and continues with those, `.` and `-`, up to 255 characters, as the NixOS module and llmhopctl require.
-- `${env:NAME}`: an environment variable.
-- `${file:/absolute/path}`: a file, with trailing newlines trimmed.
+- `${cred:name}`: the file `name` in `$CREDENTIALS_DIRECTORY` with trailing newlines trimmed, a systemd credential, or a secret of Docker, Compose or Podman, since the image sets `/run/secrets`. Its name starts with an ASCII letter, digit or `_` and continues with those, `.` and `-`, up to 255 characters, as the NixOS module requires.
+- `${env:NAME}`: an environment variable, for platforms that pass secrets only that way.
 - `$$`: a literal `$`.
 
 ### Request limits

@@ -24,6 +24,8 @@
       "serve"
       "/config.json"
     ];
+    # Where Docker, Compose and Podman mount secrets, for `${cred:<name>}`.
+    Env = [ "CREDENTIALS_DIRECTORY=/run/secrets" ];
     User = "nobody:nobody";
     # The mounted config must set `"listen": {"default": {"port": 8080}}`.
     ExposedPorts."8080/tcp" = { };

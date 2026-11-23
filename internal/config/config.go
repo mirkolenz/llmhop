@@ -62,7 +62,7 @@ type Model struct {
 	// DataParallelSize is the number of data-parallel ranks of every URL,
 	// which requests with an affinity key are pinned to through the
 	// `X-Data-Parallel-Rank` header of vLLM and SGLang, one by default.
-	DataParallelSize uint32 `json:"dataParallelSize,omitempty"`
+	DataParallelSize uint32 `json:"dataParallelSize"`
 	// FailoverSeconds is how long a server is avoided once it refused a
 	// connection or failed several requests in a row.
 	FailoverSeconds uint32 `json:"failoverSeconds"`
@@ -331,7 +331,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 func (m *Model) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	type plain Model
 
-	p := plain{FailoverSeconds: 5}
+	p := plain{FailoverSeconds: 5, DataParallelSize: 1}
 	if err := json.UnmarshalDecode(dec, &p); err != nil {
 		return err
 	}
@@ -455,8 +455,8 @@ func (m Model) validate(load bool) error {
 		return errors.New("urls: must not be empty")
 	}
 
-	if m.DataParallelSize > maxDataParallelSize {
-		return fmt.Errorf("dataParallelSize: must not exceed %d", maxDataParallelSize)
+	if m.DataParallelSize < 1 || m.DataParallelSize > maxDataParallelSize {
+		return fmt.Errorf("dataParallelSize: must be between 1 and %d", maxDataParallelSize)
 	}
 
 	for _, raw := range m.URLs {

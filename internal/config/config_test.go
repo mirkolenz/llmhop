@@ -181,6 +181,7 @@ func TestLoadErrors(t *testing.T) {
 		{"unknown model field", `{"models": {"m": {"urls": ["http://x"], "ulrs": []}}}`, "unknown object member name"},
 		{"shared key", `{"clients": {"a": {"key": "x"}, "b": {"key": "x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "a and b share a key"},
 		{"too many ranks", `{"models": {"m": {"urls": ["http://x"], "dataParallelSize": 100000}}}`, "dataParallelSize"},
+		{"no ranks", `{"models": {"m": {"urls": ["http://x"], "dataParallelSize": 0}}}`, "dataParallelSize"},
 		{"url without scheme", `{"models": {"m": {"urls": ["127.0.0.1:8000"]}}}`, "models.m.urls"},
 		{"inner wildcard", `{"models": {"a*b": {"urls": ["http://x"]}}}`, "models.a*b"},
 		{"wildcard alias", `{"models": {"m": {"urls": ["http://x"], "aliases": {"n*": {}}}}}`, "aliases"},

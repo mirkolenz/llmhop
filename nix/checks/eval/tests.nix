@@ -380,9 +380,8 @@
     };
   };
 
-  # Every enabled listener reaches llmhop under its name with its fields,
-  # the default `metrics` one on a unix socket, and Prometheus scrapes only
-  # ports.
+  # Every listener reaches llmhop under its name with its fields,
+  # and Prometheus scrapes only ports.
   testListeners = {
     expr = {
       listen = util.withoutNulls policed.services.llmhop.gateway.settings.listen;

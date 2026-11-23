@@ -6,5 +6,4 @@ rec {
   cfg = llmhop.gateway;
   owner = "services.llmhop.gateway";
   workloads = (import ../backends/workload lib).allWorkloads llmhop;
-  listeners = lib.filterAttrs (_: listener: listener.enable) cfg.listen;
 }

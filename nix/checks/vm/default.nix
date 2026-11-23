@@ -87,9 +87,13 @@ testers.nixosTest {
 
       gateway = {
         enable = true;
-        # A further socket, so llmhop serves every descriptor systemd hands
+        # Several sockets, so llmhop serves every descriptor systemd hands
         # over by its name.
-        listen.local = { };
+        listen = {
+          default.port = 8080;
+          local = { };
+          metrics.metrics = true;
+        };
         settings = {
           clients.local.listener = "local";
           policies.guest.models = [ "dying" ];
@@ -118,6 +122,7 @@ testers.nixosTest {
       };
       gateway = {
         enable = true;
+        listen.default.port = 8080;
         settings.clientCredentials = true;
       };
     };

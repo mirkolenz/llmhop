@@ -176,6 +176,12 @@ let
         };
       };
     };
+    # The gateway has no implicit listener.
+    gatewayWithoutListener = {
+      needle = "has no listener";
+      count = 1;
+      system = mkRoutable { };
+    };
     containerWithoutPort = {
       needle = "which a container publishes";
       count = 1;

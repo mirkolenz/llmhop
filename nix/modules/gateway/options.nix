@@ -14,11 +14,10 @@ let
     cfg
     owner
     workloads
-    listeners
     ;
   # The ports of the listeners with metrics, as reached from the host, since
   # Prometheus cannot scrape a unix socket.
-  metricsTargets = lib.pipe listeners [
+  metricsTargets = lib.pipe cfg.listen [
     lib.attrValues
     (lib.filter (listener: listener.metrics && listener.port != null))
     (map (listener: util.listenStream (listener // { host = util.reachableHost listener.host; })))
@@ -173,13 +172,12 @@ in
                       ]
                   )
                 ) listener
-              ) listeners;
-              defaultText = lib.literalMD "the `host` and `port`, or the `socket`, and `metrics` of the enabled listeners of `listen`";
+              ) cfg.listen;
+              defaultText = lib.literalMD "the `host` and `port`, or the `socket`, and `metrics` of the listeners of `listen`";
               description = ''
                 Listeners by name, whose sockets systemd passes by the same
-                `FileDescriptorName=`, with the fields llmhop knows of the
-                enabled ones of `listen`, which tools such as `llmhopctl`
-                read.
+                `FileDescriptorName=`, with the fields llmhop knows of those
+                of `listen`, which tools such as `llmhopctl` read.
               '';
             };
             models = mkOption {
@@ -261,9 +259,6 @@ in
             { name, ... }:
             {
               options = {
-                enable = lib.mkEnableOption "the listener" // {
-                  default = true;
-                };
                 metrics = mkOption {
                   type = types.bool;
                   default = false;
@@ -279,7 +274,7 @@ in
                   example = 8080;
                   description = ''
                     TCP port to listen on. `null` listens on the unix socket `socket`
-                    instead. The `default` listener defaults to `8080`.
+                    instead.
                   '';
                 };
                 host = mkOption {
@@ -325,22 +320,20 @@ in
         );
         default = { };
         example = {
-          default.host = "";
+          default.port = 8080;
           caddy.socketGroup = "caddy";
-          prometheus = {
-            port = 9464;
+          admin = {
+            socketGroup = "wheel";
             metrics = true;
           };
-          ssh.socketGroup = "wheel";
         };
         description = ''
-          Listeners of the gateway, each a `llmhop-<name>.socket` unit handing
-          its socket to it through socket activation under the name of the
-          listener. The `default` one serves port `8080` unless configured
-          otherwise, and `metrics` serves the metrics on the unix socket
-          `metrics.sock` for the group `wheel` on NixOS, where `llmhopctl top`
-          finds it. `settings.clients.<name>.listener` makes the requests on a
-          unix socket count as a client's.
+          Listeners of the gateway, at least one, each a `llmhop-<name>.socket`
+          unit handing its socket to it through socket activation under the
+          name of the listener. `llmhopctl top` reads the metrics from the
+          first unix socket with `metrics`.
+          `settings.clients.<name>.listener` makes the requests on a unix
+          socket count as a client's.
         '';
       };
       scrapeConfigs = mkOption {

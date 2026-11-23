@@ -237,8 +237,11 @@ Add the flake input `github:mirkolenz/llmhop` and import `llmhop.nixosModules.de
 ```nix
 services.llmhop = {
   gateway.enable = true;
-  gateway.listen.default.host = "";
-  gateway.listen.default.openFirewall = true;
+  gateway.listen.default = {
+    host = "";
+    port = 8080;
+    openFirewall = true;
+  };
   llama-cpp.enable = true;
   llama-cpp.models."qwen3-8b".model = "unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL";
 };
@@ -264,7 +267,7 @@ Routed workloads must stay on loopback and leave authentication to the gateway.
 The gateway runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per enabled entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container on the host network receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
 Each listener renders into `settings.listen.<name>` its `host` and `port`, or its `socket` without a `port`, which its socket must have, and `metrics`, and reaches llmhop by its name through `FileDescriptorName=`.
 `settings.clients.<name>.listener = "ssh"` makes the requests on the unix socket of `listen.ssh` count as a client's without a key.
-The `default` listener serves `127.0.0.1:8080`, the `metrics` listener serves the metrics on the unix socket `/run/llmhop/metrics.sock` for the group `wheel` on NixOS and `root` elsewhere, changed by its `socketGroup`, and `listen.<name>.enable = false` turns off either.
+The gateway has no implicit listener and requires at least one, while a listener without `port` is a unix socket `/run/llmhop/<name>.sock`, as in `listen.admin = { socketGroup = "wheel"; metrics = true; }` for `llmhopctl top`.
 `environment` and `environmentFile` are forwarded to the service.
 Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
 Natively, a changed config reloads the gateway in place, without dropping a request.

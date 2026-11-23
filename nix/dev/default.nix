@@ -22,7 +22,10 @@
             imports = [ self.systemManagerModules.default ];
             nixpkgs.hostPlatform = system;
             services.llmhop = {
-              gateway.enable = true;
+              gateway = {
+                enable = true;
+                listen.default.port = 8080;
+              };
             }
             // llmhop;
           };

@@ -292,12 +292,15 @@ rec {
     );
   routable = mkRoutable { };
   routedModels = util.withoutNulls routable.services.llmhop.gateway.settings.models;
-  # A policy, a client on its listener, set zeros, a
-  # metrics port and no `default` listener.
+  # A policy, a client on its listener, set zeros, a metrics socket and a
+  # metrics port.
   policed = mkRoutable {
     gateway = {
       listen = {
-        default.enable = false;
+        metrics = {
+          metrics = true;
+          socketGroup = "wheel";
+        };
         ssh = { };
         prometheus = {
           port = 9464;

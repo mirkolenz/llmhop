@@ -16,13 +16,12 @@ let
     cfg
     owner
     workloads
-    listeners
     ;
   containerCredentials = util.containerCredentials llmhop cfg.credentials;
 
   # The socket units of the listeners, which the gateway service holds.
   socketUnit = listenerName: "llmhop-${listenerName}";
-  socketUnits = map socketUnit (lib.attrNames listeners);
+  socketUnits = map socketUnit (lib.attrNames cfg.listen);
   sockets = map (unit: "${unit}.socket") socketUnits;
 
   # A stable path, so a changed config reloads the native gateway in place,
@@ -56,7 +55,7 @@ let
     RestartSec = 5;
   };
 
-  tcpListeners = lib.filterAttrs (_: listener: listener.port != null) listeners;
+  tcpListeners = lib.filterAttrs (_: listener: listener.port != null) cfg.listen;
   # The replicas of every served name, in the order of their backends and
   # keys, and the model of the gateway that each of them describes.
   replicas = lib.groupBy (w: w.name) workloads;
@@ -79,15 +78,20 @@ in
 
   config = lib.mkMerge [
     (lib.mkIf cfg.active {
-      assertions =
-        lib.mapAttrsToList (
+      assertions = [
+        {
+          assertion = cfg.listen != { };
+          message = "services.llmhop: `${owner}.listen` has no listener, so nothing could reach the gateway.";
+        }
+      ]
+      ++ lib.mapAttrsToList (
           listenerName: util.firewallAssertion "${owner}.listen.${listenerName}"
         ) tcpListeners
-        ++ map (w: {
+      ++ map (w: {
           assertion = !w.exposed;
           message = "services.llmhop: `${w.owner}` is routed by the gateway, but binds a `host` beyond loopback, so clients could bypass it.";
         }) workloads
-        ++ lib.mapAttrsToList (name: ws: {
+      ++ lib.mapAttrsToList (name: ws: {
           assertion = lib.length (lib.unique (map gatewayModel ws)) == 1;
           message = "services.llmhop: the replicas ${
             lib.concatMapStringsSep ", " (w: "`${w.owner}`") ws
@@ -96,10 +100,6 @@ in
 
       services.llmhop = {
         gateway = {
-          listen = {
-            default.port = lib.mkDefault 8080;
-            metrics.metrics = lib.mkDefault true;
-          };
           credentials = lib.mkIf (cfg.settings.clientCredentials == true) {
             "llmhop.api-key.*" = lib.mkDefault null;
           };
@@ -150,7 +150,7 @@ in
               RemoveOnStop = true;
             };
           }
-        ) listeners;
+        ) cfg.listen;
       };
     })
 

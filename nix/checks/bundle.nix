@@ -10,6 +10,10 @@ let
   config = {
     gateway = {
       enable = true;
+      listen = {
+        default.port = 8080;
+        metrics.metrics = true;
+      };
       credentials."llmhop.api-key.client" = null;
       settings.clients.client.key = "\${cred:llmhop.api-key.client}";
     };

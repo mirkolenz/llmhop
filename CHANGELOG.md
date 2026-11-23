@@ -1,5 +1,24 @@
 # Changelog
 
+## [4.1.0](https://github.com/mirkolenz/llmhop/compare/v4.0.0...v4.1.0) (2026-11-23)
+
+### ⚠ BREAKING CHANGES
+
+* Clients are authenticated by `keyHash`, the SHA-256 hash of a `llmhop_<secret>` token, instead of plain keys or `${cred:}` references, and credentials no longer accept a bare key, so existing keys must be reissued with `llmhop key revoke` and `llmhop key create`, or with `llmhop key generate`.
+* `llmhopctl` and the `ctl` options of the NixOS module are merged into `llmhop`, whose commands read the config from `--config`, `$LLMHOP_CONFIG` or `/etc/llmhop/config.json` instead of a positional path, which is also where the image now expects it.
+* `/llmhop/metrics` serves JSON instead of the Prometheus format, so `gateway.scrapeConfigs` and the Grafana dashboard are removed.
+* `llmhop usage` reads the log from stdin instead of the journal.
+* **secrets:** `${file:}` references are removed, use `${cred:}`, which the image now also resolves from Docker and Podman secrets in `/run/secrets`, or `${env:}` instead.
+
+### Features
+
+* hash api keys with sha256, merge llmhopctl into cli, serve json metrics ([8dae1a8](https://github.com/mirkolenz/llmhop/commit/8dae1a89dda39b0bb118003165719b757fd03c41))
+* **secrets:** drop file references and read docker secrets as credentials ([e19224a](https://github.com/mirkolenz/llmhop/commit/e19224afef6cea27473f4e0d03593ca3361b3857))
+
+### Bug Fixes
+
+* **config:** reject zero dataParallelSize ([d8332c7](https://github.com/mirkolenz/llmhop/commit/d8332c78dbba4409c0f485fd2fb4f44d31a87ab6))
+
 ## [4.0.0](https://github.com/mirkolenz/llmhop/compare/v3.3.1...v4.0.0) (2026-11-23)
 
 ### ⚠ BREAKING CHANGES

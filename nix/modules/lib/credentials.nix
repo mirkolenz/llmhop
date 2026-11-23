@@ -6,7 +6,7 @@ let
 in
 rec {
   # The credential names llmhop accepts, a subset of those systemd accepts
-  # that needs no escaping in a unit, as in llmhop and llmhopctl.
+  # that needs no escaping in a unit, as in llmhop.
   credentialNamePattern = "[[:alnum:]_][[:alnum:]_.-]{0,254}";
 
   credentialsOption = mkOption {

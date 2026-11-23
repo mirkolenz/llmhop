@@ -14,8 +14,7 @@ let
         default.port = 8080;
         metrics.metrics = true;
       };
-      credentials."llmhop.api-key.client" = null;
-      settings.clients.client.key = "\${cred:llmhop.api-key.client}";
+      settings.clientCredentials = true;
     };
     vllm = {
       enable = true;

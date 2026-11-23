@@ -12,6 +12,7 @@ rec {
   apiKeys = "/run/secrets/api-keys";
   serverConfig = "/run/secrets/server.yaml";
   watermarkKey = "/run/secrets/watermark-key";
+  ciKeyHash = lib.hashString "sha256" "llmhop_ci-secret";
   watermark.settings.algorithm = "dual_key_gumbel";
   fakeVllm = pkgs.writeShellScriptBin "vllm" "exit 0";
   fakeSglang = pkgs.writeShellScriptBin "sglang" "exit 0";
@@ -81,8 +82,7 @@ rec {
   container = mkContainer {
     gateway = {
       enable = true;
-      credentials."llmhop.api-key.client" = null;
-      settings.clients.client.key = "\${cred:llmhop.api-key.client}";
+      settings.clientCredentials = true;
     };
     vllm = {
       models.test = {
@@ -302,7 +302,7 @@ rec {
           socketGroup = "wheel";
         };
         ssh = { };
-        prometheus = {
+        monitor = {
           port = 9464;
           metrics = true;
         };
@@ -313,7 +313,7 @@ rec {
         affinity = [ { body = [ "user" ]; } ];
         clients = {
           ci = {
-            key = "\${env:CI_KEY}";
+            keyHash = ciKeyHash;
             policy = "guest";
           };
           ssh.listener = "ssh";

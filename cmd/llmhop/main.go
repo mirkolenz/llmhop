@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"golang.org/x/sys/unix"
@@ -25,12 +26,23 @@ import (
 // version is set at build time through `-ldflags "-X main.version=..."`.
 var version string
 
-const usage = `usage:
-  llmhop serve <config>    serve the router
-  llmhop check <config>    validate the config without serving
-  llmhop version           print the version
-  llmhop help              print this help
-`
+// Globals are the flags of every command.
+type Globals struct {
+	Config  string           `help:"Path of the config." default:"/etc/llmhop/config.json" env:"LLMHOP_CONFIG" type:"path"`
+	Version kong.VersionFlag `help:"Print the version."`
+}
+
+// cli is the command line of llmhop.
+type cli struct {
+	Globals
+
+	Serve    serveCmd    `cmd:"" help:"Serve the gateway, reloading the config on SIGHUP."`
+	Check    checkCmd    `cmd:"" help:"Validate the config without serving or reading secrets."`
+	Key      keyCmd      `cmd:"" help:"Manage the client keys of clientCredentials."`
+	Top      topCmd      `cmd:"" help:"Show what the models and clients do right now."`
+	Usage    usageCmd    `cmd:"" help:"Print the requests and errors of the log on stdin by group."`
+	Internal internalCmd `cmd:"" hidden:"" help:"Commands of the NixOS module."`
+}
 
 func main() {
 	// journald stamps every line itself. The standard logger, which
@@ -45,33 +57,16 @@ func main() {
 		},
 	})))
 
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
-	}
+	var c cli
 
-	var err error
-
-	switch name, args := os.Args[1], os.Args[2:]; name {
-	case "help", "-h", "--help":
-		fmt.Print(usage)
-	case "version":
-		fmt.Println(buildVersion())
-	case "serve":
-		err = serve(args)
-	case "check":
-		err = check(args)
-	case "internal":
-		err = internal(args)
-	default:
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
-	}
-
-	if err != nil {
-		slog.Error(os.Args[1], "err", err)
-		os.Exit(1)
-	}
+	ctx := kong.Parse(&c,
+		kong.Name("llmhop"),
+		kong.Description("The model gateway llmhop."),
+		kong.Vars{"version": buildVersion()},
+		kong.BindToProvider(rootConfig),
+		kong.UsageOnError(),
+	)
+	ctx.FatalIfErrorf(ctx.Run(&c.Globals))
 }
 
 // buildVersion is the linked version, else the module version of the build.
@@ -87,41 +82,13 @@ func buildVersion() string {
 	return "dev"
 }
 
-// internal runs the commands of the Nix modules, which are not public.
-func internal(args []string) error {
-	if len(args) == 0 {
-		return errors.New("missing command")
-	}
+type checkCmd struct{}
 
-	switch args[0] {
-	case "hub-prune":
-		return hubPrune(args[1:])
-	case "wait-healthy":
-		return waitHealthy(args[1:])
-	}
-
-	return fmt.Errorf("unknown command %q", args[0])
-}
-
-// configPath returns the only argument, the path of the config.
-func configPath(args []string) (string, error) {
-	if len(args) != 1 {
-		return "", errors.New("expected exactly one argument: <config>")
-	}
-
-	return args[0], nil
-}
-
-// check builds the router of the config at the only argument without
-// expanding its secrets, the exact same router as serving, so every startup
-// error short of binding surfaces.
-func check(args []string) error {
-	path, err := configPath(args)
-	if err != nil {
-		return err
-	}
-
-	_, rt, err := load(path, false, &router.Limits{}, nil)
+// Run builds the router of the config without expanding its secrets, the
+// exact same router as serving, so every startup error short of binding
+// surfaces.
+func (checkCmd) Run(g *Globals) error {
+	_, rt, err := load(g.Config, false, &router.Limits{}, nil)
 	if err == nil {
 		rt.Close()
 	}
@@ -286,17 +253,14 @@ func sameAddress(l config.Listener, addr net.Addr) bool {
 	return false
 }
 
-// serve serves the router on its listeners until SIGTERM or an interrupt,
-// reloading the config on SIGHUP.
-func serve(args []string) error {
-	path, err := configPath(args)
-	if err != nil {
-		return err
-	}
+type serveCmd struct{}
 
+// Run serves the router on its listeners until SIGTERM or an interrupt,
+// reloading the config on SIGHUP.
+func (serveCmd) Run(g *Globals) error {
 	current := &swappable{}
 
-	cfg, err := current.load(path)
+	cfg, err := current.load(g.Config)
 	if err != nil {
 		return err
 	}
@@ -342,7 +306,7 @@ func serve(args []string) error {
 		case err := <-errs:
 			return err
 		case <-hup:
-			reload(path, current)
+			reload(g.Config, current)
 		case <-ctx.Done():
 		}
 	}
@@ -382,7 +346,7 @@ func reload(path string, current *swappable) {
 	}
 
 	// systemd knows no failed reload, so ERRNO= reports the outcome as the
-	// unit's StatusErrno, which llmhopctl checks.
+	// unit's StatusErrno, which `llmhop key` checks.
 	status, errno := "", unix.Errno(0)
 
 	if cfg, err := current.load(path); err != nil {

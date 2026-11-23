@@ -139,10 +139,10 @@ Both runtimes share the `listen` options, socket units, claims and firewall rule
 `settings.listen` renders exactly the fields of llmhop's listeners from the entries of `listen`, `host` and `port` for a port or else `socket`, beside `metrics`, so neither the options of the socket units nor the unused one of `host` and `socket` reach llmhop, which rejects them.
 Each socket unit sets `FileDescriptorName=` to the name of its listener, by which llmhop matches the passed sockets to its listeners.
 Podman passes the sockets of the units listed in the container's `Sockets=` into the container with `LISTEN_FDNAMES`, and the container stays on the host network to reach the published ports of the workloads.
-A listener with `metrics` on a unix socket of an administrators' group lets them run `llmhopctl top` without root, while Prometheus gets the jobs of `gateway.scrapeConfigs` on ports, since it cannot scrape a unix socket.
-`llmhopctl` reads the path of the first such socket from its `socket` in the config, and reads the journal of `llmhop.service` for `usage`, which is the unit of either runtime.
-A credential holds only the key, policy and expiry, which rotate together, so llmhopctl checks the policy against the config itself, while limits belong to policies.
-Every client credential is named `llmhop.api-key.<client>`, a fixed prefix that llmhop and llmhopctl share without a per-entry policy, and the gateway imports it as the glob `llmhop.api-key.*`.
+A listener with `metrics` on a unix socket of an administrators' group lets them run `llmhop top` without root.
+`llmhop top` reads the path of the first such socket from its `socket` in the config, while `llmhop usage` reads any log on stdin, such as the journal of `llmhop.service`, which is the unit of either runtime.
+A credential holds only the key, policy and expiry, which rotate together, so `llmhop key` checks the policy against the config itself, while limits belong to policies.
+Every client credential is named `llmhop.api-key.<client>`, a fixed prefix without a per-entry policy, and the gateway imports it as the glob `llmhop.api-key.*`.
 
 `settings` types every field of llmhop's config without a freeform type, since llmhop rejects unknown keys and ships with the module, so a typo fails evaluation rather than the build.
 `defaults`, `policies` and `clients` share one set of policy fields, and every workload merges into `models`.

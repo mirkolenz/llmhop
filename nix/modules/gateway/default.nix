@@ -25,7 +25,8 @@ let
   sockets = map (unit: "${unit}.socket") socketUnits;
 
   # A stable path, so a changed config reloads the native gateway in place,
-  # where `llmhopctl` finds it in either runtime.
+  # where llmhop finds it by default, also in its container, and `llmhop
+  # key` in either runtime.
   etcConfigFile = "llmhop/config.json";
   configFile = "/etc/${etcConfigFile}";
 
@@ -44,7 +45,7 @@ let
   file =
     if pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform then
       pkgs.runCommandLocal "llmhop.json" { } ''
-        ${lib.getExe cfg.package} check ${unchecked}
+        ${lib.getExe cfg.package} check --config ${unchecked}
         cp ${unchecked} $out
       ''
     else
@@ -64,7 +65,6 @@ let
     inherit (util) healthPath;
   };
   baseServiceConfig = util.accountServiceConfig cfg;
-  containerConfigFile = "${util.containerRuntimeDirectory}/llmhop.json";
   # The image of the binary that validated `file`, unless `container.image`
   # replaces it.
   archive = pkgs.callPackage ../../docker.nix {
@@ -120,7 +120,7 @@ in
       };
 
       environment.etc.${etcConfigFile}.source = file;
-      environment.systemPackages = lib.mkIf cfg.ctl.enable [ cfg.ctl.package ];
+      environment.systemPackages = [ cfg.package ];
 
       networking.firewall.allowedTCPPorts = lib.pipe tcpListeners [
         lib.attrValues
@@ -197,6 +197,7 @@ in
                 ExecStart = utils.escapeSystemdExecArgs [
                   (lib.getExe cfg.package)
                   "serve"
+                  "--config"
                   configFile
                 ];
                 UMask = "0077";
@@ -248,14 +249,15 @@ in
               Notify = true;
               Exec = util.containerExec [
                 "serve"
-                containerConfigFile
+                "--config"
+                configFile
               ];
               Environment = util.containerEnvironment (
                 containerCredentials.resolve cfg.environment // containerCredentials.environment
               );
               EnvironmentFile = util.environmentFiles [ cfg ];
               Volume = [
-                "${file}:${containerConfigFile}:ro"
+                "${file}:${configFile}:ro"
               ]
               ++ containerCredentials.volumes;
             }

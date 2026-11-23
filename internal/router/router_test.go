@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -20,6 +19,7 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/mirkolenz/llmhop/internal/apikey"
 	"github.com/mirkolenz/llmhop/internal/config"
 )
 
@@ -75,28 +75,30 @@ func send(t *testing.T, handler http.Handler, method, path, body, authHeader str
 	return rec
 }
 
+// A token names the client of its hash, only in the Bearer scheme.
 func TestBearer(t *testing.T) {
-	a := &authenticator{keys: map[[sha256.Size]byte]*client{
-		sha256.Sum256([]byte("alpha")): {name: "a"},
-		sha256.Sum256([]byte("beta")):  {name: "b"},
-	}}
+	a := newAuthenticator(&config.Config{Clients: map[string]config.Client{
+		"a": {KeyHash: apikey.Of("llmhop_alpha")},
+		"b": {KeyHash: apikey.Of("llmhop_beta")},
+	}}, &Limits{})
 	cases := []struct {
 		header string
 		want   string
 	}{
-		{"Bearer beta", "b"},
-		{"bearer alpha", "a"},
-		{"Bearer alph", ""},
-		{"Basic alpha", ""},
-		{"alpha", ""},
+		{"Bearer llmhop_beta", "b"},
+		{"bearer llmhop_alpha", "a"},
+		{"Bearer llmhop_alph", ""},
+		{"Basic llmhop_alpha", ""},
+		{"llmhop_alpha", ""},
 	}
 
 	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", c.header)
+
 		got := ""
-		if token, ok := bearer(c.header); ok {
-			if c, ok := a.lookup(token); ok {
-				got = c.name
-			}
+		if cl := a.bearerClient(req); cl != nil {
+			got = cl.name
 		}
 
 		if got != c.want {
@@ -107,7 +109,7 @@ func TestBearer(t *testing.T) {
 
 func TestCatalog(t *testing.T) {
 	backend, _ := startBackend(t)
-	h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {KeyHash: apikey.Of("llmhop_t-secret")}}, Models: map[string]config.Model{
 		"b":        {URLs: []string{backend.URL}},
 		"a":        {URLs: []string{backend.URL}},
 		"detector": {URLs: []string{backend.URL}, Unlisted: true},
@@ -129,7 +131,7 @@ func TestCatalog(t *testing.T) {
 		var got struct {
 			Data []modelObject `json:"data"`
 		}
-		if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer secret").Body.Bytes(), &got); err != nil {
+		if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer llmhop_t-secret").Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
 
@@ -145,12 +147,12 @@ func TestCatalog(t *testing.T) {
 
 	t.Run("retrieve", func(t *testing.T) {
 		for _, name := range []string{"a", "c"} {
-			if rec := send(t, h, http.MethodGet, "/v1/models/"+name, "", "Bearer secret"); rec.Code != http.StatusOK {
+			if rec := send(t, h, http.MethodGet, "/v1/models/"+name, "", "Bearer llmhop_t-secret"); rec.Code != http.StatusOK {
 				t.Fatalf("%s got status %d", name, rec.Code)
 			}
 		}
 
-		if rec := send(t, h, http.MethodGet, "/v1/models/detector", "", "Bearer secret"); rec.Code != http.StatusNotFound {
+		if rec := send(t, h, http.MethodGet, "/v1/models/detector", "", "Bearer llmhop_t-secret"); rec.Code != http.StatusNotFound {
 			t.Fatalf("got status %d", rec.Code)
 		}
 	})
@@ -186,7 +188,7 @@ func TestRouterRequests(t *testing.T) {
 		{name: "non-string model", body: `{"model":123}`, wantCode: http.StatusBadRequest},
 		{name: "duplicate model key", body: `{"model":"m","model":null}`, wantCode: http.StatusBadRequest},
 		{name: "unknown model", body: `{"model": "nope"}`, wantCode: http.StatusNotFound},
-		{name: "auth runs before model lookup", auth: map[string]config.Client{"t": {Key: "secret"}}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
+		{name: "auth runs before model lookup", auth: map[string]config.Client{"t": {KeyHash: apikey.Of("llmhop_t-secret")}}, body: `{"model": "unknown"}`, wantCode: http.StatusUnauthorized},
 		{name: "oversized body", maxBody: 16, body: `{"model": "m", "prompt": "` + strings.Repeat("x", 100) + `"}`, wantCode: http.StatusRequestEntityTooLarge},
 		{
 			name:     "known model is proxied with its body intact",
@@ -211,9 +213,9 @@ func TestRouterRequests(t *testing.T) {
 		},
 		{
 			name:       "auth strips client Authorization before forwarding",
-			auth:       map[string]config.Client{"t": {Key: "secret"}},
+			auth:       map[string]config.Client{"t": {KeyHash: apikey.Of("llmhop_t-secret")}},
 			body:       `{"model": "m"}`,
-			authHeader: "Bearer secret",
+			authHeader: "Bearer llmhop_t-secret",
 			wantCode:   http.StatusOK,
 			checkFwd: func(t *testing.T, r *capturedRequest) {
 				if got := r.header.Get("Authorization"); got != "" {
@@ -302,11 +304,11 @@ func TestProxyPreservesHostAndQuery(t *testing.T) {
 
 func TestPathRouting(t *testing.T) {
 	backend, captured := startBackend(t)
-	h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: map[string]config.Model{
+	h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {KeyHash: apikey.Of("llmhop_t-secret")}}, Models: map[string]config.Model{
 		"detector": {URLs: []string{backend.URL + "/base"}, Unlisted: true},
 	}})
 
-	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/detector/detect?x=1", `{"text":"candidate"}`, "Bearer secret"); rec.Code != http.StatusOK {
+	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/detector/detect?x=1", `{"text":"candidate"}`, "Bearer llmhop_t-secret"); rec.Code != http.StatusOK {
 		t.Fatalf("got status %d", rec.Code)
 	}
 
@@ -315,7 +317,7 @@ func TestPathRouting(t *testing.T) {
 	}
 
 	for _, path := range []string{"/llmhop/proxy/nope/detect", "/llmhop/models/detector/proxy/detect"} {
-		if rec := send(t, h, http.MethodPost, path, "", "Bearer secret"); rec.Code != http.StatusNotFound {
+		if rec := send(t, h, http.MethodPost, path, "", "Bearer llmhop_t-secret"); rec.Code != http.StatusNotFound {
 			t.Fatalf("%s got status %d", path, rec.Code)
 		}
 	}
@@ -445,7 +447,7 @@ func TestReadiness(t *testing.T) {
 
 	check := func(wantCode int, want readiness) {
 		t.Helper()
-		h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {Key: "secret"}}, Models: models})
+		h := newRouter(t, &config.Config{Clients: map[string]config.Client{"t": {KeyHash: apikey.Of("llmhop_t-secret")}}, Models: models})
 		rec := send(t, h, http.MethodGet, "/llmhop/readiness", "", "")
 
 		var got readiness
@@ -1018,12 +1020,12 @@ func TestClientHeaders(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 	h := newRouter(t, &config.Config{
-		Clients: map[string]config.Client{"alice": {Key: "secret"}},
+		Clients: map[string]config.Client{"alice": {KeyHash: apikey.Of("llmhop_t-secret")}},
 		Models:  map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"model":"m"}`))
-	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Authorization", "Bearer llmhop_t-secret")
 	req.Header.Set(requestIDHeader, "r1")
 	req.Header.Set(clientHeader, "mallory")
 	rec := httptest.NewRecorder()
@@ -1156,7 +1158,7 @@ func TestTrustedSockets(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 	h := newRouter(t, &config.Config{
-		Clients:     map[string]config.Client{"alice": {Key: "secret"}, "ssh": {Listener: "ssh"}},
+		Clients:     map[string]config.Client{"alice": {KeyHash: apikey.Of("llmhop_t-secret")}, "ssh": {Listener: "ssh"}},
 		CORSOrigins: []string{"*"},
 		Models:      map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
@@ -1195,13 +1197,13 @@ func TestTrustedSockets(t *testing.T) {
 func TestCORS(t *testing.T) {
 	backend, _ := startBackend(t)
 	h := newRouter(t, &config.Config{
-		Clients:     map[string]config.Client{"alice": {Key: "secret"}},
+		Clients:     map[string]config.Client{"alice": {KeyHash: apikey.Of("llmhop_t-secret")}},
 		CORSOrigins: []string{"https://chat.example"},
 		Models:      map[string]config.Model{"m": {URLs: []string{backend.URL}}},
 	})
 
 	preflight := http.Header{"Access-Control-Request-Method": {"POST"}, "Access-Control-Request-Headers": {"authorization,content-type"}}
-	token := http.Header{"Authorization": {"Bearer secret"}}
+	token := http.Header{"Authorization": {"Bearer llmhop_t-secret"}}
 
 	cases := []struct {
 		name, method, origin string

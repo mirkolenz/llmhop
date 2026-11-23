@@ -1,25 +1,54 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mirkolenz/llmhop/internal/apikey"
 )
 
+// hashPlaceholder is HASH_<token> in a test config or credential.
+var hashPlaceholder = regexp.MustCompile(`HASH_\w+`)
+
+// withHashes replaces every HASH_<token> in s with the hash of the token.
+func withHashes(s string) string {
+	return hashPlaceholder.ReplaceAllStringFunc(s, func(m string) string {
+		return fmt.Sprintf("%x", apikey.Of(strings.TrimPrefix(m, "HASH_")))
+	})
+}
+
+// writeConfig writes body with its hashes, see withHashes.
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte(withHashes(body)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	return p
 }
 
+// writeCredentials writes the credentials of files with their hashes, see
+// withHashes, as those of the test.
+func writeCredentials(t *testing.T, files map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	for name, value := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(withHashes(value)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+}
+
 func TestLoad(t *testing.T) {
-	t.Setenv("LLMHOP_CFG_TOKEN", "from-env")
 	t.Setenv("LLMHOP_CFG_KEY", "sk-123")
 
 	cfg, err := Load(writeConfig(t, `{
@@ -27,8 +56,8 @@ func TestLoad(t *testing.T) {
 		"defaults": {"models": ["m"], "maxConcurrentRequests": 2, "requestsPerMinute": 30},
 		"policies": {"research": {"models": ["*"], "weight": 8, "maxConcurrentRequests": 16}},
 		"clients": {
-			"a": {"key": "${env:LLMHOP_CFG_TOKEN}", "policy": "research", "maxConcurrentRequests": 0},
-			"b": {"key": "plain-token"},
+			"a": {"keyHash": "HASH_a", "policy": "research", "maxConcurrentRequests": 0},
+			"b": {"keyHash": "HASH_b"},
 			"ssh": {"listener": "ssh"}
 		},
 		"models": {"m": {"urls": ["http://x"], "headers": {"Authorization": "Bearer ${env:LLMHOP_CFG_KEY}", "X-Static": "unchanged"}}}
@@ -41,7 +70,7 @@ func TestLoad(t *testing.T) {
 		t.Errorf("got listen %v and limits %d and %d, want defaults", cfg.Listen, cfg.MaxBodyBytes, cfg.MaxBufferedBytes)
 	}
 
-	if a, b := cfg.Clients["a"], cfg.Clients["b"]; a.Key != "from-env" || b.Key != "plain-token" {
+	if a, b := cfg.Clients["a"], cfg.Clients["b"]; a.KeyHash != apikey.Of("a") || b.KeyHash != apikey.Of("b") {
 		t.Errorf("Clients = %#v", cfg.Clients)
 	}
 
@@ -61,25 +90,18 @@ func TestLoad(t *testing.T) {
 }
 
 func TestLoadClientCredentials(t *testing.T) {
-	dir := t.TempDir()
 	creds := map[string]string{
-		"llmhop.api-key.a": "secret-a\n",
-		"llmhop.api-key.b": `{"key": "secret-b", "policy": "guest", "expiresAt": "2027-06-01T00:00:00Z"}`,
-		"llmhop.api-key.d": "secret-d",
+		"llmhop.api-key.a": `{"keyHash": "HASH_a"}` + "\n",
+		"llmhop.api-key.b": `{"keyHash": "HASH_b", "policy": "guest", "expiresAt": "2027-06-01T00:00:00Z"}`,
+		"llmhop.api-key.d": `{"keyHash": "HASH_dc"}`,
 		"other":            "unrelated",
 	}
 
-	for name, value := range creds {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+	writeCredentials(t, creds)
 
 	cfg, err := Load(writeConfig(t, `{
 		"policies": {"guest": {}},
-		"clients": {"d": {"key": "${cred:llmhop.api-key.d}", "policy": "guest"}},
+		"clients": {"d": {"keyHash": "HASH_d", "policy": "guest"}},
 		"clientCredentials": true,
 		"models": {"m": {"urls": ["http://x"]}}
 	}`), true)
@@ -87,10 +109,11 @@ func TestLoadClientCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The declared client wins over its credential.
 	want := map[string]Client{
-		"a": {Key: "secret-a"},
-		"b": {Key: "secret-b", PolicyName: "guest", ExpiresAt: time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)},
-		"d": {Key: "secret-d", PolicyName: "guest"},
+		"a": {KeyHash: apikey.Of("a")},
+		"b": {KeyHash: apikey.Of("b"), PolicyName: "guest", ExpiresAt: time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)},
+		"d": {KeyHash: apikey.Of("d"), PolicyName: "guest"},
 	}
 
 	if len(cfg.Clients) != len(want) {
@@ -99,32 +122,41 @@ func TestLoadClientCredentials(t *testing.T) {
 
 	for name, w := range want {
 		got := cfg.Clients[name]
-		if got.Key != w.Key || got.PolicyName != w.PolicyName || !got.ExpiresAt.Equal(w.ExpiresAt) {
+		if got.KeyHash != w.KeyHash || got.PolicyName != w.PolicyName || !got.ExpiresAt.Equal(w.ExpiresAt) {
 			t.Errorf("Clients[%s] = %#v, want %#v", name, got, w)
 		}
 	}
 }
 
-// A credential holding more than rotates with its key, or a policy the
-// config lost, is skipped, so that the config still starts.
+// A credential holding more than rotates with its key, no key, no JSON object, a
+// policy the config lost or a taken key is skipped, so that the config
+// still starts.
 func TestInvalidCredentialsSkipped(t *testing.T) {
-	dir := t.TempDir()
 	creds := map[string]string{
-		"llmhop.api-key.a": `{"key": "x", "maxTokens": 4}`,
-		"llmhop.api-key.b": `{"key": "y", "policy": "gone"}`,
-		"llmhop.api-key.c": "z",
+		"llmhop.api-key.a": `{"keyHash": "HASH_a", "maxTokens": 4}`,
+		"llmhop.api-key.b": `{"keyHash": "HASH_b", "policy": "gone"}`,
+		"llmhop.api-key.c": "no json",
+		"llmhop.api-key.d": `{"keyHash": "HASH_d"}`,
+		"llmhop.api-key.e": `{"keyHash": "HASH_d"}`,
+		"llmhop.api-key.f": `{"keyHash": "HASH_x"}`,
+		"llmhop.api-key.g": `{"policy": ""}`,
 	}
 
-	for name, value := range creds {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writeCredentials(t, creds)
 
-	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+	cfg, err := Load(writeConfig(t, `{"clientCredentials": true, "clients": {"x": {"keyHash": "HASH_x"}}, "models": {"m": {"urls": ["http://x"]}}}`), true)
+	if err != nil || len(cfg.Clients) != 2 || cfg.Clients["d"].KeyHash != apikey.Of("d") {
+		t.Fatalf("got %v, %v", cfg, err)
+	}
+}
+
+// A missing credentials directory, such as /run/secrets of a container
+// without secrets, imports no client but still requires one.
+func TestMissingCredentialsDirectory(t *testing.T) {
+	t.Setenv("CREDENTIALS_DIRECTORY", filepath.Join(t.TempDir(), "missing"))
 
 	cfg, err := Load(writeConfig(t, `{"clientCredentials": true, "models": {"m": {"urls": ["http://x"]}}}`), true)
-	if err != nil || len(cfg.Clients) != 1 || cfg.Clients["c"].Key != "z" {
+	if err != nil || len(cfg.Clients) != 0 || !cfg.RequiresAuth() {
 		t.Fatalf("got %v, %v", cfg, err)
 	}
 }
@@ -134,16 +166,16 @@ func TestInvalidCredentialsSkipped(t *testing.T) {
 func TestLoadKeepsSecretReferences(t *testing.T) {
 	_ = os.Unsetenv("LLMHOP_CFG_MISSING")
 
-	cfg, err := Load(writeConfig(t, `{"clients": {"t": {"key": "${env:LLMHOP_CFG_MISSING}"}}, "models": {"m": {"urls": ["http://x"]}}}`), false)
+	cfg, err := Load(writeConfig(t, `{"models": {"m": {"urls": ["http://x"], "headers": {"X-Key": "${env:LLMHOP_CFG_MISSING}"}}}}`), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if cfg.Clients["t"].Key != "${env:LLMHOP_CFG_MISSING}" {
-		t.Fatalf("Clients = %#v, want the reference verbatim", cfg.Clients)
+	if h := cfg.Models["m"].Headers["X-Key"]; h != "${env:LLMHOP_CFG_MISSING}" {
+		t.Fatalf("header = %q, want the reference verbatim", h)
 	}
 
-	if _, err := Load(writeConfig(t, `{"clients": {"t": {"key": "${nope:x}"}}, "models": {"m": {"urls": ["http://x"]}}}`), false); err == nil {
+	if _, err := Load(writeConfig(t, `{"models": {"m": {"urls": ["http://x"], "headers": {"X-Key": "${nope:x}"}}}}`), false); err == nil {
 		t.Fatal("accepted malformed secret reference")
 	}
 }
@@ -161,25 +193,25 @@ func TestLoadErrors(t *testing.T) {
 		{"host name", `{"listen": {"a": {"host": "localhost", "port": 80}}, "models": {"m": {"urls": ["http://x"]}}}`, "listen.a.host"},
 		{"socket and port", `{"listen": {"a": {"socket": "/x.sock", "port": 80}}, "models": {"m": {"urls": ["http://x"]}}}`, "listen.a.socket"},
 		{"relative socket", `{"listen": {"a": {"socket": "run/x.sock"}}, "models": {"m": {"urls": ["http://x"]}}}`, "listen.a.socket"},
-		{"empty client name", `{"clients": {"": {"key": "x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "invalid name"},
+		{"empty client name", `{"clients": {"": {"keyHash": "HASH_x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "invalid name"},
 		{"empty policy name", `{"policies": {"": {}}, "models": {"m": {"urls": ["http://x"]}}}`, "empty policy name"},
 		{"empty listener name", `{"listen": {"": {"port": 80}}, "models": {"m": {"urls": ["http://x"]}}}`, "empty listener name"},
-		{"invalid client name", `{"clients": {"a\u0001": {"key": "x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "invalid name"},
+		{"invalid client name", `{"clients": {"a\u0001": {"keyHash": "HASH_x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "invalid name"},
 		{"trailing slash model", `{"models": {"org/": {"urls": ["http://x"]}}}`, "models.org/"},
 		{"empty model segment", `{"models": {"a//b": {"urls": ["http://x"]}}}`, "models.a//b"},
 		{"negative buffering limit", `{"maxBufferedBytes": -1, "models": {"m": {"urls": ["http://x"]}}}`, "maxBufferedBytes"},
-		{"neither key nor listener", `{"clients": {"t": {}}, "models": {"m": {"urls": ["http://x"]}}}`, "exactly one of key or listener"},
-		{"key and listener", `{"listen": {"ssh": {}}, "clients": {"t": {"key": "x", "listener": "ssh"}}, "models": {"m": {"urls": ["http://x"]}}}`, "exactly one of key or listener"},
-		{"unknown policy", `{"clients": {"t": {"key": "x", "policy": "nope"}}, "models": {"m": {"urls": ["http://x"]}}}`, "unknown policy"},
+		{"neither key nor listener", `{"clients": {"t": {}}, "models": {"m": {"urls": ["http://x"]}}}`, "exactly one of keyHash or listener"},
+		{"key and listener", `{"listen": {"ssh": {}}, "clients": {"t": {"keyHash": "HASH_x", "listener": "ssh"}}, "models": {"m": {"urls": ["http://x"]}}}`, "exactly one of keyHash or listener"},
+		{"unknown policy", `{"clients": {"t": {"keyHash": "HASH_x", "policy": "nope"}}, "models": {"m": {"urls": ["http://x"]}}}`, "unknown policy"},
 		{"invalid model pattern", `{"policies": {"p": {"models": ["a*b"]}}, "models": {"m": {"urls": ["http://x"]}}}`, "policies.p.models"},
 		{"duplicate header ignoring case", `{"models": {"m": {"urls": ["http://x"], "headers": {"Authorization": "one", "authorization": "two"}}}}`, "duplicate header"},
 		{"invalid header name", `{"models": {"m": {"urls": ["http://x"], "headers": {"Bad Header": "value"}}}}`, "invalid header name"},
 		{"invalid header value", `{"models": {"m": {"urls": ["http://x"], "headers": {"X-Test": "first\nsecond"}}}}`, "invalid header value"},
 		{"invalid expanded header value", `{"models": {"m": {"urls": ["http://x"], "headers": {"X-Test": "${env:LLMHOP_CFG_BAD_HEADER}"}}}}`, "invalid header value"},
-		{"key expansion", `{"clients": {"t": {"key": "${env:LLMHOP_CFG_MISSING}"}}, "models": {"m": {"urls": ["http://x"]}}}`, "clients.t.key"},
+		{"invalid key hash", `{"clients": {"t": {"keyHash": "x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "/clients/t/keyHash"},
 		{"no urls", `{"models": {"m": {"urls": []}}}`, "urls"},
 		{"unknown model field", `{"models": {"m": {"urls": ["http://x"], "ulrs": []}}}`, "unknown object member name"},
-		{"shared key", `{"clients": {"a": {"key": "x"}, "b": {"key": "x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "a and b share a key"},
+		{"shared key", `{"clients": {"a": {"keyHash": "HASH_x"}, "b": {"keyHash": "HASH_x"}}, "models": {"m": {"urls": ["http://x"]}}}`, "a and b share a key"},
 		{"too many ranks", `{"models": {"m": {"urls": ["http://x"], "dataParallelSize": 100000}}}`, "dataParallelSize"},
 		{"no ranks", `{"models": {"m": {"urls": ["http://x"], "dataParallelSize": 0}}}`, "dataParallelSize"},
 		{"url without scheme", `{"models": {"m": {"urls": ["127.0.0.1:8000"]}}}`, "models.m.urls"},
@@ -193,8 +225,8 @@ func TestLoadErrors(t *testing.T) {
 		{"unknown listener client", `{"clients": {"ssh": {"listener": "ssh"}}, "models": {"m": {"urls": ["http://x"]}}}`, "not in listen"},
 		{"shared listener", `{"listen": {"ssh": {}}, "clients": {"a": {"listener": "ssh"}, "b": {"listener": "ssh"}}, "models": {"m": {"urls": ["http://x"]}}}`, "a and b share a listener"},
 		{"cors without auth", `{"corsOrigins": ["*"], "models": {"m": {"urls": ["http://x"]}}}`, "require clients"},
-		{"cors origin with path", `{"clients": {"t": {"key": "x"}}, "corsOrigins": ["https://x/"], "models": {"m": {"urls": ["http://x"]}}}`, "corsOrigins"},
-		{"cors wildcard among origins", `{"clients": {"t": {"key": "x"}}, "corsOrigins": ["*", "https://x"], "models": {"m": {"urls": ["http://x"]}}}`, "corsOrigins"},
+		{"cors origin with path", `{"clients": {"t": {"keyHash": "HASH_x"}}, "corsOrigins": ["https://x/"], "models": {"m": {"urls": ["http://x"]}}}`, "corsOrigins"},
+		{"cors wildcard among origins", `{"clients": {"t": {"keyHash": "HASH_x"}}, "corsOrigins": ["*", "https://x"], "models": {"m": {"urls": ["http://x"]}}}`, "corsOrigins"},
 		{"model header expansion", `{"models": {"m": {"urls": ["http://x"], "headers": {"Authorization": "Bearer ${env:LLMHOP_CFG_MISSING}"}}}}`, "models.m.headers.Authorization"},
 	}
 

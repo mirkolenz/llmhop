@@ -15,14 +15,6 @@ let
     owner
     workloads
     ;
-  # The ports of the listeners with metrics, as reached from the host, since
-  # Prometheus cannot scrape a unix socket.
-  metricsTargets = lib.pipe cfg.listen [
-    lib.attrValues
-    (lib.filter (listener: listener.metrics && listener.port != null))
-    (map (listener: util.listenStream (listener // { host = util.reachableHost listener.host; })))
-  ];
-
   # A field of llmhop's JSON config, left out of it while null, since a set
   # one, even `0` or empty, replaces the layers below it.
   field =
@@ -45,9 +37,10 @@ let
   policy = types.submodule { options = policyOptions; };
   client = types.submodule {
     options = policyOptions // {
-      key = field types.str ''
-        Bearer key of the client, typically a `''${cred:<name>}` reference.
-        Exactly one of `key` and `listener` must be set.
+      keyHash = field (types.strMatching "[0-9a-f]{64}") ''
+        SHA-256 hash of the bearer token of the client in hex, the `keyHash`
+        of the credential that `llmhop key generate` prints. Exactly one of
+        `keyHash` and `listener` must be set.
       '';
       listener = field types.str ''
         Name of a unix socket listener of `listen` whose requests count as
@@ -88,7 +81,7 @@ let
       streamIdleTimeoutSeconds = field types.ints.u32 "Seconds an event stream may send nothing before it is aborted, `0` meaning no limit.";
       dataParallelSize = field (types.ints.between 1 256) "Data-parallel ranks of every URL, which requests with an affinity key are pinned to.";
       failoverSeconds = field types.ints.u32 "Seconds a server is avoided after it refused a connection or failed three requests in a row, `5` by default.";
-      healthPath = field types.str "Path that readiness and `llmhop_backend_up` probe on every URL, or `null` to skip the model.";
+      healthPath = field types.str "Path that readiness and the metrics probe on every URL, or `null` to skip the model.";
     };
   };
 in
@@ -177,7 +170,7 @@ in
               description = ''
                 Listeners by name, whose sockets systemd passes by the same
                 `FileDescriptorName=`, with the fields llmhop knows of those
-                of `listen`, which tools such as `llmhopctl` read.
+                of `listen`, which tools such as `llmhop top` read.
               '';
             };
             models = mkOption {
@@ -204,8 +197,9 @@ in
             clientCredentials = field types.bool ''
               Whether every credential `llmhop.api-key.<client>` of the
               system credential store becomes the client `<client>`, unless
-              declared in `clients`. It holds a bare key or a JSON object
-              with a `key` and optionally its `policy` and `expiresAt`.
+              declared in `clients`. It holds a JSON object with a `keyHash` and
+              optionally its `policy` and `expiresAt`, which `llmhop key`
+              manages.
             '';
           };
         };
@@ -225,20 +219,6 @@ in
           from the listeners of the gateway. An option left `null` stays out
           of the config, so llmhop's default applies.
         '';
-      };
-
-      ctl = {
-        enable =
-          lib.mkEnableOption "`llmhopctl`, which manages the client keys of `settings.clientCredentials`"
-          // {
-            default = true;
-          };
-        package = mkOption {
-          type = types.package;
-          default = pkgs.callPackage ../../pkgs/llmhopctl/package.nix { };
-          defaultText = lib.literalExpression "pkgs.callPackage ./pkgs/llmhopctl/package.nix { }";
-          description = "The `llmhopctl` package, which reads the gateway's config from `/etc/llmhop/config.json`.";
-        };
       };
 
       container.image = mkOption {
@@ -264,8 +244,7 @@ in
                   default = false;
                   description = ''
                     Whether the listener serves `/llmhop/metrics` without a
-                    key, so it should be a loopback port for Prometheus or a
-                    unix socket.
+                    key, so it should be a loopback port or a unix socket.
                   '';
                 };
                 port = mkOption {
@@ -330,25 +309,10 @@ in
         description = ''
           Listeners of the gateway, at least one, each a `llmhop-<name>.socket`
           unit handing its socket to it through socket activation under the
-          name of the listener. `llmhopctl top` reads the metrics from the
+          name of the listener. `llmhop top` reads the metrics from the
           first unix socket with `metrics`.
           `settings.clients.<name>.listener` makes the requests on a unix
           socket count as a client's.
-        '';
-      };
-      scrapeConfigs = mkOption {
-        type = with types; listOf (attrsOf json);
-        readOnly = true;
-        default = lib.optional (cfg.active && metricsTargets != [ ]) {
-          job_name = "llmhop";
-          metrics_path = "/llmhop/metrics";
-          static_configs = [ { targets = metricsTargets; } ];
-        };
-        defaultText = lib.literalMD "the job of the gateway on the ports of `listen` with `metrics`";
-        description = ''
-          Prometheus scrape jobs of the gateway, for
-          `services.prometheus.scrapeConfigs`, on the ports of the listeners
-          with `metrics`, or none without one.
         '';
       };
     }

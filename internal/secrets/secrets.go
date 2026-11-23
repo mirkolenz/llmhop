@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -109,6 +110,13 @@ func CredentialNames() ([]string, error) {
 		return nil, fmt.Errorf("credentials: %w", err)
 	}
 
+	return CredentialFiles(dir)
+}
+
+// CredentialFiles lists the credentials in dir, its regular files and the
+// links to them, as systemd imports them, which skips the links to
+// directories of a Kubernetes secret volume.
+func CredentialFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials: %w", err)
@@ -117,7 +125,7 @@ func CredentialNames() ([]string, error) {
 	var names []string
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if info, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil && info.Mode().IsRegular() {
 			names = append(names, entry.Name())
 		}
 	}

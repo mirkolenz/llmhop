@@ -91,14 +91,14 @@ func New(cfg *config.Config, limits *Limits) (*Router, error) {
 	}
 
 	// Health, readiness and metrics sit outside the auth middleware: probes,
-	// load balancers and Prometheus must be able to check the proxy without
+	// load balancers and monitoring must be able to check the proxy without
 	// a token.
 	logged := logRequests(api, &limits.metrics)
 	root := http.NewServeMux()
 	registerHealth(root, len(objects))
 	probes := newProber(models)
 	registerReadiness(root, probes)
-	root.Handle("GET "+reservedPrefix+"metrics", metricsOnly(cfg.Listen, &exporter{limits: limits, models: models, prober: probes}))
+	root.Handle("GET "+reservedPrefix+"metrics", metricsOnly(cfg.Listen, &metricsHandler{limits: limits, models: models, prober: probes}))
 	root.Handle(proxyPrefix, logged)
 	root.HandleFunc(reservedPrefix, notFound)
 	root.Handle("/", logged)

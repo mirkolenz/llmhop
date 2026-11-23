@@ -25,6 +25,13 @@ let
     inherit text;
     mode = "0400";
   };
+  # The tokens of the clients, whose credentials hold only their hashes.
+  tokens = {
+    client = "llmhop_client-secret";
+    guest = "llmhop_guest-secret";
+  };
+  credential =
+    token: extra: secretFile (lib.toJSON ({ keyHash = lib.hashString "sha256" token; } // extra));
 in
 testers.nixosTest {
   name = "llmhop";
@@ -33,14 +40,9 @@ testers.nixosTest {
     imports = [ self.nixosModules.default ];
 
     environment.etc = {
-      "credstore/llmhop.api-key.client" = secretFile "client-secret";
-      # A JSON credential, whose policy allows only another model.
-      "credstore/llmhop.api-key.guest" = secretFile (
-        lib.toJSON {
-          key = "guest-secret";
-          policy = "guest";
-        }
-      );
+      "credstore/llmhop.api-key.client" = credential tokens.client { };
+      # The guest's policy allows only another model.
+      "credstore/llmhop.api-key.guest" = credential tokens.guest { policy = "guest"; };
       "llmhop/worker-key" = secretFile "worker-secret";
     };
 
@@ -105,7 +107,7 @@ testers.nixosTest {
 
   nodes.containers = {
     imports = [ self.nixosModules.default ];
-    environment.etc."credstore/llmhop.api-key.client" = secretFile "client-secret";
+    environment.etc."credstore/llmhop.api-key.client" = credential tokens.client { };
     virtualisation.diskSize = 4096;
     # Every container, the gateway reading its imported credentials among
     # them, runs in a user namespace of its own, by default.
@@ -135,6 +137,9 @@ testers.nixosTest {
     in
     ''
       import json
+
+      client = "${tokens.client}"
+      guest = "${tokens.guest}"
 
       def curl(key=None, flags="-fsS"):
           auth = f"-H 'Authorization: Bearer {key}'" if key else ""
@@ -168,8 +173,8 @@ testers.nixosTest {
           machine.fail(curl("nope"))
 
       with subtest("a JSON credential's policy allows only its models"):
-          assert status("guest-secret") == "403"
-          models = json.loads(machine.succeed("curl -fsS -H 'Authorization: Bearer guest-secret' http://127.0.0.1:8080/v1/models"))
+          assert status(guest) == "403"
+          models = json.loads(machine.succeed(f"curl -fsS -H 'Authorization: Bearer {guest}' http://127.0.0.1:8080/v1/models"))
           assert [model["id"] for model in models["data"]] == ["dying"]
 
       with subtest("restarting a listener reconnects the gateway to its sockets"):
@@ -193,54 +198,54 @@ testers.nixosTest {
           machine.wait_for_unit("llama-cpp-fake-model.service")
 
       with subtest("llmhop reaches the worker through its socket"):
-          assert machine.succeed(curl("client-secret")) == "socket ok"
+          assert machine.succeed(curl(client)) == "socket ok"
 
       with subtest("the listener of a client needs no key"):
           assert machine.succeed("""curl -fsS --json '{"model": "fake-model"}' --unix-socket /run/llmhop/local.sock http://localhost/""") == "socket ok"
 
-      with subtest("llmhopctl creates, rotates, updates and revokes keys by reloading llmhop"):
+      with subtest("llmhop key creates, rotates, updates and revokes keys by reloading llmhop"):
           pid = machine.get_unit_property("llmhop", "MainPID")
-          added = machine.succeed("llmhopctl key create added").strip()
+          added = machine.succeed("llmhop key create added").strip()
           assert machine.succeed(curl(added)) == "socket ok"
-          rotated = machine.succeed("llmhopctl key rotate added").strip()
+          rotated = machine.succeed("llmhop key rotate added").strip()
           machine.fail(curl(added))
           assert machine.succeed(curl(rotated)) == "socket ok"
-          machine.succeed("llmhopctl key create --policy guest --expires 30d limited")
+          machine.succeed("llmhop key create --policy guest --expires 30d limited")
           # Rotating keeps the policy.
-          assert status(machine.succeed("llmhopctl key rotate limited").strip()) == "403"
+          assert status(machine.succeed("llmhop key rotate limited").strip()) == "403"
           listed = {
-              name: json.loads(fields)
-              for name, fields in (line.split("\t") for line in machine.succeed("llmhopctl key list").splitlines())
+              name: fields
+              for name, *fields in (line.split() for line in machine.succeed("llmhop key list").splitlines()[1:])
           }
           assert list(listed) == ["added", "client", "guest", "limited"], listed
-          assert listed["added"] == {} and listed["guest"] == {"policy": "guest"}
-          assert listed["limited"]["policy"] == "guest" and listed["limited"]["expiresAt"].startswith("20")
-          # Updating keeps the key, and llmhopctl refuses an unknown policy.
-          machine.succeed("llmhopctl key update --policy guest added")
+          assert listed["added"] == ["-", "-"] and listed["guest"] == ["guest", "-"]
+          assert listed["limited"][0] == "guest" and listed["limited"][1].startswith("20")
+          # Updating keeps the key, and llmhop key refuses an unknown policy.
+          machine.succeed("llmhop key update --policy guest added")
           assert status(rotated) == "403"
-          machine.fail("llmhopctl key update --policy missing added")
-          machine.succeed("llmhopctl key update --policy= --no-expires limited")
-          assert status(machine.succeed("llmhopctl key rotate limited").strip()) == "200"
-          machine.succeed("llmhopctl key revoke added")
+          machine.fail("llmhop key update --policy missing added")
+          machine.succeed("llmhop key update --policy= --no-expires limited")
+          assert status(machine.succeed("llmhop key rotate limited").strip()) == "200"
+          machine.succeed("llmhop key revoke added")
           machine.fail(curl(rotated))
-          machine.fail("llmhopctl key rotate added")
-          machine.fail("llmhopctl key create client")
-          machine.fail("llmhopctl key create local")
+          machine.fail("llmhop key rotate added")
+          machine.fail("llmhop key create client")
+          machine.fail("llmhop key create local")
           assert machine.get_unit_property("llmhop", "MainPID") == pid
-          assert machine.succeed(curl("client-secret")) == "socket ok"
+          assert machine.succeed(curl(client)) == "socket ok"
 
       with subtest("the metrics socket counts requests, which the journal sums by client"):
-          metrics = machine.succeed("curl -fsS --unix-socket /run/llmhop/metrics.sock http://localhost/llmhop/metrics")
-          assert 'llmhop_requests_total{client="client",' in metrics, metrics
+          metrics = json.loads(machine.succeed("curl -fsS --unix-socket /run/llmhop/metrics.sock http://localhost/llmhop/metrics"))
+          assert any(r["client"] == "client" and r["status"] == 200 for r in metrics["requests"]), metrics
           machine.fail("curl -fsS http://127.0.0.1:8080/llmhop/metrics")
-          usage = machine.succeed("llmhopctl usage --since 1h").splitlines()
+          usage = machine.succeed("journalctl -u llmhop.service -o cat --since -1h | llmhop usage").splitlines()
           assert any(line.split()[0] == "client" for line in usage[1:]), usage
 
       containers.wait_for_unit("llmhop.service")
       containers.wait_for_unit("llama-cpp-fake-model.service")
 
-      with subtest("containers: llmhopctl restarts llmhop to import a key"):
-          key = containers.succeed("llmhopctl key create added").strip()
+      with subtest("containers: llmhop key restarts llmhop to import a key"):
+          key = containers.succeed("llmhop key create added").strip()
           assert containers.succeed(curl(key)) == "socket ok"
 
       with subtest("containers: the worker downloads into its volume in its own user namespace"):
@@ -265,7 +270,7 @@ testers.nixosTest {
           wait_restarted(machine, worker, pid)
           machine.succeed(f"test -f {snapshots}/b2/model.gguf")
           machine.fail(f"test -e {snapshots}/a1")
-          assert machine.succeed(curl("client-secret")) == "socket ok"
+          assert machine.succeed(curl(client)) == "socket ok"
 
       # Starting the refresh waits for the one the fetch pulled in.
       with subtest("a successful fetch leaves an explicitly stopped worker stopped"):
@@ -277,7 +282,7 @@ testers.nixosTest {
           pid = containers.get_unit_property("llmhop", "MainPID")
           containers.succeed("systemctl restart llmhop-image")
           wait_restarted(containers, "llmhop", pid)
-          assert containers.succeed(curl("client-secret")) == "socket ok"
+          assert containers.succeed(curl(client)) == "socket ok"
 
       with subtest("restarting its image leaves an explicitly stopped gateway stopped"):
           containers.succeed("systemctl stop llmhop")

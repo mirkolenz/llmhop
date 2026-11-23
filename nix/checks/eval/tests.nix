@@ -4,6 +4,7 @@
   apiKeys,
   serverConfig,
   watermarkKey,
+  ciKeyHash,
   containsAll,
   evaluates,
   credentialsOf,
@@ -371,7 +372,7 @@
         affinity = [ { body = [ "user" ]; } ];
         clients = {
           ci = {
-            key = "\${env:CI_KEY}";
+            keyHash = ciKeyHash;
             policy = "guest";
           };
           ssh.listener = "ssh";
@@ -380,8 +381,7 @@
     };
   };
 
-  # Every listener reaches llmhop under its name with its fields,
-  # and Prometheus scrapes only ports.
+  # Every listener reaches llmhop under its name with its fields.
   testListeners = {
     expr = {
       listen = util.withoutNulls policed.services.llmhop.gateway.settings.listen;
@@ -392,11 +392,6 @@
         inherit (policed.systemd.sockets.llmhop-metrics) listenStreams;
         inherit (policed.systemd.sockets.llmhop-metrics.socketConfig) SocketGroup SocketMode;
       };
-      scrape = map (job: {
-        inherit (job) metrics_path;
-        targets = (lib.head job.static_configs).targets;
-      }) policed.services.llmhop.gateway.scrapeConfigs;
-      unscraped = routable.services.llmhop.gateway.scrapeConfigs;
     };
     expected = {
       listen = {
@@ -404,7 +399,7 @@
           socket = "/run/llmhop/metrics.sock";
           metrics = true;
         };
-        prometheus = {
+        monitor = {
           host = "127.0.0.1";
           port = 9464;
           metrics = true;
@@ -416,7 +411,7 @@
       };
       names = {
         llmhop-metrics = "metrics";
-        llmhop-prometheus = "prometheus";
+        llmhop-monitor = "monitor";
         llmhop-ssh = "ssh";
       };
       metrics = {
@@ -424,13 +419,6 @@
         SocketGroup = "wheel";
         SocketMode = "0660";
       };
-      scrape = [
-        {
-          metrics_path = "/llmhop/metrics";
-          targets = [ "127.0.0.1:9464" ];
-        }
-      ];
-      unscraped = [ ];
     };
   };
 

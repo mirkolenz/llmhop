@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mirkolenz/llmhop/internal/apikey"
 	"github.com/mirkolenz/llmhop/internal/config"
 )
 
@@ -19,9 +20,9 @@ func TestPolicies(t *testing.T) {
 			Models:            []string{"m*", "detector"},
 		}},
 		Clients: map[string]config.Client{
-			"alice": {Key: "a", PolicyName: "p"},
-			"bob":   {Key: "b"},
-			"dave":  {Key: "d", ExpiresAt: time.Now().Add(-time.Hour)},
+			"alice": {KeyHash: apikey.Of("llmhop_a-secret"), PolicyName: "p"},
+			"bob":   {KeyHash: apikey.Of("llmhop_b-secret")},
+			"dave":  {KeyHash: apikey.Of("llmhop_d-secret"), ExpiresAt: time.Now().Add(-time.Hour)},
 		},
 		Models: map[string]config.Model{
 			"m":        {URLs: []string{backend.URL}},
@@ -35,9 +36,9 @@ func TestPolicies(t *testing.T) {
 		status                int
 		code                  string
 	}{
-		{"forbidden model", "Bearer b", "/", `{"model":"other"}`, http.StatusForbidden, "model_not_allowed"},
-		{"forbidden model to retrieve", "Bearer b", "/v1/models/other", "", http.StatusForbidden, "model_not_allowed"},
-		{"expired key", "Bearer d", "/", `{"model":"m"}`, http.StatusUnauthorized, "key_expired"},
+		{"forbidden model", "Bearer llmhop_b-secret", "/", `{"model":"other"}`, http.StatusForbidden, "model_not_allowed"},
+		{"forbidden model to retrieve", "Bearer llmhop_b-secret", "/v1/models/other", "", http.StatusForbidden, "model_not_allowed"},
+		{"expired key", "Bearer llmhop_d-secret", "/", `{"model":"m"}`, http.StatusUnauthorized, "key_expired"},
 	}
 
 	for _, c := range cases {
@@ -62,20 +63,20 @@ func TestPolicies(t *testing.T) {
 		Data []modelObject `json:"data"`
 	}
 
-	if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer b").Body.Bytes(), &list); err != nil || len(list.Data) != 1 || string(list.Data[0]["id"]) != `"m"` {
+	if err := json.Unmarshal(send(t, h, http.MethodGet, "/v1/models", "", "Bearer llmhop_b-secret").Body.Bytes(), &list); err != nil || len(list.Data) != 1 || string(list.Data[0]["id"]) != `"m"` {
 		t.Errorf("listed %v, %v", list.Data, err)
 	}
 
 	// Bodies pass verbatim, whether routed by their model or their path.
-	if rec := send(t, h, http.MethodPost, "/v1/embeddings", `{"model":"m"}`, "Bearer a"); rec.Code != http.StatusOK || captured.body != `{"model":"m"}` {
+	if rec := send(t, h, http.MethodPost, "/v1/embeddings", `{"model":"m"}`, "Bearer llmhop_a-secret"); rec.Code != http.StatusOK || captured.body != `{"model":"m"}` {
 		t.Errorf("got status %d, backend saw %s", rec.Code, captured.body)
 	}
 
-	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/detector/detect", `{"text":"x"}`, "Bearer a"); rec.Code != http.StatusOK || captured.body != `{"text":"x"}` {
+	if rec := send(t, h, http.MethodPost, "/llmhop/proxy/detector/detect", `{"text":"x"}`, "Bearer llmhop_a-secret"); rec.Code != http.StatusOK || captured.body != `{"text":"x"}` {
 		t.Errorf("got status %d, backend saw %s", rec.Code, captured.body)
 	}
 
-	rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, "Bearer a")
+	rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, "Bearer llmhop_a-secret")
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" || rec.Header().Get("X-Ratelimit-Remaining-Requests") != "0" {
 		t.Errorf("got status %d and headers %v", rec.Code, rec.Header())
 	}

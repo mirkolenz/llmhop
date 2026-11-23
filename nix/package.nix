@@ -18,7 +18,7 @@ buildGoLatestModule (finalAttrs: {
       ../internal
     ];
   };
-  vendorHash = "sha256-v1tQfSUpKCEE7o5DqNJ86ZxomXMRhP6IR89ZNkpl6EA=";
+  vendorHash = "sha256-d6DPHpk/K3gbe6qOCT7yLPWnFRcZGja2f+tC4Caly5Y=";
   # Renames the module derivation per go.sum, so a stale vendorHash fails
   # instead of silently reusing the cached modules of the old go.sum.
   goSum = ../go.sum;
@@ -39,9 +39,7 @@ buildGoLatestModule (finalAttrs: {
   # Saves what the licenses of the linked dependencies require alongside the
   # binary, failing on a forbidden or unknown license, like .goreleaser.yaml.
   # go-licenses skips the standard library, whose license is in the Go source.
-  # It also ships the Grafana dashboard for `services.grafana.provision`.
   postInstall = ''
-    install -Dm444 ${../share/grafana/dashboards/llmhop.json} $out/share/grafana/dashboards/llmhop.json
     licenses=$out/share/licenses/llmhop
     go-licenses save ./cmd/llmhop --save_path $licenses --ignore github.com/mirkolenz/llmhop
     mkdir $licenses/go

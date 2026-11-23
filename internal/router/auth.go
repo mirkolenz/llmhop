@@ -2,12 +2,12 @@ package router
 
 import (
 	"context"
-	"crypto/sha256"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/mirkolenz/llmhop/internal/apikey"
 	"github.com/mirkolenz/llmhop/internal/config"
 )
 
@@ -18,8 +18,8 @@ const clientHeader = "X-Llmhop-Client"
 // authenticator checks bearer tokens against the keys of the clients, and
 // names the requests of client listeners without one.
 type authenticator struct {
-	// keys maps the SHA-256 digest of each key to its client.
-	keys map[[sha256.Size]byte]*client
+	// keys maps the hash of each key to its client.
+	keys map[apikey.Hash]*client
 	// listeners maps the name of each client listener to its client.
 	listeners map[string]*client
 	// anonymous is the client of every request without any configured.
@@ -30,7 +30,7 @@ type authenticator struct {
 
 func newAuthenticator(cfg *config.Config, limits *Limits) *authenticator {
 	a := &authenticator{
-		keys:        make(map[[sha256.Size]byte]*client),
+		keys:        make(map[apikey.Hash]*client),
 		listeners:   make(map[string]*client),
 		crossOrigin: http.NewCrossOriginProtection(),
 	}
@@ -45,7 +45,7 @@ func newAuthenticator(cfg *config.Config, limits *Limits) *authenticator {
 		if c.Listener != "" {
 			a.listeners[c.Listener] = cl
 		} else {
-			a.keys[sha256.Sum256([]byte(c.Key))] = cl
+			a.keys[c.KeyHash] = cl
 		}
 	}
 
@@ -72,9 +72,7 @@ func (a *authenticator) wrap(next http.Handler) http.Handler {
 		}
 
 		if !onListener {
-			var ok bool
-
-			if c, ok = a.bearerClient(req); !ok {
+			if c = a.bearerClient(req); c == nil {
 				unauthorized(w, "invalid_api_key", "missing or invalid bearer token")
 
 				return
@@ -98,15 +96,15 @@ func unauthorized(w http.ResponseWriter, code, message string) {
 	writeError(w, http.StatusUnauthorized, code, message)
 }
 
-// bearerClient returns the client of the token of req. A token outside the
-// Bearer scheme never counts, even if known.
-func (a *authenticator) bearerClient(req *http.Request) (*client, bool) {
+// bearerClient returns the client of the token of req, or nil. A token
+// outside the Bearer scheme never counts, even if known.
+func (a *authenticator) bearerClient(req *http.Request) *client {
 	token, ok := bearer(req.Header.Get("Authorization"))
 	if !ok {
-		return nil, false
+		return nil
 	}
 
-	return a.lookup(token)
+	return a.keys[apikey.Of(token)]
 }
 
 // sameOrigin admits other clients than browsers and the requests of browsers
@@ -150,14 +148,6 @@ func loopbackHost(hostport string) bool {
 	host := strings.TrimSuffix(strings.ToLower((&url.URL{Host: hostport}).Hostname()), ".")
 
 	return host == "localhost" || strings.HasSuffix(host, ".localhost") || net.ParseIP(host).IsLoopback()
-}
-
-// lookup returns the client of token by its digest, so the timing of the
-// lookup reveals nothing about the keys.
-func (a *authenticator) lookup(token string) (*client, bool) {
-	c, ok := a.keys[sha256.Sum256([]byte(token))]
-
-	return c, ok
 }
 
 // bearer returns the token of header if it is "Bearer <token>", whose scheme

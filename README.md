@@ -6,7 +6,7 @@ LLMhop reads the `model` field of an incoming request and reverse-proxies it to 
 It is built for single-model servers like [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang), but works with any OpenAI-compatible backend, self-hosted or remote.
 
 - Pure Go, no CGO, stateless and safe behind any load balancer.
-- Body and path routing with aliases and wildcards, a models API served from the config, health, readiness and Prometheus metrics, graceful draining and reloading.
+- Body and path routing with aliases and wildcards, a models API served from the config, health, readiness and JSON metrics, graceful draining and reloading.
 - Balancing over several servers or data-parallel ranks with stateless prefix-cache affinity under bounded loads, failover, retries, passive and active health checks, queueing and timeouts.
 - Clients authenticated by a key or a unix socket, each with a policy deciding its models, concurrency, request rate and share of a saturated model.
 - Ships as a static binary, a Docker image and a hardened NixOS module running llama.cpp, SGLang or vLLM behind llmhop or no gateway, natively or in containers.
@@ -90,9 +90,9 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
   "listen": {
     "default": { "host": "127.0.0.1", "port": 8080 },
     "ssh": { "socket": "/run/llmhop/ssh.sock" },
-    "prometheus": { "host": "127.0.0.1", "port": 9464, "metrics": true }
+    "admin": { "socket": "/run/llmhop/admin.sock", "metrics": true }
   },
-  "clients": { "alice": { "key": "${cred:llmhop.api-key.alice}" } },
+  "clients": { "alice": { "keyHash": "3f9a...e1" } },
   "models": {
     "llama-3-8b": { "urls": ["http://localhost:30000"], "healthPath": "/health" },
     "meta-llama/Llama-3.1-8B": {
@@ -120,22 +120,33 @@ Under systemd socket activation, each passed socket serves the listener named by
 A listener without `port` and `socket` takes the socket of its name, which must be passed, while a passed socket without a listener serves with the defaults, unless it has the address of a listener, which fails the start as a misnamed socket.
 A client of a `listener` requires its passed sockets to be unix sockets.
 A reload that would bind a listener elsewhere fails, since only a restart rebinds.
-A listener with `metrics` serves the [metrics](#metrics) without a key, so it should be a loopback port for Prometheus or a unix socket.
+A listener with `metrics` serves the [metrics](#metrics) without a key, so it should be a loopback port or a unix socket.
 Without any listener or passed socket, `serve` fails, while `check` does not require one.
 Each of `urls` is an absolute `http(s)` URL or `unix:///<socket path>`.
 `corsOrigins` lists the origins, as in `https://chat.example`, whose pages may call the API with a bearer key, or `*` for every origin, which is safe since browsers never send a key on their own.
 llmhop answers the preflights, allows the methods of REST APIs and every request and response header but no credentials, and drops the CORS headers of backends whenever keys are required, so only `corsOrigins` decides which pages read a response.
 It requires clients, and CORS never applies to the listener of a client.
 A model's `headers` are applied last, so a configured `Authorization` replaces the client's.
-Unknown keys are rejected, and `llmhop check config.json` validates a config without binding a port or expanding secrets.
+Unknown keys are rejected, and `llmhop check` validates a config without binding a port or expanding secrets.
 
 ### Clients and policies
 
 With any entry of `clients` or with `clientCredentials`, every route but health, readiness and metrics requires a client, while the backend learns its name from `X-Llmhop-Client`.
-A client sets exactly one of `key`, a bearer key stripped before forwarding, or `listener`, the name of a unix socket listener of `listen` whose requests count as the client's without a key, so the socket's permissions decide who may connect, such as an admin forwarding it over SSH.
+A client sets exactly one of `keyHash`, the hash of a bearer token stripped before forwarding, or `listener`, the name of a unix socket listener of `listen` whose requests count as the client's without a key, so the socket's permissions decide who may connect, such as an admin forwarding it over SSH.
 A listener belongs to at most one client.
 Browsers must name a loopback host there, so web pages cannot rebind a domain to a forwarded port, and get `403` for cross-site requests with unsafe methods such as `POST`, while they cannot read the answers of the others.
 A client may also set `expiresAt`, an RFC 3339 time after which its key gets `401`, and `policy`, the name of an entry of `policies`.
+
+A token reads `llmhop_<secret>`, a prefix that secret scanners recognize and 130 random bits.
+llmhop stores only its SHA-256 hash in hex as `keyHash`, so a leaked config or credential reveals no usable token.
+`llmhop key create` stores a new key for `clientCredentials` under systemd, while `llmhop key generate` prints a token and its `credential`, whose fields go into a declared client or, as they are, into a credential file, such as one of `/run/secrets` in a container, which `SIGHUP` reloads:
+
+```sh
+llmhop key generate --policy guest --expires 30d > out.json
+jq .credential out.json > secrets/llmhop.api-key.alice
+jq -r .token out.json
+docker kill -s HUP llmhop
+```
 
 ```json
 {
@@ -149,7 +160,7 @@ A client may also set `expiresAt`, an RFC 3339 time after which its key gets `40
     "guest": { "maxConcurrentRequests": 2, "requestsPerMinute": 10 }
   },
   "clients": {
-    "alice": { "key": "${cred:llmhop.api-key.alice}", "policy": "research", "maxConcurrentRequests": 32 },
+    "alice": { "keyHash": "3f9a...e1", "policy": "research", "maxConcurrentRequests": 32 },
     "admin": { "listener": "ssh" }
   },
   "clientCredentials": true
@@ -173,35 +184,35 @@ Responses of a client with `requestsPerMinute` carry OpenAI's `x-ratelimit-limit
 Every limit is exact and needs nothing from a request body or a response.
 The limiters live in the memory of each instance, survive a reload and reset on a restart, so N instances behind a load balancer each enforce their own share, and a limit should be divided by N.
 
-`"clientCredentials": true` imports every systemd credential named `llmhop.api-key.<client>` as the client `<client>`, read at startup and on every reload, which keeps keys required while there is none.
+`"clientCredentials": true` imports every credential named `llmhop.api-key.<client>` as the client `<client>`, read at startup and on every reload, which keeps keys required while there is none.
 A credential named like a declared client is skipped, so every key can follow `llmhop.api-key.<client>`.
 An invalid credential, such as one naming a policy the config no longer has, is logged and skipped, so its client gets `401` while the gateway still starts.
-A credential holds the bare key or a JSON object with the `key` and optionally its `policy` and `expiresAt`, such as `{"key": "...", "policy": "guest", "expiresAt": "2027-01-01T00:00:00Z"}`, so a key and its metadata rotate together, while a client without a `policy` gets the `defaults`.
+A credential holds a JSON object with the `keyHash` and optionally its `policy` and `expiresAt`, such as `{"keyHash": "3f9a...e1", "policy": "guest", "expiresAt": "2027-01-01T00:00:00Z"}`, so a key and its metadata rotate together, while a client without a `policy` gets the `defaults`.
 Any other member is an error, so limits belong to policies.
 Every credential llmhop defines is named `llmhop.<kind>[.<instance>]`, as the API key `llmhop.api-key.<client>`, since `/etc/credstore` is shared by the whole host.
 
 ### Metrics
 
-A listener with `metrics` serves `GET /llmhop/metrics` in the Prometheus text format.
+A listener with `metrics` serves `GET /llmhop/metrics` as JSON, which `llmhop top` reads:
 
-| Metric                      | Type    | Labels              |
-| --------------------------- | ------- | ------------------- |
-| `llmhop_requests_total`     | counter | client, model, code |
-| `llmhop_requests_in_flight` | gauge   | client, model       |
-| `llmhop_queue_depth`        | gauge   | model               |
-| `llmhop_backend_up`         | gauge   | model, url          |
+```json
+{
+  "requests": [{ "client": "alice", "model": "qwen3-8b", "status": 200, "count": 42 }],
+  "models": [{ "name": "qwen3-8b", "queued": 0, "running": { "alice": 1 }, "up": { "unix:///run/llmhop/vllm-qwen3-8b/http.sock": true } }]
+}
+```
 
-A rate limit shows as `code` `429`.
+`requests` counts the answered requests by client, model and status, where a rate limit shows as `429`, and `models` holds the requests waiting for and holding their slots of each model.
+`up` reports by URL whether a server passed its latest [probe](#balancing-and-affinity), as readiness does, and is absent without a `healthPath`.
 llmhop only reports what it decides itself, while token counts and latencies such as the time to the first token come from the metrics of the backends.
-`llmhop_backend_up` reports whether a server passed its latest [probe](#balancing-and-affinity), as readiness does.
-The counters survive a reload and reset on a restart.
+The counts survive a reload and reset on a restart.
 
 llmhop logs JSON lines, among them one per answered request with `msg` `request`, its `id`, `method`, `path`, `status`, `bytes`, `duration` in seconds, `client`, `policy`, the requested `model` and `server`.
 Prompts and responses are never logged.
 
 ### Secret references
 
-Keys of `clients` and strings in `models.*.headers` are expanded at startup, and an unresolved reference is a startup error:
+Strings in `models.*.headers` are expanded at startup, and an unresolved reference is a startup error:
 
 - `${cred:name}`: the file `name` in `$CREDENTIALS_DIRECTORY` with trailing newlines trimmed, a systemd credential, or a secret of Docker, Compose or Podman, since the image sets `/run/secrets`. Its name starts with an ASCII letter, digit or `_` and continues with those, `.` and `-`, up to 255 characters, as the NixOS module requires.
 - `${env:NAME}`: an environment variable, for platforms that pass secrets only that way.
@@ -221,13 +232,26 @@ Keys of `clients` and strings in `models.*.headers` are expanded at startup, and
 ## Running
 
 ```sh
-llmhop serve config.json
-nix run github:mirkolenz/llmhop -- serve config.json
-docker run --rm -p 8080:8080 -v ./config.json:/config.json ghcr.io/mirkolenz/llmhop
+llmhop serve --config config.json
+nix run github:mirkolenz/llmhop -- serve --config config.json
+docker run --rm -p 8080:8080 -v ./config.json:/etc/llmhop/config.json ghcr.io/mirkolenz/llmhop
 ```
 
-`llmhop version` prints the version.
-The image runs `serve /config.json`, so the mounted config must set `"listen": {"default": {"port": 8080}}`.
+| Command                                   | Purpose                                                                  |
+| ----------------------------------------- | ------------------------------------------------------------------------ |
+| `serve`                                   | serve the gateway, reloading the config on `SIGHUP`                      |
+| `check`                                   | validate the config without serving or reading secrets                   |
+| `key list`                                | list the clients of `clientCredentials` with their policy and expiry     |
+| `key create <client>`                     | store a key for a new client and print its token                         |
+| `key update <client>`                     | change the policy or expiry of a client, keeping its key                 |
+| `key rotate <client>`                     | replace the key of a client and print its token                          |
+| `key revoke <client>`                     | delete the key of a client                                               |
+| `key generate`                            | print a new token and its credential, storing nothing                    |
+| `top`                                     | show what the models and clients do right now                            |
+| `usage [--by client\|model\|policy]`      | print the requests and errors of the log on stdin by group               |
+
+Every command reads the config at `--config`, `$LLMHOP_CONFIG` or `/etc/llmhop/config.json`, `--help` explains each, and `--version` prints the version.
+The image runs `serve`, so the mounted config must set `"listen": {"default": {"port": 8080}}`.
 
 ## NixOS and system-manager modules
 
@@ -266,7 +290,7 @@ Routed workloads must stay on loopback and leave authentication to the gateway.
 The gateway runs as the `llmhop` user with one socket-activated `llmhop-<name>.socket` per enabled entry of `listen`, as in `listen.caddy.socketGroup = "caddy"` for a unix socket, or as a container on the host network receiving the same sockets, which loads an image archive of the same build, unless `container.image` names a registry reference such as `ghcr.io/mirkolenz/llmhop:latest`.
 Each listener renders into `settings.listen.<name>` its `host` and `port`, or its `socket` without a `port`, which its socket must have, and `metrics`, and reaches llmhop by its name through `FileDescriptorName=`.
 `settings.clients.<name>.listener = "ssh"` makes the requests on the unix socket of `listen.ssh` count as a client's without a key.
-The gateway has no implicit listener and requires at least one, while a listener without `port` is a unix socket `/run/llmhop/<name>.sock`, as in `listen.admin = { socketGroup = "wheel"; metrics = true; }` for `llmhopctl top`.
+The gateway has no implicit listener and requires at least one, while a listener without `port` is a unix socket `/run/llmhop/<name>.sock`, as in `listen.admin = { socketGroup = "wheel"; metrics = true; }` for `llmhop top`.
 `environment` and `environmentFile` are forwarded to the service.
 Its generated config is validated at build time with `llmhop check`, routes every LoRA adapter as an alias and pins requests to the ranks of a model with `dataParallelSize`, see [balancing](#balancing-and-affinity).
 Natively, a changed config reloads the gateway in place, without dropping a request.
@@ -287,27 +311,23 @@ services.llmhop.gateway.settings = {
 `clientCredentials = true` imports the keys of `/etc/credstore/llmhop.api-key.<client>`, or encrypted ones of `/etc/credstore.encrypted`, so clients come and go without a rebuild by adding or deleting their file.
 Natively, `systemctl reload llmhop` then re-imports the credentials and reloads the config without a restart, while a container needs `systemctl restart llmhop`, whose sockets hold new connections meanwhile.
 A reload keeps the in-memory limiters of the clients, while the restart of a container resets them.
-`llmhopctl`, installed unless `ctl.enable` is false, does both as root with `llmhopctl key list`, `create <client>`, `update <client>`, `rotate <client>` and `revoke <client>`.
-`create` and `update` take `--policy <name>`, which must name an entry of `policies`, and `--expires` with a validity such as `12h`, `30d` or `2w`, while `update` clears them with `--policy ''` and `--no-expires`.
-It creates JSON credentials named `llmhop.api-key.<client>`, prints new keys, keeps the key on `update`, the policy, expiry and store on `rotate`, and lists every client of `clientCredentials` with its policy and expiry as one JSON object per line.
+The gateway installs `llmhop`, whose `key` commands do both as root.
+`create` and `update` take `--policy <name>`, which must name an entry of `policies`, and `--expires` with a date, an RFC 3339 time or a validity such as `12h`, `30d` or `2w`, while `update` clears them with `--policy ''` and `--no-expires`.
+It stores JSON credentials named `llmhop.api-key.<client>`, prints new tokens, keeps the key on `update`, and the policy, expiry and store on `rotate`.
+`list` marks an unreadable credential and reports it after listing the others, while `update` and `rotate` refuse one, so revoke and create its key instead.
 
-`llmhopctl top` shows the gateway live, without root for the group of the metrics socket and remotely as `ssh <host> llmhopctl top`.
+`llmhop top` shows the gateway live, without root for the group of the metrics socket and remotely as `ssh <host> llmhop top`.
 It polls the metrics of llmhop on the first unix socket listener with `metrics` every two seconds and draws a table of the models, with their ready backends and queued requests, and a table of the clients, each with their requests in flight and their requests and errors per second since the previous poll.
-`llmhopctl usage [--since 7d] [--by client|model|policy]` totals the requests and errors of a period from the request lines in the journal of the gateway, natively and in a container alike, so `top` shows the present and `usage` the past.
-An error is a response with a status from `400`, including the `429` of a rate limit.
+`llmhop usage` totals the requests and errors of the request lines of the log on stdin, so `top` shows the present and `usage` the past, while the log tool selects the source and the period:
 
-The read-only `services.llmhop.gateway.scrapeConfigs` holds the Prometheus job of llmhop on the ports of the listeners with `metrics`, which Prometheus needs since it cannot scrape a unix socket, and the package ships a Grafana dashboard, while the module configures neither:
-
-```nix
-services.llmhop.gateway.listen.prometheus = {
-  port = 9464;
-  metrics = true;
-};
-services.prometheus.scrapeConfigs = config.services.llmhop.gateway.scrapeConfigs;
-services.grafana.provision.dashboards.settings.providers = [
-  { options.path = "${config.services.llmhop.gateway.package}/share/grafana/dashboards"; }
-];
+```sh
+journalctl -u llmhop -o cat --since -7d | llmhop usage --by model
+docker logs --since 7d llmhop 2>&1 | llmhop usage
 ```
+
+The gateway logs to the journal of `llmhop.service` natively and in a container alike.
+The `key` commands, all but `generate`, manage the credentials of that service and need systemd.
+An error is a response with a status from `400`, including the `429` of a rate limit.
 
 Without the gateway, each model serves clients on its own socket or `port`, and `socketClients` lists the users, such as a reverse proxy, that may connect to every native model socket.
 

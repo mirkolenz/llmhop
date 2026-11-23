@@ -20,14 +20,12 @@
   '';
   config = {
     Entrypoint = [ (lib.getExe llmhop) ];
-    Cmd = [
-      "serve"
-      "/config.json"
-    ];
+    Cmd = [ "serve" ];
     # Where Docker, Compose and Podman mount secrets, for `${cred:<name>}`.
     Env = [ "CREDENTIALS_DIRECTORY=/run/secrets" ];
     User = "nobody:nobody";
-    # The mounted config must set `"listen": {"default": {"port": 8080}}`.
+    # The config mounted at `/etc/llmhop/config.json` must set
+    # `"listen": {"default": {"port": 8080}}`.
     ExposedPorts."8080/tcp" = { };
     Labels = {
       "org.opencontainers.image.source" = "https://github.com/mirkolenz/llmhop";

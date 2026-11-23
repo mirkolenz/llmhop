@@ -1,5 +1,38 @@
 # Changelog
 
+## [4.0.0](https://github.com/mirkolenz/llmhop/compare/v3.3.1...v4.0.0) (2026-11-23)
+
+### ⚠ BREAKING CHANGES
+
+* **nixos:** require explicit gateway listeners
+* **nixos:** serve workloads sharing a name as replicas
+* add sglang session affinity with typed sources
+* **nixos:** type every gateway setting
+* move own routes under /llmhop
+* add client policies with fair-use limits and named listeners
+* **nixos:** prefix watermark credentials with llmhop
+* **nixos:** drop third-party gateways and run containers in user namespaces
+* rewrite alias models to their upstream name
+
+### Features
+
+* add client policies with fair-use limits and named listeners ([73da901](https://github.com/mirkolenz/llmhop/commit/73da901ae6f1d03b2fdd5b0f48a2aee02d7160ca))
+* add prometheus metrics and json request logs ([2fe1d39](https://github.com/mirkolenz/llmhop/commit/2fe1d39a89e0f6c8138078ed18abe719d66de7ef))
+* add retries, health checks and bounded-load affinity ([3ccedd0](https://github.com/mirkolenz/llmhop/commit/3ccedd025c3cae83b8b4feaf5a2221dede4a4ad0))
+* add sglang session affinity with typed sources ([4773f47](https://github.com/mirkolenz/llmhop/commit/4773f47e4c260095301e8f432e8d4bfee73dbb62))
+* add stream idle timeout ([ba025c4](https://github.com/mirkolenz/llmhop/commit/ba025c44536768e8afd6d361f91f4a602c16da02))
+* move own routes under /llmhop ([21b602f](https://github.com/mirkolenz/llmhop/commit/21b602fd46ea1f24c54575314533000670b6d9cc))
+* **nixos:** drop third-party gateways and run containers in user namespaces ([3928ef7](https://github.com/mirkolenz/llmhop/commit/3928ef73c41f8f8dcd7ca8aab575ba596f731f12))
+* **nixos:** prefix watermark credentials with llmhop ([cdf7188](https://github.com/mirkolenz/llmhop/commit/cdf7188d9cf1a930858277701d6e768f3f65c749))
+* **nixos:** require explicit gateway listeners ([0de7efc](https://github.com/mirkolenz/llmhop/commit/0de7efca8cfc225fd7f4e6cfa1c20f8b632f87d2))
+* **nixos:** serve workloads sharing a name as replicas ([4bc4072](https://github.com/mirkolenz/llmhop/commit/4bc4072cfbedb5469c37c280a781092bd2176321))
+* **nixos:** type every gateway setting ([583d99b](https://github.com/mirkolenz/llmhop/commit/583d99b6bb8133adf5b2f4cdead7b6c2780aeb23))
+* rewrite alias models to their upstream name ([eb6c967](https://github.com/mirkolenz/llmhop/commit/eb6c9673fc2b7733c0d8dbbaba6dc1ab39c12896))
+
+### Performance Improvements
+
+* pool proxy copy buffers ([b9452ae](https://github.com/mirkolenz/llmhop/commit/b9452ae07d99a94479e65ec58debaf3509b82f52))
+
 ## [3.3.1](https://github.com/mirkolenz/llmhop/compare/v3.3.0...v3.3.1) (2026-11-21)
 
 ### Bug Fixes

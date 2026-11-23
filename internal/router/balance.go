@@ -180,6 +180,7 @@ func newModel(name string, m config.Model, q *queue, p *pool, stripCORS bool) (*
 			return nil
 		},
 		ErrorHandler: proxyError,
+		BufferPool:   &copyBuffers,
 	}
 
 	return md, nil
@@ -554,6 +555,25 @@ func hashOf(parts ...string) uint64 {
 	}
 
 	return h.Sum64()
+}
+
+// copyBuffers holds the buffers every proxy copies response bodies with,
+// which ReverseProxy would otherwise allocate per response.
+var copyBuffers bufferPool
+
+// bufferPool pools buffers of the 32 KiB that ReverseProxy copies with.
+type bufferPool struct{ pool sync.Pool }
+
+func (p *bufferPool) Get() []byte {
+	if b, ok := p.pool.Get().(*[]byte); ok {
+		return *b
+	}
+
+	return make([]byte, 32<<10)
+}
+
+func (p *bufferPool) Put(b []byte) {
+	p.pool.Put(&b)
 }
 
 // mix is the finalizer of SplitMix64, which spreads a key and target id

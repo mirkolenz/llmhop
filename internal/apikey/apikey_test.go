@@ -1,6 +1,7 @@
 package apikey
 
 import (
+	"crypto/sha256"
 	"encoding/json/v2"
 	"strings"
 	"testing"
@@ -9,7 +10,8 @@ import (
 // A hash survives its text form, which rejects anything but its hex digits.
 func TestHash(t *testing.T) {
 	token, hash := Generate()
-	if !strings.HasPrefix(token, prefix) || hash != Of(token) {
+	secret := token[len(prefix) : len(prefix)+encoding.EncodedLen(sha256.Size)]
+	if token != prefix+secret+checksum(secret) || hash != Of(token) {
 		t.Fatalf("Generate() = %q, %x", token, hash)
 	}
 

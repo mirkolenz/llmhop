@@ -137,7 +137,7 @@ A listener belongs to at most one client.
 Browsers must name a loopback host there, so web pages cannot rebind a domain to a forwarded port, and get `403` for cross-site requests with unsafe methods such as `POST`, while they cannot read the answers of the others.
 A client may also set `expiresAt`, an RFC 3339 time after which its key gets `401`, and `policy`, the name of an entry of `policies`.
 
-A token reads `llmhop_<secret>`, a prefix that secret scanners recognize and 130 random bits.
+A token reads `llmhop_<secret><checksum>`, a prefix that secret scanners recognize, 256 random bits as 52 base32 characters, and their CRC32 as 7 more, which lets scanners discard random matches offline.
 llmhop stores only its SHA-256 hash in hex as `keyHash`, so a leaked config or credential reveals no usable token.
 `llmhop key create` stores a new key for `clientCredentials` under systemd, while `llmhop key generate` prints a token and its `credential`, whose fields go into a declared client or, as they are, into a credential file, such as one of `/run/secrets` in a container, which `SIGHUP` reloads:
 

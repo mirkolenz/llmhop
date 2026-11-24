@@ -69,20 +69,10 @@ func (c topCmd) Run(g *Globals) error {
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
 
+	// The first frame compares the first sample with itself, without rates.
+	now := last
+
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		}
-
-		now, err := poll(ctx, client, metrics)
-		if ctx.Err() != nil {
-			return nil
-		} else if err != nil {
-			return fmt.Errorf("poll %s: %w", socket, err)
-		}
-
 		// A frame is written at once, so that it never flickers.
 		frame := fmt.Sprintf("\x1b[H\x1b[2Jllmhop on %s, Ctrl+C quits\n\nModels\n%s\nClients\n%s", socket, table(modelRows(last, now)), table(clientRows(last, now)))
 
@@ -91,6 +81,19 @@ func (c topCmd) Run(g *Globals) error {
 		}
 
 		last = now
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+
+		now, err = poll(ctx, client, metrics)
+		if ctx.Err() != nil {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("poll %s: %w", socket, err)
+		}
 	}
 }
 
@@ -166,9 +169,14 @@ func newDelta(last, now sample, key func(router.Requests) string) delta {
 }
 
 // activity returns the cells of the requests of a group in flight, and of
-// all and failed ones per second, zero across a restart.
+// all and failed ones per second, zero across a restart and unknown
+// without time between the samples.
 func (d delta) activity(group string, flight int) []string {
 	rate := func(before, after int) string {
+		if d.seconds <= 0 {
+			return "-"
+		}
+
 		return strconv.FormatFloat(float64(max(0, after-before))/d.seconds, 'f', 1, 64)
 	}
 

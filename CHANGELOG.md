@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.2.1](https://github.com/mirkolenz/llmhop/compare/v4.2.0...v4.2.1) (2026-11-24)
+
+### Bug Fixes
+
+* **nixos:** keep native servers running when llmhop binary changes ([5a528af](https://github.com/mirkolenz/llmhop/commit/5a528afd3c84f5b7e86875b4308a58818753cfae))
+
 ## [4.2.0](https://github.com/mirkolenz/llmhop/compare/v4.1.0...v4.2.0) (2026-11-24)
 
 ### Features

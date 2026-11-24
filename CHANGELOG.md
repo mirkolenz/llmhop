@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.2.0](https://github.com/mirkolenz/llmhop/compare/v4.1.0...v4.2.0) (2026-11-24)
+
+### Features
+
+* **apikey:** issue 256-bit tokens with crc32 checksum ([fd3a598](https://github.com/mirkolenz/llmhop/commit/fd3a598040717fa458157195b65e6cf9d37dc841))
+
+### Performance Improvements
+
+* **cli:** decrypt listed keys concurrently ([912595a](https://github.com/mirkolenz/llmhop/commit/912595a9f095599c00b701baa1cda61c0d5854f2))
+* **cli:** draw first top frame without waiting for interval ([5ec5a25](https://github.com/mirkolenz/llmhop/commit/5ec5a251ed6480429806ff72023b032fcc06814c))
+
 ## [4.1.0](https://github.com/mirkolenz/llmhop/compare/v4.0.0...v4.1.0) (2026-11-23)
 
 ### ⚠ BREAKING CHANGES

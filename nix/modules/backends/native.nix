@@ -25,6 +25,10 @@ let
   # and thereby off its group.
   socketUMask = "0007";
 
+  # The llmhop binary at a stable path, so that a changed binary leaves the
+  # units of the servers, and thereby the servers, unchanged.
+  etcExecutable = "llmhop/bin/llmhop";
+
   # The server of `workload`, started after `after` and after its fetcher,
   # which shares its identity and cache. See "Offline servers" and "Python
   # backends built from wheels" in the module internals documentation.
@@ -157,7 +161,7 @@ let
             # expands `$MAINPID`, which escaping would turn into a literal.
             ExecStartPost = "${
               utils.escapeSystemdExecArgs [
-                (lib.getExe llmhop.package)
+                "/etc/${etcExecutable}"
                 "internal"
                 "wait-healthy"
               ]
@@ -174,6 +178,7 @@ in
 lib.mkMerge [
   {
     systemd.services = wl.chain cfg.startupOrdering workloads services;
+    environment.etc.${etcExecutable}.source = lib.getExe llmhop.package;
     # Every workload owns its own directory below the root, and every
     # rule of llmhop shares one file. Its sockets share the root of every
     # socket. See "Unix sockets" in the module internals documentation.

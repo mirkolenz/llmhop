@@ -78,6 +78,7 @@ They stop with SIGTERM, which every engine handles as a graceful stop, and SGLan
 vLLM drains for `shutdownTimeoutSeconds` and aborts the rest, SGLang drains until its unit kills it, ten seconds later, so every engine bounds a stop by the same time.
 A container gets that time as Podman's `StopTimeout=`, and its unit ten seconds more, so Podman rather than systemd kills it.
 A native server is `Type=exec` with an `ExecStartPost=` of `llmhop internal wait-healthy` that polls `/health` and also watches `$MAINPID`, so a crashed server does not stay `activating` until the timeout.
+It calls the binary at the stable path `/etc/llmhop/bin/llmhop`, so a changed llmhop binary does not restart every server.
 Containers use Podman's `Notify=healthy`.
 Startup is chained by `name`, since two workers profiling GPU memory on one device both see it free and run out of memory.
 Each server `Wants=` its predecessor besides starting after it, since `After=` only orders jobs queued together, and `switch-to-configuration` queues its starts one at a time in no particular order.

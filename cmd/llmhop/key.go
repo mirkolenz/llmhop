@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mirkolenz/llmhop/internal/apikey"
@@ -42,21 +43,32 @@ func (keyListCmd) Run(cfg *config.Config) error {
 		return err
 	}
 
+	names := slices.Sorted(maps.Keys(stored))
+	credentials := make([]config.Credential, len(names))
+	errs := make([]error, len(names))
+
+	// A decryption may take long, so all of them run at once.
+	var wg sync.WaitGroup
+
+	for i, name := range names {
+		wg.Go(func() { credentials[i], errs[i] = stored[name][0].read(name) })
+	}
+
+	wg.Wait()
+
 	rows := [][]string{{"CLIENT", "POLICY", "EXPIRES"}}
 
 	// An unreadable credential is reported after the others are listed.
-	var errs []error
-
-	for _, name := range slices.Sorted(maps.Keys(stored)) {
-		c, err := stored[name][0].read(name)
-		if err != nil {
-			errs = append(errs, err)
+	for i, name := range names {
+		if errs[i] != nil {
 			rows = append(rows, []string{name, "?", "?"})
 
 			continue
 		}
 
+		c := credentials[i]
 		expires := "-"
+
 		if !c.ExpiresAt.IsZero() {
 			expires = c.ExpiresAt.Format(time.RFC3339)
 		}

@@ -61,7 +61,12 @@ let
   # keys, and the model of the gateway that each of them describes.
   replicas = lib.groupBy (w: w.name) workloads;
   gatewayModel = w: {
-    inherit (w) unlisted dataParallelSize aliases;
+    inherit (w)
+      unlisted
+      dataParallelSize
+      aliases
+      metricsPath
+      ;
     inherit (util) healthPath;
   };
   baseServiceConfig = util.accountServiceConfig cfg;

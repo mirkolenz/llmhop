@@ -15,8 +15,12 @@
 # is its server command, natively from its package or in its image,
 # followed by `positional` and the settings, among them `modelSettings` and
 # `shutdownSettings`, which renders how long its server drains requests on
-# a stop. `reservedSettings` lists the aliases of the flags it renders or
-# of `positional`, which the `settings` of a model must not set either.
+# a stop. `defaultModelSettings` are the defaults of the backend's
+# `modelSettings`, such as those serving its Prometheus metrics at
+# `metricsPath`, which the gateway collects, and which vLLM serves without
+# any.
+# `reservedSettings` lists the aliases of the flags it renders or of
+# `positional`, which the `settings` of a model must not set either.
 # `fetch` renders the argv downloading one repository with its package into
 # the hub cache below `HF_HOME`, after which its servers get
 # `offlineEnvironment`.
@@ -32,6 +36,8 @@ let
     loras = null;
     watermark = null;
     shutdownSettings = _: { };
+    defaultModelSettings = { };
+    metricsPath = "/metrics";
     reservedSettings = [ ];
     offlineEnvironment = { };
     implicitConfig = {
@@ -115,6 +121,7 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
         "-hf"
         (if tag == null then repo else "${repo}:${tag}")
       ];
+    defaultModelSettings.metrics = true;
     offlineEnvironment.LLAMA_ARG_OFFLINE = "1";
     # It reads a `config.ini` below these and its `XDG_CONFIG_HOME` before
     # its arguments, with no way to opt out, so every unit hides them.
@@ -264,5 +271,6 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
     # which an offline server cannot reach. It drains in-flight requests on
     # SIGTERM until its unit kills it.
     environment.SGLANG_USE_SGL_FA3_KERNEL = "1";
+    defaultModelSettings.enable-metrics = true;
   };
 }

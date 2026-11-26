@@ -82,6 +82,7 @@ let
       dataParallelSize = field (types.ints.between 1 256) "Data-parallel ranks of every URL, which requests with an affinity key are pinned to.";
       failoverSeconds = field types.ints.u32 "Seconds a server is avoided after it refused a connection or failed three requests in a row, `5` by default.";
       healthPath = field types.str "Path that readiness and the metrics probe on every URL, or `null` to skip the model.";
+      metricsPath = field types.str "Path of the Prometheus metrics of every URL, such as `/metrics` of vLLM, SGLang or llama.cpp, whose engine metrics `/llmhop/metrics` adds, or `null` to skip the model.";
     };
   };
 in

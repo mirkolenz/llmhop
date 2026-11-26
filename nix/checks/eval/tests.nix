@@ -305,6 +305,7 @@
         ''"--data-parallel-size" "4"''
         ''"--lora-paths" "{\"lora_name\":\"llama-sql\",\"lora_path\":\"example/llama-lora\"}"''
         ''"--model-type" "llm"''
+        ''"--enable-metrics"''
       ] routable.systemd.services.sglang-llama.serviceConfig.ExecStart;
       fetched = containsAll [
         "hf download example/llama"
@@ -325,6 +326,7 @@
           unlisted = false;
           dataParallelSize = 2;
           healthPath = "/health";
+          metricsPath = "/metrics";
         };
         llama = {
           urls = [ "http://127.0.0.1:24002" ];
@@ -332,6 +334,7 @@
           unlisted = false;
           dataParallelSize = 4;
           healthPath = "/health";
+          metricsPath = "/metrics";
         };
       };
       kernels = "1";

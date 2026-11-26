@@ -52,8 +52,13 @@ in
           ) workloads
         );
 
-        services.llmhop.${name}.fetch.credentials = lib.mkIf (cfg.fetch.hfTokenCredential != null) {
-          ${cfg.fetch.hfTokenCredential} = lib.mkDefault null;
+        services.llmhop.${name} = {
+          # Below what the backend or a model sets, as every `modelSettings`.
+          modelSettings = lib.mapAttrs (_: lib.mkDefault) engine.defaultModelSettings;
+
+          fetch.credentials = lib.mkIf (cfg.fetch.hfTokenCredential != null) {
+            ${cfg.fetch.hfTokenCredential} = lib.mkDefault null;
+          };
         };
 
         assertions = lib.concatMap (w: w.assertions) workloads;

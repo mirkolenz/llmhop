@@ -463,6 +463,7 @@ Only a socket or a loopback `host` can be isolated like this, so any other workl
 #### Settings rendering
 
 `settings`, over the backend's `modelSettings`, becomes the server's CLI flags beside those llmhop derives from the other options, such as the listener, the served name, `revision`, `loras` and `dataParallelSize`, which `settings` must not set.
+Every server serves its Prometheus metrics at `/metrics` by default, llama.cpp through the default `modelSettings.metrics = true` and SGLang through `modelSettings.enable-metrics = true`, which the backend's `modelSettings` or a model's `settings` may turn off, and the gateway collects them through the `metricsPath` of its models.
 Strings and paths are passed verbatim and everything else as JSON, so attribute sets work for options like `--speculative-config`.
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.

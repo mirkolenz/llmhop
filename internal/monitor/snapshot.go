@@ -13,7 +13,10 @@ import (
 
 // snapshot is what one poll observed.
 type snapshot struct {
-	at      time.Time
+	at time.Time
+	// gateway is whether the snapshot is of a gateway, even of one that
+	// failed to report.
+	gateway bool
 	samples []telemetry.Sample
 	// err is why the gateway failed to report its samples.
 	err  error
@@ -275,4 +278,92 @@ func (f frame) hostRows() []hostRow {
 		{"memory", fmtUsage(h.MemTotal-h.MemAvailable, h.MemTotal), h.MemoryShare()},
 		{"swap", fmtUsage(h.SwapTotal-h.SwapFree, h.SwapTotal), h.SwapShare()},
 	}
+}
+
+// since returns the increase per second of a counter of the host since its
+// value before, of which a counter that fell restarted from zero, or NaN
+// without one.
+func (f frame) since(now, before float64, ok bool) float64 {
+	if !ok || f.seconds <= 0 {
+		return math.NaN()
+	}
+
+	if now < before {
+		before = 0
+	}
+
+	return (now - before) / f.seconds
+}
+
+// lastHost returns the host of the previous snapshot, or one without
+// anything.
+func (f frame) lastHost() *sysstat.Host {
+	if f.last.host == nil {
+		return &sysstat.Host{}
+	}
+
+	return f.last.host
+}
+
+// byKey indexes items by key.
+func byKey[T any](items []T, key func(T) string) map[string]T {
+	out := make(map[string]T, len(items))
+
+	for _, x := range items {
+		out[key(x)] = x
+	}
+
+	return out
+}
+
+// diskRow is a filesystem with the bytes its device read and wrote per
+// second and its busy share.
+type diskRow struct {
+	sysstat.Disk
+	read, written, busy float64
+}
+
+// disks returns the filesystems of the host.
+func (f frame) disks() []diskRow {
+	if f.now.host == nil {
+		return nil
+	}
+
+	before := byKey(f.lastHost().Disks, func(d sysstat.Disk) string { return d.Mount })
+
+	var rows []diskRow
+
+	for _, d := range f.now.host.Disks {
+		b, ok := before[d.Mount]
+		// Overlapping reads and writes may count more than the time passed.
+		busy := min(f.since(d.Busy, b.Busy, ok), 1)
+		rows = append(rows, diskRow{d, f.since(d.Read, b.Read, ok), f.since(d.Written, b.Written, ok), busy})
+	}
+
+	return rows
+}
+
+// interfaceRow is a network interface with the bytes it received and sent
+// per second.
+type interfaceRow struct {
+	name           string
+	received, sent float64
+}
+
+// interfaces returns the network interfaces of the host.
+func (f frame) interfaces() []interfaceRow {
+	if f.now.host == nil {
+		return nil
+	}
+
+	before := byKey(f.lastHost().Interfaces, func(i sysstat.Interface) string { return i.Name })
+
+	var rows []interfaceRow
+
+	for _, i := range f.now.host.Interfaces {
+		b, ok := before[i.Name]
+		rows = append(rows, interfaceRow{i.Name, f.since(i.Received, b.Received, ok), f.since(i.Sent, b.Sent, ok)})
+	}
+
+	return rows
 }

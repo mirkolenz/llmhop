@@ -11,8 +11,8 @@ import (
 )
 
 // Demo monitors synthetic metrics of two models, each on its own CUDA GPU,
-// and two clients, whose load rises and falls, to show the monitor without a
-// gateway.
+// two clients, two disks and two network interfaces, whose load rises and
+// falls, to show the monitor without a gateway.
 func Demo(interval time.Duration) error {
 	if err := requireTerminal(); err != nil {
 		return err
@@ -27,8 +27,6 @@ func Demo(interval time.Duration) error {
 type demo struct {
 	start, last time.Time
 	counters    map[string]float64
-	cpuBusy     float64
-	cpuTotal    float64
 }
 
 // demoModel is a model of the demo, with its server and the unit of the
@@ -55,7 +53,11 @@ var demoClients = []struct {
 	share, slots, perMinute float64
 }{{"alice", 0.7, 96, 3000}, {"bob", 0.3, 32, 600}}
 
-const gib = 1 << 30
+const (
+	mib = 1 << 20
+	gib = 1 << 30
+	tib = 1 << 40
+)
 
 func (d *demo) collect(context.Context) *snapshot {
 	now := time.Now()
@@ -78,10 +80,14 @@ func (d *demo) collect(context.Context) *snapshot {
 	gauge := func(name string, v float64, kv ...string) {
 		samples = append(samples, telemetry.Sample{Name: name, Labels: telemetry.Pairs(kv...), Value: v})
 	}
-	count := func(name string, rate float64, kv ...string) {
-		key := name + telemetry.Labels(kv...)
+	// grow counts up a counter at a rate.
+	grow := func(key string, rate float64) float64 {
 		d.counters[key] += rate * seconds
-		gauge(name, d.counters[key], kv...)
+
+		return d.counters[key]
+	}
+	count := func(name string, rate float64, kv ...string) {
+		gauge(name, grow(name+telemetry.Labels(kv...), rate), kv...)
 	}
 
 	var gpus []sysstat.GPU
@@ -129,22 +135,35 @@ func (d *demo) collect(context.Context) *snapshot {
 		gauge(telemetry.ClientRemainingRequests, max(0, c.perMinute-perMinute[c.name]), telemetry.Client, c.name)
 	}
 
-	d.cpuBusy += seconds * 64 * (0.15 + 0.2*wave(20, 0))
-	d.cpuTotal += seconds * 64
-
 	return &snapshot{
 		at:      now,
+		gateway: true,
 		samples: samples,
 		gpus:    gpus,
 		host: &sysstat.Host{
 			CPUs:         64,
-			Busy:         d.cpuBusy,
-			Total:        d.cpuTotal,
+			Busy:         grow("cpu busy", 64*(0.15+0.2*wave(20, 0))),
+			Total:        grow("cpu total", 64),
 			Load:         [3]float64{9 + 6*wave(20, 0), 10.4, 9.7},
 			MemTotal:     512 * gib,
 			MemAvailable: (300 - 40*wave(60, 0)) * gib,
 			SwapTotal:    8 * gib,
 			SwapFree:     7.6 * gib,
+			Disks: []sysstat.Disk{
+				{
+					Mount:   "/",
+					Size:    3.5 * tib,
+					Free:    2.1 * tib,
+					Read:    grow("disk read", 40*mib*wave(25, 0)),
+					Written: grow("disk written", 6*mib),
+					Busy:    grow("disk busy", 0.05+0.3*wave(25, 0)),
+				},
+				{Mount: "/boot", Size: gib, Free: 0.8 * gib},
+			},
+			Interfaces: []sysstat.Interface{
+				{Name: "enp65s0f0", Received: grow("received", 2*mib*wave(20, 0)), Sent: grow("sent", 9*mib*wave(20, 0))},
+				{Name: "tailscale0", Received: grow("vpn received", 30*1024), Sent: grow("vpn sent", 120*1024)},
+			},
 		},
 	}
 }

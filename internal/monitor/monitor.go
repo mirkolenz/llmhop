@@ -1,5 +1,6 @@
 // Package monitor shows the metrics of llmhop and of its engines live in
-// the terminal, beside the GPUs and the CPUs and memory of the host.
+// the terminal, beside the CPUs, memory, disks, network and GPUs of the
+// host, or those alone without a gateway.
 package monitor
 
 import (
@@ -20,15 +21,10 @@ import (
 	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
-// Run monitors the metrics that llmhop serves on its unix socket, polling
-// every interval until quit.
+// Run monitors the host and its GPUs every interval until quit, and the
+// metrics that llmhop serves on its unix socket unless that is empty.
 func Run(socket string, interval time.Duration) error {
 	if err := requireTerminal(); err != nil {
-		return err
-	}
-
-	up, err := upstream.Parse((&url.URL{Scheme: "unix", Path: socket}).String(), 0)
-	if err != nil {
 		return err
 	}
 
@@ -36,13 +32,27 @@ func Run(socket string, interval time.Duration) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := &gateway{
-		url:     up.URL.JoinPath(telemetry.Path).String(),
-		client:  &http.Client{Transport: up.Transport},
-		sampler: sysstat.NewSampler(ctx, interval),
+	l := &live{sampler: sysstat.NewSampler(ctx, interval)}
+	source := socket
+
+	if socket == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+
+		source = host
+	} else {
+		up, err := upstream.Parse((&url.URL{Scheme: "unix", Path: socket}).String(), 0)
+		if err != nil {
+			return err
+		}
+
+		l.url = up.URL.JoinPath(telemetry.Path).String()
+		l.client = &http.Client{Transport: up.Transport}
 	}
 
-	return run(socket, interval, g.collect)
+	return run(source, interval, l.collect)
 }
 
 // requireTerminal fails unless the output is a terminal, which a full-screen
@@ -128,34 +138,38 @@ func (t *top) frame() frame {
 	return frame{t.last, t.now, t.now.at.Sub(t.last.at).Seconds()}
 }
 
-// gateway takes snapshots of the metrics of llmhop, the GPUs and the host.
-type gateway struct {
+// live takes snapshots of the GPUs and the host, and of the metrics of
+// llmhop at url unless empty.
+type live struct {
 	url     string
 	client  *http.Client
 	sampler *sysstat.Sampler
 }
 
 // collect takes a snapshot of the gateway, the GPUs and the host at once.
-func (g *gateway) collect(ctx context.Context) *snapshot {
-	s := &snapshot{at: time.Now()}
+func (l *live) collect(ctx context.Context) *snapshot {
+	s := &snapshot{at: time.Now(), gateway: l.url != ""}
 
 	var wg sync.WaitGroup
 
-	wg.Go(func() { s.samples, s.err = g.scrape(ctx) })
-	wg.Go(func() { s.gpus = g.sampler.GPUs(ctx) })
-	wg.Go(func() { s.host = g.sampler.Host() })
+	if s.gateway {
+		wg.Go(func() { s.samples, s.err = l.scrape(ctx) })
+	}
+
+	wg.Go(func() { s.gpus = l.sampler.GPUs(ctx) })
+	wg.Go(func() { s.host = l.sampler.Host(ctx) })
 	wg.Wait()
 
 	return s
 }
 
-func (g *gateway) scrape(ctx context.Context) ([]telemetry.Sample, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.url, nil)
+func (l *live) scrape(ctx context.Context) ([]telemetry.Sample, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, l.url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := g.client.Do(req)
+	resp, err := l.client.Do(req)
 	if err != nil {
 		return nil, err
 	}

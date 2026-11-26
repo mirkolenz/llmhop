@@ -17,8 +17,3 @@ func newGPUSource(context.Context, time.Duration) *gpuSource {
 func (*gpuSource) read(context.Context) []GPU {
 	return nil
 }
-
-// readHost reports no host where no collector exists.
-func readHost() *Host {
-	return nil
-}

@@ -256,7 +256,7 @@ docker run --rm -p 8080:8080 -v ./config.json:/etc/llmhop/config.json ghcr.io/mi
 | `key rotate <client>`                     | replace the key of a client and print its token                          |
 | `key revoke <client>`                     | delete the key of a client                                               |
 | `key generate`                            | print a new token and its credential, storing nothing                    |
-| `top`                                     | monitor the models, servers, clients, GPUs and host live                 |
+| `top`                                     | monitor the gateway and the host with its GPUs, disks and network live   |
 | `usage [--by client\|model\|policy]`      | print the requests and errors of the log on stdin by group               |
 
 Every command reads the config at `--config`, `$LLMHOP_CONFIG` or `/etc/llmhop/config.json`, `--help` explains each, and `--version` prints the version.
@@ -325,18 +325,22 @@ The gateway installs `llmhop`, whose `key` commands do both as root.
 It stores JSON credentials named `llmhop.api-key.<client>`, prints new tokens, keeps the key on `update`, and the policy, expiry and store on `rotate`.
 `list` marks an unreadable credential and reports it after listing the others, while `update` and `rotate` refuse one, so revoke and create its key instead.
 
-`llmhop top` monitors the gateway live, without root for the group of the metrics socket and remotely as `ssh -t <host> llmhop top`, which allocates the terminal it needs, until `q` quits.
+`llmhop top` monitors the gateway and the host live, without root for the group of the metrics socket and remotely as `ssh -t <host> llmhop top`, which allocates the terminal it needs, until `q` quits.
 It polls the metrics of llmhop on the first unix socket listener with `metrics` every two seconds and shows on one screen, as rates since the previous poll, with meters for shares, dots for servers and sparklines for the recent trend:
 
 - the requests and tokens of the gateway over all models, and the CPUs, load, memory and swap of the host
 - the GPUs with their utilization, memory, temperature, power, clock and throttling, as far as their drivers report them: those of NVIDIA through `nvidia-smi`, with the systemd units using their memory, those of AMD and Intel through sysfs, and those of Apple silicon through the I/O registry
 - the models, with their ready servers, queued and running requests, the share of their slots in use, requests per second with the shares of them that its limits rejected with `429` or that failed with another client or a server error, the mean latency and time to the first token of their streams as clients see it, and from their engines the tokens per second, KV cache usage and prefix cache hits
 - the clients, with whether they are active, their running requests, the shares of their slots and of their requests per minute in use, their share of the requests, and their requests per second with the shares of them rejected or failed
+- the filesystems mounted from devices, with their space, and the busy share and bytes read and written per second of their devices
+- the network interfaces that are up with an address beyond their link, such as those of the networks and VPNs but not the members of bridges or the links of containers, with the bytes they receive and send per second
 
-Its sections stack below each other, the gateway, the host, the GPUs, the models and the clients, whose tables group the columns of the requests that llmhop answers apart from those of the tokens that the engines process, which they report per model and server but not per client, each with columns whose widths follow from the fixed widths of their values, so they keep their place between polls.
-Columns of less weight leave a narrow terminal first, while a short one loses the blank lines between the sections and then the clients.
+Without a config or a unix socket listener with `metrics`, such as on a host without the gateway, it monitors the host alone, a standalone monitor of its CPUs, memory, GPUs, disks and network.
+
+Its sections stack below each other, the gateway, the host, the GPUs, the models, the clients, the disks and the network, whose tables show the columns of the requests that llmhop answers before those of the tokens that the engines process, which they report per model and server but not per client, each followed by its trend, with columns whose widths follow from the fixed widths of their values, so they keep their place between polls.
+Columns of less weight leave a narrow terminal first, while a short one loses the blank lines between the sections and then the last sections that do not fit.
 It costs little to run for good: it keeps one `nvidia-smi` per query running in its loop mode rather than starting it for every poll, and redraws the terminal at most ten times a second, writing only what changed.
-On macOS, the CPU usage, GPU temperature and power stay unknown, since only cgo or root reads them.
+On macOS, the GPU temperature and power stay unknown, since only root reads them, and so does the traffic of an APFS volume, whose container is not the physical disk that reports it, while the space of a volume is that of its container.
 
 `llmhop usage` totals the requests and errors of the request lines of the log on stdin, so `top` shows the present and `usage` the past, while the log tool selects the source and the period:
 

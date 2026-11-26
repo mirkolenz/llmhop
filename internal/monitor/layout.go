@@ -8,40 +8,29 @@ import (
 )
 
 // render draws the title and the sections below each other, spaced by
-// blank lines while they fit the height, else without them, else without
-// the clients, and clipped to the height.
+// blank lines while they fit the height, else without them and without the
+// last sections that do not fit, and clipped to the height. The disks and
+// the network, of the least weight beside the gateway, trail.
 func (t *top) render() string {
 	if t.now == nil {
 		return "Polling " + t.source + " ..."
 	}
 
 	f := t.frame()
-	title := t.title(f)
 	sections := slices.DeleteFunc([]string{
+		t.title(f),
 		t.gatewaySection(f),
 		t.hostSection(f),
 		t.gpuSection(f),
 		t.modelSection(f),
+		t.clientSection(f),
+		t.diskSection(f),
+		t.networkSection(f),
 	}, func(s string) bool { return s == "" })
-	clients := t.clientSection(f)
+	screen := strings.Join(sections, "\n\n")
 
-	var screen string
-
-	for _, layout := range []struct {
-		spacing string
-		clients bool
-	}{{"\n\n", true}, {"\n", true}, {"\n", false}} {
-		shown := append([]string{title}, sections...)
-
-		if layout.clients {
-			shown = append(shown, clients)
-		}
-
-		screen = strings.Join(shown, layout.spacing)
-
-		if t.height <= 0 || lipgloss.Height(screen) <= t.height {
-			break
-		}
+	for shown := len(sections); shown > 1 && t.height > 0 && lipgloss.Height(screen) > t.height; shown-- {
+		screen = strings.Join(sections[:shown], "\n")
 	}
 
 	if lines := strings.Split(screen, "\n"); t.height > 0 && len(lines) > t.height {
@@ -54,12 +43,11 @@ func (t *top) render() string {
 // column is a column of a grid, as wide as its widest cell, whose keep
 // ranks it among the columns kept while the screen is too narrow, the
 // lowest dropped first. The formatters of values give every value of a
-// column the same width. Neighbors of a group share a rule above their
-// titles, such as the requests or the tokens of a model.
+// column the same width.
 type column struct {
-	title, group string
-	keep         int
-	left         bool
+	title string
+	keep  int
+	left  bool
 }
 
 // grid is a titled table whose columns drop out to fit a width.
@@ -74,8 +62,12 @@ const padding = 2
 
 // render draws g below a rule of its title across width, unless it is
 // zero, dropping the last of the least kept columns while they are too
-// wide.
+// wide, or nothing without rows.
 func (g grid) render(width int) string {
+	if len(g.rows) == 0 {
+		return ""
+	}
+
 	titles := make([]string, len(g.cols))
 	widths := make([]int, len(g.cols))
 
@@ -132,10 +124,6 @@ func (g grid) render(width int) string {
 
 	lines := []string{titleStyle.Render(g.title) + " " + mutedStyle.Render(strings.Repeat("─", max(0, width-lipgloss.Width(g.title)-1)))}
 
-	if groups := g.groups(shown, widths); groups != "" {
-		lines = append(lines, groups)
-	}
-
 	lines = append(lines, line(titles))
 
 	for _, r := range g.rows {
@@ -143,30 +131,4 @@ func (g grid) render(width int) string {
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// groups draws the groups of the columns shown as labeled rules spanning
-// their columns, or nothing if none of them belongs to a group.
-func (g grid) groups(shown, widths []int) string {
-	if !slices.ContainsFunc(shown, func(c int) bool { return g.cols[c].group != "" }) {
-		return ""
-	}
-
-	var spans []string
-
-	for i := 0; i < len(shown); {
-		group, span := g.cols[shown[i]].group, -padding
-
-		for ; i < len(shown) && g.cols[shown[i]].group == group; i++ {
-			span += widths[shown[i]] + padding
-		}
-
-		if group == "" {
-			spans = append(spans, strings.Repeat(" ", span))
-		} else {
-			spans = append(spans, headerStyle.Render(group)+" "+mutedStyle.Render(strings.Repeat("─", max(0, span-lipgloss.Width(group)-1))))
-		}
-	}
-
-	return strings.TrimRight(strings.Join(spans, strings.Repeat(" ", padding)), " ")
 }

@@ -86,6 +86,8 @@ const (
 	percentWidth = 4
 	tempWidth    = 5
 	clockWidth   = 8
+	// Such as `1023 KiB/s`.
+	byteRateWidth = 10
 )
 
 // fixed pads s on the left to width cells.
@@ -231,18 +233,35 @@ func fmtPercent(share float64) string {
 	})
 }
 
-// fmtBytes shows bytes in binary units.
+// byteUnits are the binary units of bytes.
+var byteUnits = []string{"B", "KiB", "MiB", "GiB", "TiB"}
+
+// fmtBytes shows bytes in binary units, with a decimal below ten of a unit
+// beyond bytes, where the bounds are those of the rounded values.
 func fmtBytes(v float64) string {
 	return known(v, 0, func(v float64) string {
-		for _, unit := range []string{"B", "KiB", "MiB", "GiB"} {
-			if v < 1024 {
-				return fmt.Sprintf("%.0f %s", v, unit)
-			}
+		unit := 0
 
+		for ; unit < len(byteUnits)-1 && v >= 1023.5; unit++ {
 			v /= 1024
 		}
 
-		return fmt.Sprintf("%.1f TiB", v)
+		if unit > 0 && v < 9.95 {
+			return fmt.Sprintf("%.1f %s", v, byteUnits[unit])
+		}
+
+		return fmt.Sprintf("%.0f %s", v, byteUnits[unit])
+	})
+}
+
+// fmtByteRate shows bytes per second in binary units.
+func fmtByteRate(v float64) string {
+	return known(v, byteRateWidth, func(v float64) string {
+		if v == 0 {
+			return zero
+		}
+
+		return fmtBytes(v) + "/s"
 	})
 }
 

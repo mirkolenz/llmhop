@@ -6,9 +6,15 @@ import "github.com/mirkolenz/llmhop/internal/telemetry"
 const trendLength = 16
 
 // trendKey names a trend by the kind and the name of what it follows, and
-// the series of llmhop whose rate it follows, empty for a share.
+// the series of llmhop whose rate it follows, if any.
 type trendKey struct {
 	kind, name, series string
+}
+
+// share reports whether a trend follows a share, such as the utilization of
+// the host, its GPUs and disks, else a rate.
+func (k trendKey) share() bool {
+	return k.kind == hostTrend || k.kind == gpuTrend || k.kind == diskTrend
 }
 
 // The kinds of trends.
@@ -16,6 +22,8 @@ const (
 	gatewayTrend = "gateway"
 	hostTrend    = "host"
 	gpuTrend     = "gpu"
+	diskTrend    = "disk"
+	networkTrend = "network"
 	modelTrend   = "model"
 	clientTrend  = "client"
 )
@@ -50,6 +58,14 @@ func (t trends) record(f frame) trends {
 
 	for _, h := range f.hostRows() {
 		add(trendKey{hostTrend, h.name, ""}, h.share)
+	}
+
+	for _, d := range f.disks() {
+		add(trendKey{diskTrend, d.Mount, ""}, d.busy)
+	}
+
+	for _, i := range f.interfaces() {
+		add(trendKey{networkTrend, i.name, ""}, i.received+i.sent)
 	}
 
 	for _, card := range f.now.gpus {

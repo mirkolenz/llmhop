@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.3.0](https://github.com/mirkolenz/llmhop/compare/v4.2.1...v4.3.0) (2026-11-26)
+
+### Features
+
+* **metrics:** serve prometheus metrics with engine series and rewrite top as monitor ([79f6296](https://github.com/mirkolenz/llmhop/commit/79f6296ffe64b3d5be10d490ce7ff58b56202149))
+* **nixos:** serve engine metrics and collect them in gateway ([b53d3d6](https://github.com/mirkolenz/llmhop/commit/b53d3d6e58bcbc279b71186183424bf3235b4658))
+* **top:** monitor host standalone with disks and network via gopsutil ([0c81cd3](https://github.com/mirkolenz/llmhop/commit/0c81cd30585c74cbe8c969f339bb2024f6644d2c))
+
 ## [4.2.1](https://github.com/mirkolenz/llmhop/compare/v4.2.0...v4.2.1) (2026-11-24)
 
 ### Bug Fixes

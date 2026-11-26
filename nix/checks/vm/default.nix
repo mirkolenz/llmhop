@@ -235,8 +235,8 @@ testers.nixosTest {
           assert machine.succeed(curl(client)) == "socket ok"
 
       with subtest("the metrics socket counts requests, which the journal sums by client"):
-          metrics = json.loads(machine.succeed("curl -fsS --unix-socket /run/llmhop/metrics.sock http://localhost/llmhop/metrics"))
-          assert any(r["client"] == "client" and r["status"] == 200 for r in metrics["requests"]), metrics
+          metrics = machine.succeed("curl -fsS --unix-socket /run/llmhop/metrics.sock http://localhost/llmhop/metrics").splitlines()
+          assert any(line.startswith("llmhop_requests_total{") and 'client="client"' in line and 'status="200"' in line for line in metrics), metrics
           machine.fail("curl -fsS http://127.0.0.1:8080/llmhop/metrics")
           usage = machine.succeed("journalctl -u llmhop.service -o cat --since -1h | llmhop usage").splitlines()
           assert any(line.split()[0] == "client" for line in usage[1:]), usage

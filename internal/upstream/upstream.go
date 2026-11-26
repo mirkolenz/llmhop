@@ -111,18 +111,26 @@ func Parse(raw string, responseTimeout time.Duration) (*Upstream, error) {
 // Probe sends req and fails unless the backend answers with a 2xx. Redirects
 // are not followed.
 func (u *Upstream) Probe(req *http.Request) error {
+	return u.Fetch(req, func(io.Reader) error { return nil })
+}
+
+// Fetch sends req and passes the body of a 2xx answer to read, failing
+// otherwise. Redirects are not followed.
+func (u *Upstream) Fetch(req *http.Request, read func(body io.Reader) error) error {
 	resp, err := u.Transport.RoundTrip(req)
 	if err != nil {
 		return err
 	}
 
-	// Draining lets the transport reuse the connection for the next probe.
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-	_ = resp.Body.Close()
+	defer func() {
+		// Draining lets the transport reuse the connection for the next request.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	return nil
+	return read(resp.Body)
 }

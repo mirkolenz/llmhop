@@ -48,7 +48,7 @@ func entryOf(req *http.Request) *entry {
 
 // logRequests assigns every request an ID, unless it carries one, and logs
 // and counts it once answered. Durations are in seconds.
-func logRequests(next http.Handler, met *metrics) http.Handler {
+func logRequests(next http.Handler, stats *stats) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
 		// Path routing strips the prefix in place.
@@ -64,31 +64,48 @@ func logRequests(next http.Handler, met *metrics) http.Handler {
 
 		e := &entry{}
 		rec := &recorder{ResponseWriter: w, id: id}
+		// completed tells apart a response sent in full from one that
+		// ReverseProxy aborted by a panic, such as a stream whose client left
+		// or that idled too long, whatever status it started with.
+		completed := false
 
-		// Deferred, since ReverseProxy panics once the client aborts.
+		// Deferred, since ReverseProxy panics once it aborts a response.
 		defer func() {
 			client, policy := e.names()
+			r := response{
+				status:    rec.status(),
+				completed: completed,
+				stream:    mediaType(rec.Header()) == "text/event-stream",
+				duration:  time.Since(start),
+			}
+
+			if !rec.first.IsZero() {
+				r.firstByte = rec.first.Sub(start)
+			}
+
 			slog.LogAttrs(req.Context(), slog.LevelInfo, "request",
 				slog.String("id", id),
 				slog.String("method", method),
 				slog.String("path", path),
-				slog.Int("status", rec.status()),
+				slog.Int("status", r.status),
 				slog.Int64("bytes", rec.bytes),
-				slog.Float64("duration", time.Since(start).Seconds()),
+				slog.Float64("duration", r.duration.Seconds()),
 				slog.String("client", client),
 				slog.String("policy", policy),
 				slog.String("model", e.model),
 				slog.String("server", e.server),
+				slog.Bool("aborted", !completed),
 			)
-			met.request(e, rec.status())
+			stats.request(e, r)
 		}()
 
 		next.ServeHTTP(rec, req.WithContext(context.WithValue(req.Context(), entryKey{}, e)))
+		completed = true
 	})
 }
 
-// recorder notes the status and body size of a response. Unwrap lets
-// flushing reach the wrapped writer.
+// recorder notes the status, body size and time of the first body byte of a
+// response. Unwrap lets flushing reach the wrapped writer.
 type recorder struct {
 	http.ResponseWriter
 	// id is the request ID, which the final response carries even after an
@@ -96,6 +113,7 @@ type recorder struct {
 	id    string
 	code  int
 	bytes int64
+	first time.Time
 }
 
 func (r *recorder) WriteHeader(code int) {
@@ -108,6 +126,10 @@ func (r *recorder) WriteHeader(code int) {
 }
 
 func (r *recorder) Write(p []byte) (int, error) {
+	if r.first.IsZero() {
+		r.first = time.Now()
+	}
+
 	n, err := r.ResponseWriter.Write(p)
 	r.bytes += int64(n)
 

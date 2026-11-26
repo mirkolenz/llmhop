@@ -53,13 +53,6 @@ func notFound(w http.ResponseWriter, _ *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found", "unknown path")
 }
 
-var (
-	errInvalidJSON      = &apiErrorBody{Code: "invalid_json", Message: "invalid JSON request body"}
-	errMissingModel     = &apiErrorBody{Code: "missing_model", Message: "missing model"}
-	errInvalidMultipart = &apiErrorBody{Code: "invalid_multipart", Message: "invalid multipart request body or model field"}
-	errAliasRewrite     = &apiErrorBody{Code: "unsupported_alias_body", Message: "this alias rewrites the model of JSON bodies only"}
-)
-
 // statusClientClosed is nginx's status of a request its client abandoned,
 // which only the log and the metrics see.
 const statusClientClosed = 499
@@ -91,3 +84,10 @@ func proxyError(w http.ResponseWriter, req *http.Request, err error) {
 
 	writeError(w, http.StatusBadGateway, "bad_gateway", "backend unreachable")
 }
+
+var (
+	errInvalidJSON      = &apiErrorBody{Code: "invalid_json", Message: "invalid JSON request body"}
+	errMissingModel     = &apiErrorBody{Code: "missing_model", Message: "missing model"}
+	errInvalidMultipart = &apiErrorBody{Code: "invalid_multipart", Message: "invalid multipart request body or model field"}
+	errAliasRewrite     = &apiErrorBody{Code: "unsupported_alias_body", Message: "this alias rewrites the model of JSON bodies only"}
+)

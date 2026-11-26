@@ -164,6 +164,8 @@ func (q *queue) leave(s *share, t *ticket) {
 type occupancy struct {
 	waiting int
 	running map[string]int
+	// slots is the size of its slots, zero meaning unlimited.
+	slots int64
 }
 
 // occupancy returns the occupancy of each of models.
@@ -179,6 +181,7 @@ func (l *Limits) occupancy(models []*model) []occupancy {
 		}
 
 		out[i].running = maps.Clone(m.queue.running)
+		out[i].slots = m.queue.slots.size
 	}
 
 	return out

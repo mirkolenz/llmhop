@@ -101,6 +101,8 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
     },
     "qwen3-8b": {
       "urls": ["unix:///run/llmhop/vllm-qwen3-8b/http.sock"],
+      "healthPath": "/health",
+      "metricsPath": "/metrics",
       "aliases": { "qwen3-8b-sql": {} },
       "dataParallelSize": 4,
       "maxConcurrentRequests": 64,
@@ -193,21 +195,28 @@ Every credential llmhop defines is named `llmhop.<kind>[.<instance>]`, as the AP
 
 ### Metrics
 
-A listener with `metrics` serves `GET /llmhop/metrics` as JSON, which `llmhop top` reads:
+A listener with `metrics` serves `GET /llmhop/metrics` in the Prometheus text format, which Prometheus or VictoriaMetrics scrape and `llmhop top` reads:
 
-```json
-{
-  "requests": [{ "client": "alice", "model": "qwen3-8b", "status": 200, "count": 42 }],
-  "models": [{ "name": "qwen3-8b", "queued": 0, "running": { "alice": 1 }, "up": { "unix:///run/llmhop/vllm-qwen3-8b/http.sock": true } }]
-}
-```
+| Series                                         | Labels                     | What                                                                       |
+| ---------------------------------------------- | -------------------------- | -------------------------------------------------------------------------- |
+| `llmhop_requests_total`                        | `client`, `model`, `status` | answered requests, where a rate limit shows as `429`                      |
+| `llmhop_request_duration_seconds`              | `model`                    | histogram of the durations of the successful requests sent in full                    |
+| `llmhop_request_first_token_seconds`           | `model`                    | histogram of the times to the first byte of the event streams among them, their first token |
+| `llmhop_queued_requests`                       | `model`                    | requests waiting for a slot                                                |
+| `llmhop_running_requests`                      | `model`, `client`          | requests holding a slot                                                    |
+| `llmhop_max_running_requests`                  | `model`                    | the slots of the model, absent without `maxConcurrentRequests`             |
+| `llmhop_client_max_running_requests`           | `client`                   | the slots of the client, absent without a limit                            |
+| `llmhop_client_max_requests_per_minute`        | `client`                   | the requests per minute of the client, absent without a limit              |
+| `llmhop_client_remaining_requests`             | `client`                   | the requests that remain to the client in its minute                       |
+| `llmhop_server_up`                             | `model`, `server`          | whether the server passed its latest probe, absent without a `healthPath` |
+| `llmhop_engine_*`                              | `model`, `server`          | what the engine of the server reports, absent without a `metricsPath`     |
+| `process_*`, `go_*`                            |                            | the process of llmhop                                                      |
 
-`requests` counts the answered requests by client, model and status, where a rate limit shows as `429`, and `models` holds the requests waiting for and holding their slots of each model.
-`up` reports by URL whether a server passed its latest [probe](#balancing-and-affinity), as readiness does, and is absent without a `healthPath`.
-llmhop only reports what it decides itself, while token counts and latencies such as the time to the first token come from the metrics of the backends.
+With a `metricsPath`, llmhop scrapes the Prometheus metrics of every server of a model when its metrics are requested, within two seconds, sharing a scrape with every request of the following second, so any number of viewers and scrapers costs an engine one scrape per second at most, and maps those of vLLM, SGLang and llama.cpp onto the same series, summed over the data-parallel ranks of a server: `running_requests`, `waiting_requests`, `kv_cache_usage_ratio` of its fullest rank, the counters `prompt_tokens_total`, `cached_prompt_tokens_total` and `generation_tokens_total`, and the sum and count of the times to the first token as `first_token_seconds`, each only if the engine reports it, beside `llmhop_engine_up`, which tells whether the server reported its metrics at all.
+So one scrape covers the engines on unix sockets, which Prometheus cannot reach, and one dashboard every engine, while a remote backend such as OpenAI reports only what llmhop measures itself.
 The counts survive a reload and reset on a restart.
 
-llmhop logs JSON lines, among them one per answered request with `msg` `request`, its `id`, `method`, `path`, `status`, `bytes`, `duration` in seconds, `client`, `policy`, the requested `model` and `server`.
+llmhop logs JSON lines, among them one per answered request with `msg` `request`, its `id`, `method`, `path`, `status`, `bytes`, `duration` in seconds, `client`, `policy`, the requested `model` and `server`, and whether it was `aborted` after its status, such as a stream whose client left or that idled too long, which the latency histograms leave out.
 Prompts and responses are never logged.
 
 ### Secret references
@@ -247,7 +256,7 @@ docker run --rm -p 8080:8080 -v ./config.json:/etc/llmhop/config.json ghcr.io/mi
 | `key rotate <client>`                     | replace the key of a client and print its token                          |
 | `key revoke <client>`                     | delete the key of a client                                               |
 | `key generate`                            | print a new token and its credential, storing nothing                    |
-| `top`                                     | show what the models and clients do right now                            |
+| `top`                                     | monitor the models, servers, clients, GPUs and host live                 |
 | `usage [--by client\|model\|policy]`      | print the requests and errors of the log on stdin by group               |
 
 Every command reads the config at `--config`, `$LLMHOP_CONFIG` or `/etc/llmhop/config.json`, `--help` explains each, and `--version` prints the version.
@@ -316,8 +325,19 @@ The gateway installs `llmhop`, whose `key` commands do both as root.
 It stores JSON credentials named `llmhop.api-key.<client>`, prints new tokens, keeps the key on `update`, and the policy, expiry and store on `rotate`.
 `list` marks an unreadable credential and reports it after listing the others, while `update` and `rotate` refuse one, so revoke and create its key instead.
 
-`llmhop top` shows the gateway live, without root for the group of the metrics socket and remotely as `ssh <host> llmhop top`.
-It polls the metrics of llmhop on the first unix socket listener with `metrics` every two seconds and draws a table of the models, with their ready backends and queued requests, and a table of the clients, each with their requests in flight and their requests and errors per second since the previous poll.
+`llmhop top` monitors the gateway live, without root for the group of the metrics socket and remotely as `ssh -t <host> llmhop top`, which allocates the terminal it needs, until `q` quits.
+It polls the metrics of llmhop on the first unix socket listener with `metrics` every two seconds and shows on one screen, as rates since the previous poll, with meters for shares, dots for servers and sparklines for the recent trend:
+
+- the requests and tokens of the gateway over all models, and the CPUs, load, memory and swap of the host
+- the GPUs with their utilization, memory, temperature, power, clock and throttling, as far as their drivers report them: those of NVIDIA through `nvidia-smi`, with the systemd units using their memory, those of AMD and Intel through sysfs, and those of Apple silicon through the I/O registry
+- the models, with their ready servers, queued and running requests, the share of their slots in use, requests per second with the shares of them that its limits rejected with `429` or that failed with another client or a server error, the mean latency and time to the first token of their streams as clients see it, and from their engines the tokens per second, KV cache usage and prefix cache hits
+- the clients, with whether they are active, their running requests, the shares of their slots and of their requests per minute in use, their share of the requests, and their requests per second with the shares of them rejected or failed
+
+Its sections stack below each other, the gateway, the host, the GPUs, the models and the clients, whose tables group the columns of the requests that llmhop answers apart from those of the tokens that the engines process, which they report per model and server but not per client, each with columns whose widths follow from the fixed widths of their values, so they keep their place between polls.
+Columns of less weight leave a narrow terminal first, while a short one loses the blank lines between the sections and then the clients.
+It costs little to run for good: it keeps one `nvidia-smi` per query running in its loop mode rather than starting it for every poll, and redraws the terminal at most ten times a second, writing only what changed.
+On macOS, the CPU usage, GPU temperature and power stay unknown, since only cgo or root reads them.
+
 `llmhop usage` totals the requests and errors of the request lines of the log on stdin, so `top` shows the present and `usage` the past, while the log tool selects the source and the period:
 
 ```sh

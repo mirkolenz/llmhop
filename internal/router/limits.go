@@ -32,8 +32,8 @@ type Limits struct {
 	// clients holds the limiters by client.
 	clients map[string]*limiters
 	// seq orders the tickets by arrival.
-	seq     uint64
-	metrics metrics
+	seq   uint64
+	stats stats
 }
 
 // bufferBudget returns the budget of buffered bytes, reusing that of a
@@ -268,4 +268,28 @@ func (lv level) header(h http.Header, kind string) {
 	h.Set("X-Ratelimit-Limit-"+kind, strconv.FormatFloat(lv.size, 'f', 0, 64))
 	h.Set("X-Ratelimit-Remaining-"+kind, strconv.FormatFloat(math.Floor(max(0, lv.remaining)), 'f', 0, 64))
 	h.Set("X-Ratelimit-Reset-"+kind, lv.reset.Round(time.Millisecond).String())
+}
+
+// clientLimits is the size of the slots of a client, zero meaning
+// unlimited, and the level of its request bucket.
+type clientLimits struct {
+	slots    int64
+	requests level
+}
+
+// clientLimits returns the limits of each client.
+func (l *Limits) clientLimits() map[string]clientLimits {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	out := make(map[string]clientLimits, len(l.clients))
+
+	for name, lim := range l.clients {
+		lim.mu.Lock()
+		out[name] = clientLimits{lim.slots.size, lim.requests.level(now)}
+		lim.mu.Unlock()
+	}
+
+	return out
 }

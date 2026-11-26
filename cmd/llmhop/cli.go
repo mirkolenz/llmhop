@@ -52,9 +52,9 @@ func (m moment) resolve() time.Time {
 	return time.Now().Add(m.offset).Truncate(time.Second)
 }
 
-// table renders rows as aligned columns, quoting a cell with control
+// tabulate renders rows as aligned columns, quoting a cell with control
 // characters, such as a model name a client sent, which would break them.
-func table(rows [][]string) string {
+func tabulate(rows [][]string) string {
 	var b strings.Builder
 
 	// Writing to a strings.Builder cannot fail.

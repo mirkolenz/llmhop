@@ -167,6 +167,10 @@ func (m Model) validate(load bool) error {
 		return fmt.Errorf("healthPath: %q must be an absolute path", m.HealthPath)
 	}
 
+	if m.MetricsPath != "" && !validPath(m.MetricsPath) {
+		return fmt.Errorf("metricsPath: %q must be an absolute path", m.MetricsPath)
+	}
+
 	seen := make(map[string]bool, len(m.Headers))
 
 	for header, value := range m.Headers {

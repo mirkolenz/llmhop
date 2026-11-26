@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/mirkolenz/llmhop/internal/config"
+	"github.com/mirkolenz/llmhop/internal/telemetry"
 )
 
 // New returns the handler of cfg, which serves the OpenAI models API from
@@ -80,12 +81,12 @@ func New(cfg *config.Config, limits *Limits) (*Router, error) {
 	// Health, readiness and metrics sit outside the auth middleware: probes,
 	// load balancers and monitoring must be able to check the proxy without
 	// a token.
-	logged := logRequests(api, &limits.metrics)
+	logged := logRequests(api, &limits.stats)
 	root := http.NewServeMux()
 	registerHealth(root, len(objects))
 	probes := newProber(models)
 	registerReadiness(root, probes)
-	root.Handle("GET "+reservedPrefix+"metrics", metricsOnly(cfg.Listen, &metricsHandler{limits: limits, models: models, prober: probes}))
+	root.Handle("GET "+telemetry.Path, metricsOnly(cfg.Listen, &metricsHandler{limits: limits, models: models, prober: probes}))
 	root.Handle(proxyPrefix, logged)
 	root.HandleFunc(reservedPrefix, notFound)
 	root.Handle("/", logged)

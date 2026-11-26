@@ -18,7 +18,7 @@ buildGoLatestModule (finalAttrs: {
       ../internal
     ];
   };
-  vendorHash = "sha256-d6DPHpk/K3gbe6qOCT7yLPWnFRcZGja2f+tC4Caly5Y=";
+  vendorHash = "sha256-cR8S6fKin3d5/nPnRccr8/6+TOEESYMrQtJ8FjZdzGc=";
   # Renames the module derivation per go.sum, so a stale vendorHash fails
   # instead of silently reusing the cached modules of the old go.sum.
   goSum = ../go.sum;

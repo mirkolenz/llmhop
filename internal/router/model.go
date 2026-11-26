@@ -31,6 +31,8 @@ type model struct {
 	// outside the header map.
 	host   string
 	health string
+	// metricsPath is the path of the Prometheus metrics of its servers.
+	metricsPath string
 	// servers are the targets of keyless requests, one per URL without a rank.
 	servers []*target
 	// targets are the targets of requests with an affinity key, the ranks of
@@ -74,6 +76,9 @@ type target struct {
 	rank string
 	// id seeds the rendezvous hash, the same in every llmhop instance.
 	id uint64
+	// scraped is the latest engine series of a server, which requests of
+	// the metrics share.
+	scraped scraped
 }
 
 // newModel builds the model of m. With stripCORS, llmhop alone decides which
@@ -90,6 +95,7 @@ func newModel(name string, m config.Model, q *queue, p *pool, stripCORS bool) (*
 		headers:      headers,
 		host:         headers.Get("Host"),
 		health:       m.HealthPath,
+		metricsPath:  m.MetricsPath,
 		queue:        q,
 		mu:           &p.mu,
 		queueTimeout: time.Duration(m.QueueTimeoutSeconds) * time.Second,
@@ -250,14 +256,25 @@ func (m *model) address(req *http.Request, u url.URL, t *target) {
 	}
 }
 
-// probe sends GET to the health path of the model on t.
-func (m *model) probe(ctx context.Context, t *target) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.health, nil)
+// get returns a GET of a path of the model on t, as a proxied request
+// addresses it.
+func (m *model) get(ctx context.Context, path string, t *target) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	m.address(req, *req.URL, t)
+
+	return req, nil
+}
+
+// probe sends GET to the health path of the model on t.
+func (m *model) probe(ctx context.Context, t *target) error {
+	req, err := m.get(ctx, m.health, t)
+	if err != nil {
+		return err
+	}
 
 	return t.up.Probe(req)
 }

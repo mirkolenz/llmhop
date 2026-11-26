@@ -60,6 +60,10 @@ type Model struct {
 	// HealthPath is the backend path that GET /llmhop/readiness and the
 	// metrics probe. Empty skips the model.
 	HealthPath string `json:"healthPath,omitempty"`
+	// MetricsPath is the backend path of its Prometheus metrics, such as the
+	// token counts of vLLM, SGLang or llama.cpp, which GET /llmhop/metrics
+	// collects from every URL. Empty skips the model.
+	MetricsPath string `json:"metricsPath,omitempty"`
 }
 
 // Alias is a further name of a model.

@@ -72,7 +72,7 @@ func (keyListCmd) Run(cfg *config.Config) error {
 		rows = append(rows, []string{name, cmp.Or(c.Policy, "-"), expires})
 	}
 
-	fmt.Print(table(rows))
+	fmt.Print(tabulate(rows))
 
 	return errors.Join(errs...)
 }

@@ -6,26 +6,15 @@ import (
 	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"errors"
-	"fmt"
-	"io/fs"
-	"log/slog"
 	"net"
-	"net/http"
 	"net/netip"
-	"net/url"
 	"os"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"golang.org/x/net/http/httpguts"
-
 	"github.com/mirkolenz/llmhop/internal/apikey"
-	"github.com/mirkolenz/llmhop/internal/secrets"
-	"github.com/mirkolenz/llmhop/internal/upstream"
 )
 
 // Model is a backend served under a name, balanced over its URLs.
@@ -149,23 +138,6 @@ func (l Listener) Network() (network, address string) {
 	return "", ""
 }
 
-// validate checks the fields of l. Errors start with the field they concern.
-func (l Listener) validate() error {
-	switch {
-	case l.Socket != "" && (l.Port != 0 || l.Host != ""):
-		return errors.New("socket: must not be set beside host or port")
-	case l.Host != "" && l.Port == 0:
-		return errors.New("host: requires a port")
-	case l.Host != "" && !isAddr(l.Host):
-		// Socket activation compares it with the address of a passed socket.
-		return fmt.Errorf("host: %q must be an IP address", l.Host)
-	case l.Socket != "" && !path.IsAbs(l.Socket):
-		return fmt.Errorf("socket: %q must be an absolute path", l.Socket)
-	}
-
-	return nil
-}
-
 // Addr returns the address Port is bound to, unspecified for every
 // interface.
 func (l Listener) Addr() netip.Addr {
@@ -195,13 +167,6 @@ func SameBindings(a, b map[string]Listener) bool {
 	}
 
 	return true
-}
-
-// isAddr reports whether s is an IP address.
-func isAddr(s string) bool {
-	_, err := netip.ParseAddr(s)
-
-	return err == nil
 }
 
 // Policy decides the models a client may use, its limits and its share of
@@ -248,55 +213,6 @@ type Client struct {
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 }
 
-// clientCredentialPrefix starts the names of the credentials that
-// ClientCredentials imports, each as the client named by the rest.
-const clientCredentialPrefix = "llmhop.api-key."
-
-// CredentialName returns the name of the credential of a client.
-func CredentialName(client string) string {
-	return clientCredentialPrefix + client
-}
-
-// CheckCredentialClient fails unless client may have a credential.
-func CheckCredentialClient(client string) error {
-	if client == "" {
-		return errors.New("empty client name")
-	}
-
-	return secrets.CheckCredentialName(CredentialName(client))
-}
-
-// CredentialClient returns the client of a credential name, if any.
-func CredentialClient(credential string) (string, bool) {
-	client, ok := strings.CutPrefix(credential, clientCredentialPrefix)
-
-	return client, ok && client != ""
-}
-
-// Credential is a client that ClientCredentials imports, holding only what
-// rotates with its key.
-type Credential struct {
-	KeyHash   apikey.Hash `json:"keyHash"`
-	Policy    string      `json:"policy,omitempty"`
-	ExpiresAt time.Time   `json:"expiresAt,omitzero"`
-}
-
-// ParseCredential parses the JSON object of a credential, which must hold a
-// key hash.
-func ParseCredential(data []byte) (Credential, error) {
-	var c Credential
-
-	if err := json.Unmarshal(data, &c, json.RejectUnknownMembers(true)); err != nil {
-		return Credential{}, err
-	}
-
-	if c.KeyHash == (apikey.Hash{}) {
-		return Credential{}, errors.New("keyHash: must be set")
-	}
-
-	return c, nil
-}
-
 // EffectivePolicy layers the client over its policy and the defaults, the
 // zero client being the anonymous one.
 func (cfg *Config) EffectivePolicy(c Client) Policy {
@@ -311,9 +227,6 @@ var DefaultAffinity = []AffinitySource{
 	{Body: []string{"prompt_cache_key"}},
 	{Body: []string{"session_params", "id"}, Pinned: true},
 }
-
-// maxDataParallelSize bounds the ranks of a URL, far beyond any GPU count.
-const maxDataParallelSize = 256
 
 // DefaultMaxBodyBytes bounds the size of a request body the router will buffer
 // before forwarding. 100 MiB comfortably covers text completions and single
@@ -389,339 +302,9 @@ func (m *Model) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-// validate checks every invariant and expands per-model header values in
-// place, or with load unset only checks their references.
-// Raw references are valid header values, so the same checks serve
-// `llmhop check` and startup.
-func (cfg *Config) validate(load bool) error {
-	if len(cfg.Models) == 0 {
-		return errors.New("no models configured")
-	}
-
-	if cfg.MaxBodyBytes < 0 {
-		return errors.New("maxBodyBytes must not be negative")
-	}
-
-	if cfg.MaxBufferedBytes < 0 {
-		return errors.New("maxBufferedBytes must not be negative")
-	}
-
-	for name, l := range cfg.Listen {
-		if name == "" {
-			return errors.New("listen: empty listener name")
-		}
-
-		if err := l.validate(); err != nil {
-			return fmt.Errorf("listen.%s.%w", name, err)
-		}
-	}
-
-	if err := cfg.Defaults.validate(); err != nil {
-		return fmt.Errorf("defaults.%w", err)
-	}
-
-	for name, p := range cfg.Policies {
-		if name == "" {
-			// It would layer under every client without a policy.
-			return errors.New("policies: empty policy name")
-		}
-
-		if err := p.validate(); err != nil {
-			return fmt.Errorf("policies.%s.%w", name, err)
-		}
-	}
-
-	owners, err := cfg.validateClients()
-	if err != nil {
-		return err
-	}
-
-	if load && cfg.ClientCredentials {
-		if err := cfg.loadClientCredentials(owners); err != nil {
-			return fmt.Errorf("clientCredentials: %w", err)
-		}
-	}
-
-	for i, source := range cfg.Affinity {
-		if (source.Header == "") == (len(source.Body) == 0) || source.Header != "" && !httpguts.ValidHeaderFieldName(source.Header) {
-			return fmt.Errorf("affinity.%d: must set exactly one of a valid header or a non-empty body path", i)
-		}
-	}
-
-	if len(cfg.CORSOrigins) > 0 && !cfg.RequiresAuth() {
-		return errors.New("corsOrigins require clients or clientCredentials")
-	}
-
-	for _, origin := range cfg.CORSOrigins {
-		if !validOrigin(origin) && (origin != "*" || len(cfg.CORSOrigins) > 1) {
-			return fmt.Errorf("corsOrigins: %q must be a scheme://host[:port], or the only entry *", origin)
-		}
-	}
-
-	aliased := make(map[string]string)
-
-	for name, model := range cfg.Models {
-		if !validModelName(name) {
-			return fmt.Errorf("models.%s: name must be non-empty without leading, trailing or empty path segments, with * only at its end", name)
-		}
-
-		if err := model.validate(load); err != nil {
-			return fmt.Errorf("models.%s.%w", name, err)
-		}
-
-		// Every name and alias routes to one model.
-		for alias := range model.Aliases {
-			if _, ok := cfg.Models[alias]; ok {
-				return fmt.Errorf("models.%s.aliases: %q is already a model", name, alias)
-			}
-
-			if owner, ok := aliased[alias]; ok {
-				return fmt.Errorf("models.%s.aliases: %q is already an alias of models.%s", name, alias, owner)
-			}
-
-			aliased[alias] = name
-		}
-	}
-
-	return nil
-}
-
-// validate checks m like Config.validate, expanding its header values in
-// place. Errors start with the field they concern.
-func (m Model) validate(load bool) error {
-	if len(m.URLs) == 0 {
-		return errors.New("urls: must not be empty")
-	}
-
-	if m.DataParallelSize < 1 || m.DataParallelSize > maxDataParallelSize {
-		return fmt.Errorf("dataParallelSize: must be between 1 and %d", maxDataParallelSize)
-	}
-
-	for _, raw := range m.URLs {
-		if _, err := upstream.Parse(raw, 0); err != nil {
-			return fmt.Errorf("urls: %w", err)
-		}
-	}
-
-	for name := range m.Aliases {
-		if _, wildcard := Pattern(name); wildcard || !validModelName(name) {
-			return fmt.Errorf("aliases: %q must be a model name without *", name)
-		}
-	}
-
-	// Probes join the path onto the backend URL, so only a path works.
-	if m.HealthPath != "" && !validPath(m.HealthPath) {
-		return fmt.Errorf("healthPath: %q must be an absolute path", m.HealthPath)
-	}
-
-	seen := make(map[string]bool, len(m.Headers))
-
-	for header, value := range m.Headers {
-		if !httpguts.ValidHeaderFieldName(header) {
-			return fmt.Errorf("headers: invalid header name %q", header)
-		}
-
-		key := http.CanonicalHeaderKey(header)
-		if seen[key] {
-			return fmt.Errorf("headers: duplicate header %q", key)
-		}
-
-		seen[key] = true
-
-		v, err := secrets.Expand(value, load)
-		if err == nil && !httpguts.ValidHeaderFieldValue(v) {
-			err = errors.New("invalid header value")
-		}
-
-		if err != nil {
-			return fmt.Errorf("headers.%s: %w", header, err)
-		}
-
-		m.Headers[header] = v
-	}
-
-	return nil
-}
-
-// validate checks the model patterns of p. Errors start with the field they
-// concern.
-func (p Policy) validate() error {
-	for _, pattern := range p.Models {
-		if !validModelName(pattern) {
-			return fmt.Errorf("models: invalid name or wildcard %q", pattern)
-		}
-	}
-
-	return nil
-}
-
-// keyOwners maps each key hash to its client, since a token finds one
-// client.
-type keyOwners map[apikey.Hash]string
-
-// claim records the key hash of the client name, failing if another client
-// holds it.
-func (k keyOwners) claim(name string, hash apikey.Hash) error {
-	if hash == (apikey.Hash{}) {
-		return nil
-	}
-
-	if other, ok := k[hash]; ok && other != name {
-		return fmt.Errorf("clients: %s and %s share a key", min(name, other), max(name, other))
-	}
-
-	k[hash] = name
-
-	return nil
-}
-
-// validateClients checks the declared clients, returning the owners of their
-// keys.
-func (cfg *Config) validateClients() (keyOwners, error) {
-	listeners := make(map[string]string, len(cfg.Clients))
-	owners := make(keyOwners, len(cfg.Clients))
-
-	for name, c := range cfg.Clients {
-		if err := cfg.validateClient(name, c); err != nil {
-			return nil, err
-		}
-
-		if err := owners.claim(name, c.KeyHash); err != nil {
-			return nil, err
-		}
-
-		if c.Listener == "" {
-			continue
-		}
-
-		l, ok := cfg.Listen[c.Listener]
-		network, _ := l.Network()
-
-		// The requests of a passed socket only count as a unix socket's.
-		switch other, shared := listeners[c.Listener]; {
-		case !ok:
-			return nil, fmt.Errorf("clients.%s.listener: %q is not in listen", name, c.Listener)
-		case network == "tcp":
-			return nil, fmt.Errorf("clients.%s.listener: %q is no unix socket", name, c.Listener)
-		case shared:
-			return nil, fmt.Errorf("clients: %s and %s share a listener", min(name, other), max(name, other))
-		}
-
-		listeners[c.Listener] = name
-	}
-
-	return owners, nil
-}
-
-// validateClient checks a client on its own.
-func (cfg *Config) validateClient(name string, c Client) error {
-	switch {
-	case !validHeaderValue(name):
-		return fmt.Errorf("clients: invalid name %q", name)
-	case (c.KeyHash == apikey.Hash{}) == (c.Listener == ""):
-		return fmt.Errorf("clients.%s: must set exactly one of keyHash or listener", name)
-	case !cfg.KnownPolicy(c.PolicyName):
-		return fmt.Errorf("clients.%s.policy: unknown policy %q", name, c.PolicyName)
-	}
-
-	if err := c.validate(); err != nil {
-		return fmt.Errorf("clients.%s.%w", name, err)
-	}
-
-	return nil
-}
-
-// loadClientCredentials adds the client of every credential, unless it is
-// declared, claiming its key in owners. An invalid one is logged and skipped,
-// since the config it outlives, such as by a renamed policy, must still start.
-// A missing credentials directory holds no credentials.
-func (cfg *Config) loadClientCredentials(owners keyOwners) error {
-	names, err := secrets.CredentialNames()
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	for _, name := range names {
-		client, ok := CredentialClient(name)
-		if _, declared := cfg.Clients[client]; !ok || declared {
-			continue
-		}
-
-		c, err := cfg.credentialClient(client, name)
-		if err == nil {
-			err = owners.claim(client, c.KeyHash)
-		}
-
-		if err != nil {
-			slog.Error("skipping client credential", "credential", name, "err", err)
-
-			continue
-		}
-
-		if cfg.Clients == nil {
-			cfg.Clients = make(map[string]Client)
-		}
-
-		cfg.Clients[client] = c
-	}
-
-	return nil
-}
-
-// credentialClient returns the valid client called name of the credential.
-func (cfg *Config) credentialClient(name, credential string) (Client, error) {
-	value, err := secrets.Credential(credential)
-	if err != nil {
-		return Client{}, err
-	}
-
-	c, err := ParseCredential([]byte(value))
-	if err != nil {
-		return Client{}, err
-	}
-
-	client := Client{KeyHash: c.KeyHash, PolicyName: c.Policy, ExpiresAt: c.ExpiresAt}
-
-	return client, cfg.validateClient(name, client)
-}
-
 // KnownPolicy reports whether name is empty or names a policy.
 func (cfg *Config) KnownPolicy(name string) bool {
 	_, ok := cfg.Policies[name]
 
 	return name == "" || ok
-}
-
-// validHeaderValue rejects an empty value and one that is no valid header
-// value, for client names, which reach backends in the X-Llmhop-Client
-// header.
-func validHeaderValue(v string) bool {
-	return v != "" && httpguts.ValidHeaderFieldValue(v)
-}
-
-// validModelName allows `/` for names such as `org/name`, but no empty
-// segment, and `*` only to end a wildcard, whose prefix may end with `/`.
-func validModelName(name string) bool {
-	prefix, wildcard := Pattern(name)
-	if strings.Contains(prefix, "*") || strings.HasPrefix(prefix, "/") || strings.Contains(prefix, "//") {
-		return false
-	}
-
-	return wildcard || prefix != "" && !strings.HasSuffix(prefix, "/")
-}
-
-// validOrigin accepts a bare http(s) origin, without path or userinfo.
-func validOrigin(origin string) bool {
-	u, err := url.Parse(origin)
-
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" &&
-		u.Scheme+"://"+u.Host == origin
-}
-
-func validPath(p string) bool {
-	u, err := url.Parse(p)
-
-	return err == nil && u.Scheme == "" && u.Host == "" && strings.HasPrefix(u.Path, "/")
 }

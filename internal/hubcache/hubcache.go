@@ -163,8 +163,8 @@ func resolve(root *os.Root, name string) (fileID, bool) {
 	return fileID{uint64(stat.Dev), stat.Ino}, true
 }
 
-// pruneBlobs deletes every blob of repos and of the shared blob store that
-// recent `huggingface_hub` releases keep, unless a snapshot links to it.
+// pruneBlobs deletes every blob of repos and every payload of the shared
+// blob store, unless a snapshot links to it.
 func pruneBlobs(root *os.Root, repos []string) error {
 	fsys := root.FS()
 	used := map[fileID]bool{}
@@ -199,10 +199,6 @@ func pruneBlobs(root *os.Root, repos []string) error {
 		}
 	}
 
-	if err := walk(fsys, "blobs", collectBlob); err != nil {
-		return err
-	}
-
 	for blob, id := range blobs {
 		if used[id] {
 			continue
@@ -213,7 +209,74 @@ func pruneBlobs(root *os.Root, repos []string) error {
 		}
 	}
 
-	return nil
+	return pruneShared(root, used)
+}
+
+// The shared blob store of `huggingface_hub` v2 deduplicates the files of
+// every repo in `blobs/<hash[:2]>/<hash>`, beside a manifest
+// `<hash>.refs` of the blobs linking to it, which is only a hint, and
+// is used only while its marker holds its layout.
+const (
+	sharedMarker     = "blobs/.huggingface-shared-blobs"
+	sharedMarkerTemp = sharedMarker + ".00000000.tmp"
+	sharedLayout     = "1\n"
+)
+
+// pruneShared deletes the payloads of the shared blob store that no
+// snapshot uses, with their manifests, as `huggingface_hub` collects them,
+// and restores the marker that pruning before deleted, so later downloads
+// reuse the store again. A store of another layout stays as it is.
+func pruneShared(root *os.Root, used map[fileID]bool) error {
+	fsys := root.FS()
+
+	if ok, err := isDir(fsys, "blobs"); !ok {
+		return err
+	}
+
+	marker, err := fs.ReadFile(fsys, sharedMarker)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return err
+	case string(marker) != sharedLayout:
+		return nil
+	}
+
+	err = walk(fsys, "blobs", func(name string, entry fs.DirEntry) error {
+		if !entry.Type().IsRegular() || !isPayload(name) {
+			return nil
+		}
+
+		if id, ok := resolve(root, name); ok && used[id] {
+			return nil
+		}
+
+		if err := root.Remove(name + ".refs"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+
+		return root.Remove(name)
+	})
+	if err != nil || marker != nil {
+		return err
+	}
+
+	// Written whole, since `huggingface_hub` never adopts a store without it,
+	// named as its own temporaries, which it cleans up, and writable, so an
+	// interrupted write is retried.
+	if err := root.WriteFile(sharedMarkerTemp, []byte(sharedLayout), 0o644); err != nil {
+		return err
+	}
+
+	return root.Rename(sharedMarkerTemp, sharedMarker)
+}
+
+// isPayload reports whether name is a payload of the shared blob store.
+func isPayload(name string) bool {
+	dir, hash := path.Split(name)
+
+	return len(hash) == 64 && strings.Trim(hash, "0123456789abcdef") == "" && dir == "blobs/"+hash[:2]+"/"
 }
 
 // isDir tells whether name is a directory rather than a symlink to one, and

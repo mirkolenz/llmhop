@@ -1,8 +1,10 @@
 package hubcache
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -120,4 +122,65 @@ func TestPrune(t *testing.T) {
 	check(filepath.Join(repo, "blobs", "a1"), false)
 	check(filepath.Join(repo, "snapshots", "b2"), true)
 	check(filepath.Join(repo, "blobs", "b2"), true)
+}
+
+// The payloads of the shared blob store that a snapshot uses stay with their
+// manifests, the others go, and a marker deleted by pruning before returns.
+func TestPruneShared(t *testing.T) {
+	hub := t.TempDir()
+	repo := filepath.Join(hub, "models--a--b")
+	marker := filepath.Join(hub, sharedMarker)
+	spec := Specification{Hub: hub, Repositories: []Repository{{Name: "models--a--b", Revision: "main"}}}
+
+	download(t, repo, "a1", "main")
+	download(t, repo, "b2", "pr")
+
+	// share moves the blob of commit into the store, as huggingface_hub does.
+	share := func(commit string) string {
+		t.Helper()
+
+		hash := strings.Repeat(commit, 32)
+		payload := filepath.Join(hub, "blobs", hash[:2], hash)
+		blob := filepath.Join(repo, "blobs", commit)
+
+		err := errors.Join(
+			os.MkdirAll(filepath.Dir(payload), 0o755),
+			os.Rename(blob, payload),
+			os.Symlink(filepath.Join("..", "..", "blobs", hash[:2], hash), blob),
+			os.WriteFile(payload+".refs", []byte("models--a--b/blobs/"+commit+"\n"), 0o644),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return payload
+	}
+
+	kept, dropped := share("a1"), share("b2")
+
+	if err := os.WriteFile(marker, []byte(sharedLayout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 2 {
+		if i == 1 {
+			if err := os.Remove(marker); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := Prune(spec); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, err := os.ReadFile(marker); string(got) != sharedLayout {
+			t.Errorf("marker %q, %v", got, err)
+		}
+
+		for name, want := range map[string]bool{kept: true, kept + ".refs": true, dropped: false, dropped + ".refs": false} {
+			if _, err := os.Lstat(name); (err == nil) != want {
+				t.Errorf("%s: exists %v, want %v", name, err == nil, want)
+			}
+		}
+	}
 }

@@ -81,7 +81,11 @@ func mebibytes(s string) float64 {
 // runs, so the timestamps of the cards tell how recent the processes are.
 type nvidiaStream struct {
 	interval time.Duration
-	mu       sync.Mutex
+	// started is closed by settle once the first iteration of the cards is
+	// complete or a query ended, which the first read waits for.
+	started chan struct{}
+	settle  func()
+	mu      sync.Mutex
 	// cards holds the latest complete iteration of the cards, and next the
 	// one arriving.
 	cards, next nvidiaBatch
@@ -97,19 +101,14 @@ type nvidiaBatch struct {
 
 // add adds a row at a time, starting a new iteration unless it is less
 // than half the interval of the iterations after the start of the current
-// one, and reports whether it did. nvidia-smi stamps every row when it
-// queries its card, so the rows of one iteration differ by milliseconds.
-func (b *nvidiaBatch) add(at time.Time, row []string, interval time.Duration) bool {
-	elapsed := at.Sub(b.at)
-	started := elapsed < 0 || elapsed >= interval/2
-
-	if started {
+// one. nvidia-smi stamps every row when it queries its card, so the rows of
+// one iteration differ by milliseconds.
+func (b *nvidiaBatch) add(at time.Time, row []string, interval time.Duration) {
+	if elapsed := at.Sub(b.at); elapsed < 0 || elapsed >= interval/2 {
 		*b = nvidiaBatch{at: at}
 	}
 
 	b.rows = append(b.rows, row)
-
-	return started
 }
 
 // nvidiaTime is the layout of the timestamps of nvidia-smi.
@@ -123,24 +122,35 @@ func startNvidia(ctx context.Context, interval time.Duration) *nvidiaStream {
 		return nil
 	}
 
-	s := &nvidiaStream{interval: interval}
+	s := newNvidiaStream(interval)
 
-	go s.follow(ctx, bin, "--query-gpu=timestamp,"+nvidiaQuery, s.addCard)
+	go s.follow(ctx, bin, "--query-gpu=timestamp,count,"+nvidiaQuery, s.addCard)
 	go s.follow(ctx, bin, "--query-compute-apps=timestamp,gpu_uuid,pid,used_memory", s.addApp)
 
 	return s
 }
 
-// addCard adds a row of the cards, completing the previous iteration once
-// the next starts.
+func newNvidiaStream(interval time.Duration) *nvidiaStream {
+	started := make(chan struct{})
+
+	return &nvidiaStream{interval: interval, started: started, settle: sync.OnceFunc(func() { close(started) })}
+}
+
+// addCard adds a row of the cards, which leads with their count, completing
+// the iteration once it holds them all.
 func (s *nvidiaStream) addCard(at time.Time, row []string) {
+	if len(row) == 0 {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	previous := s.next
+	s.next.add(at, row[1:], s.interval)
 
-	if s.next.add(at, row, s.interval) && previous.rows != nil {
-		s.cards = previous
+	if count, err := strconv.Atoi(row[0]); err == nil && len(s.next.rows) == count {
+		s.cards, s.next = s.next, nvidiaBatch{}
+		s.settle()
 	}
 }
 
@@ -157,7 +167,8 @@ func (s *nvidiaStream) addApp(at time.Time, row []string) {
 const maxRestartWait = time.Minute
 
 // follow runs a query in loop mode, passing its rows to add, and restarts
-// it once it exits, until ctx is done.
+// it once it exits, until ctx is done. Its exit settles the first read,
+// which would otherwise wait in vain, as without a working driver.
 func (s *nvidiaStream) follow(ctx context.Context, bin, query string, add func(time.Time, []string)) {
 	loop := "--loop-ms=" + strconv.FormatInt(s.interval.Milliseconds(), 10)
 	wait := s.interval
@@ -168,6 +179,8 @@ func (s *nvidiaStream) follow(ctx context.Context, bin, query string, add func(t
 		} else {
 			wait = min(2*wait, maxRestartWait)
 		}
+
+		s.settle()
 
 		select {
 		case <-ctx.Done():
@@ -218,10 +231,16 @@ func run(ctx context.Context, cmd *exec.Cmd, add func(time.Time, []string)) bool
 
 // read returns the cards of the latest iteration with the processes of an
 // iteration of their query since the iteration of the cards before, or none
-// if the cards stopped reporting, such as on a driver failure.
-func (s *nvidiaStream) read() []GPU {
+// if the cards stopped reporting, such as on a driver failure. The first
+// read waits for the first iteration until ctx is done.
+func (s *nvidiaStream) read(ctx context.Context) []GPU {
 	if s == nil {
 		return nil
+	}
+
+	select {
+	case <-s.started:
+	case <-ctx.Done():
 	}
 
 	s.mu.Lock()

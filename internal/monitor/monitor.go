@@ -70,6 +70,10 @@ func requireTerminal() error {
 // while it idles between polls.
 const fps = 10
 
+// baseline bounds the time between the first two polls, the first of which
+// only sets the baseline of the rates, so that they show at once.
+const baseline = 250 * time.Millisecond
+
 // run shows the snapshots that collect takes every interval of a source
 // until quit.
 func run(source string, interval time.Duration, collect func(context.Context) *snapshot) error {
@@ -80,7 +84,8 @@ func run(source string, interval time.Duration, collect func(context.Context) *s
 }
 
 // top is the state of `llmhop top`, the two latest snapshots, whose
-// difference gives the rates.
+// difference gives the rates, the first of which shows only once the second
+// arrives.
 type top struct {
 	source        string
 	interval      time.Duration
@@ -105,14 +110,15 @@ func (t *top) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case *snapshot:
 		t.last, t.now = t.now, msg
+		wait := t.interval
 
 		if t.last == nil {
-			t.last = msg
+			wait = min(wait, baseline)
+		} else {
+			t.trends = t.trends.record(t.frame())
 		}
 
-		t.trends = t.trends.record(t.frame())
-
-		return t, tea.Tick(t.interval, func(time.Time) tea.Msg { return t.poll() })
+		return t, tea.Tick(wait, func(time.Time) tea.Msg { return t.poll() })
 	}
 
 	return t, nil

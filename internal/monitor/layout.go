@@ -14,7 +14,7 @@ import (
 // last sections that do not fit, which the renderer clips to the screen.
 // The disks and the network, of the least weight beside the gateway, trail.
 func (t *top) render() string {
-	if t.now == nil {
+	if t.last == nil {
 		return "Polling " + t.source + " ..."
 	}
 

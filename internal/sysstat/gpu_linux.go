@@ -24,8 +24,8 @@ func newGPUSource(ctx context.Context, interval time.Duration) *gpuSource {
 	return &gpuSource{nvidia: startNvidia(ctx, interval)}
 }
 
-func (s *gpuSource) read(context.Context) []GPU {
-	return append(s.nvidia.read(), s.drmGPUs()...)
+func (s *gpuSource) read(ctx context.Context) []GPU {
+	return append(s.nvidia.read(ctx), s.drmGPUs()...)
 }
 
 // drm is where the kernel lists the cards of its DRM drivers.

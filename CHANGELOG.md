@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.3.1](https://github.com/mirkolenz/llmhop/compare/v4.3.0...v4.3.1) (2026-11-27)
+
+### Bug Fixes
+
+* **hubcache:** keep shared blob store marker and prune only unused payloads ([464c00d](https://github.com/mirkolenz/llmhop/commit/464c00daa8fe961f0ed1b41df588f8732c74fe17))
+* **limits:** add per-client token and slot-second limits with live metering ([44e1b23](https://github.com/mirkolenz/llmhop/commit/44e1b23106b21c6e7166a817c74c17ef03745548))
+
 ## [4.3.0](https://github.com/mirkolenz/llmhop/compare/v4.2.1...v4.3.0) (2026-11-26)
 
 ### Features

@@ -95,10 +95,13 @@ type nvidiaBatch struct {
 	at   time.Time
 }
 
-// add adds a row of an iteration at a time, starting a new iteration
-// unless it has that time, and reports whether it did.
-func (b *nvidiaBatch) add(at time.Time, row []string) bool {
-	started := !at.Equal(b.at)
+// add adds a row at a time, starting a new iteration unless it is less
+// than half the interval of the iterations after the start of the current
+// one, and reports whether it did. nvidia-smi stamps every row when it
+// queries its card, so the rows of one iteration differ by milliseconds.
+func (b *nvidiaBatch) add(at time.Time, row []string, interval time.Duration) bool {
+	elapsed := at.Sub(b.at)
+	started := elapsed < 0 || elapsed >= interval/2
 
 	if started {
 		*b = nvidiaBatch{at: at}
@@ -136,7 +139,7 @@ func (s *nvidiaStream) addCard(at time.Time, row []string) {
 
 	previous := s.next
 
-	if s.next.add(at, row) && previous.rows != nil {
+	if s.next.add(at, row, s.interval) && previous.rows != nil {
 		s.cards = previous
 	}
 }
@@ -146,7 +149,7 @@ func (s *nvidiaStream) addApp(at time.Time, row []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.apps.add(at, row)
+	s.apps.add(at, row, s.interval)
 }
 
 // maxRestartWait bounds the wait before nvidia-smi restarts, which doubles

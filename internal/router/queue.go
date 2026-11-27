@@ -100,7 +100,7 @@ func (t *ticket) release() {
 
 	q.slots.used--
 	q.running[t.client.name]--
-	t.client.slots.used--
+	t.client.hold(-1)
 	q.dispatch()
 
 	for _, other := range l.queues {
@@ -144,7 +144,7 @@ func (q *queue) dispatch() {
 		q.leave(from, next)
 		q.slots.used++
 		ensure(&q.running)[next.client.name]++
-		next.client.slots.used++
+		next.client.hold(1)
 		next.admitted = true
 		close(next.ready)
 	}

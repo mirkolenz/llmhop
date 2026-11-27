@@ -143,7 +143,8 @@ const bodyTimeout = time.Minute
 // the backend starts its response and edited for a rewriting alias,
 // or if routed by its path, which is stripped up to its proxy segment,
 // and the body forwarded verbatim, buffered only if JSON that may carry an
-// affinity key, such as the session of a native SGLang request.
+// affinity key, such as the session of a native SGLang request, or whose
+// tokens are metered.
 // The limits apply only once the model is resolved,
 // so a saturated model never blocks requests to another.
 func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, routed bool) http.HandlerFunc {
@@ -165,24 +166,21 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 
 		if routed {
 			name, m = rt.routeModel(req.URL)
+		}
 
-			if m != nil && rt.keyedBody(m, req.Header) {
-				if b = buffer(w, req, buffered); b == nil {
-					return
-				}
-
-				defer b.release()
-
-				// A body other than an object carries no key, yet passes.
-				obj, _ = parseObject(b.data)
-			}
-		} else {
+		if !routed || m != nil && (rt.keyedBody(m, req.Header) || entryOf(req).client.metered && meterable(req)) {
 			if b = buffer(w, req, buffered); b == nil {
 				return
 			}
 
 			defer b.release()
+		}
 
+		switch {
+		case routed && b != nil:
+			// A body other than an object carries no key, yet passes.
+			obj, _ = parseObject(b.data)
+		case !routed:
 			var invalid *apiErrorBody
 			if name, obj, invalid = modelField(req.Header.Get("Content-Type"), b.data); invalid != nil {
 				writeError(w, http.StatusBadRequest, invalid.Code, invalid.Message)
@@ -211,11 +209,21 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 			return
 		}
 
-		if !take(w, c.limiters) {
-			return
+		// The members of the body to replace.
+		set := make(map[string]jsontext.Value)
+		a := &attempt{}
+
+		if c.metered {
+			if a.tokens = rt.limits.stats.meterRequest(req, obj, c, m, set); a.tokens == nil {
+				writeError(w, http.StatusForbidden, errUnmetered.Code, errUnmetered.Message)
+
+				return
+			}
 		}
 
-		a := &attempt{}
+		if !take(w, c.limiters, 1) {
+			return
+		}
 
 		if b != nil {
 			body := b.data
@@ -228,7 +236,11 @@ func (rt *routes) proxyHandler(maxBytes int64, buffered *semaphore.Weighted, rou
 					return
 				}
 
-				body = obj.patch(map[string]jsontext.Value{"model": upstream})
+				set["model"] = upstream
+			}
+
+			if len(set) > 0 {
+				body = obj.patch(set)
 			}
 
 			req, a.accept = b.forward(req, body)

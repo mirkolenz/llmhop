@@ -74,7 +74,7 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
 | ------ | ----------------------------------------------------------------- |
 | `400`  | an invalid body, a missing `model`, an unreadable body, or a multipart body to an alias rewriting the `model` |
 | `401`  | missing, invalid or expired key, with `WWW-Authenticate: Bearer`   |
-| `403`  | a model the client may not use, or a cross-site request or foreign host on the listener of a client |
+| `403`  | a model the client may not use, a request whose usage a token limit cannot meter, or a cross-site request or foreign host on the listener of a client |
 | `404`  | unknown model, or an unknown path below `/llmhop/`                 |
 | `408`  | the body did not arrive within a minute                            |
 | `413`  | the body exceeds `maxBodyBytes`                                    |
@@ -103,6 +103,7 @@ Every error is JSON in the shape of OpenAI, as in `{"error": {"message": "...", 
       "urls": ["unix:///run/llmhop/vllm-qwen3-8b/http.sock"],
       "healthPath": "/health",
       "metricsPath": "/metrics",
+      "streamUsage": "continuous",
       "aliases": { "qwen3-8b-sql": {} },
       "dataParallelSize": 4,
       "maxConcurrentRequests": 64,
@@ -129,6 +130,7 @@ Each of `urls` is an absolute `http(s)` URL or `unix:///<socket path>`.
 llmhop answers the preflights, allows the methods of REST APIs and every request and response header but no credentials, and drops the CORS headers of backends whenever keys are required, so only `corsOrigins` decides which pages read a response.
 It requires clients, and CORS never applies to the listener of a client.
 A model's `headers` are applied last, so a configured `Authorization` replaces the client's.
+`streamUsage` is how the servers of a model report the usage of a stream, which [token limits](#clients-and-policies) ask for: `final` (default) in its last event once asked by `stream_options.include_usage`, as every OpenAI API does, `continuous` in every event once also asked by `stream_options.continuous_usage_stats`, as vLLM and SGLang do, or `timings` in the `timings` of every event once asked by `timings_per_token`, as llama.cpp does, while other servers may reject these unknown options.
 Unknown keys are rejected, and `llmhop check` validates a config without binding a port or expanding secrets.
 
 ### Clients and policies
@@ -178,12 +180,21 @@ Without any client, every request belongs to the anonymous client `""`, which `d
 | `models`                | allowlist of model names, aliases and detectors, also for `/llmhop/proxy/`, wildcards such as `qwen3-*` included, others get `403` and are not listed |
 | `maxConcurrentRequests` | requests of the client in flight, beyond which it waits in the model's queue                                                   |
 | `requestsPerMinute`     | token bucket of requests, `429` with `Retry-After` once empty                                                                  |
+| `tokensPerMinute`       | token bucket of the prompt and completion tokens that the responses report, drained while they stream, `429` with `Retry-After` once in debt |
+| `slotSecondsPerMinute`  | token bucket of the seconds its requests hold their slots, drained while they run, `429` with `Retry-After` once in debt, so `60` allows one request running on average |
 | `weight`                | share of the client among those waiting for a saturated model, which admits them round-robin, one by default                   |
 
 `0`, `[]` or an absent field means no limit.
 A request must pass the limits of its client beside the `maxConcurrentRequests` of its model.
-Responses of a client with `requestsPerMinute` carry OpenAI's `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests` and `x-ratelimit-reset-requests`, while those of a backend, which describe llmhop's own upstream credential, are dropped.
-Every limit is exact and needs nothing from a request body or a response.
+Responses of a client with `requestsPerMinute` carry OpenAI's `x-ratelimit-limit-requests`, `x-ratelimit-remaining-requests` and `x-ratelimit-reset-requests`, and with `tokensPerMinute` and `slotSecondsPerMinute` the same headers ending in `-tokens` and `-slot-seconds`, while those of a backend, which describe llmhop's own upstream credential, are dropped.
+The buckets of tokens and slot seconds drain while a request runs, with the usage its response reports and with every second it holds a slot, so a long stream is never cut off, but a bucket in debt rejects further requests until it refills, which bounds the usage of a client over time rather than per request.
+Slot seconds measure how long a client occupies the engines regardless of what it sends, while `maxConcurrentRequests` bounds how many requests it runs at once.
+Every other limit is exact and needs nothing from a request body or a response.
+
+A token limit fails closed, so a client with `tokensPerMinute` may send only JSON bodies to `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`, also through `/llmhop/proxy/<model>/`, whose responses report an OpenAI `usage`, while any other request gets `403` with `usage_unmetered`.
+llmhop asks the servers of a stream for its usage as their `streamUsage` tells, so a stream of a `continuous` or `timings` model is charged while it runs, even once cancelled.
+A `final` model, such as a remote API, reports it in the last event only, which the client gets only if it asked for it.
+A successful response that ends without any usage, such as a stream cancelled before its final event or a backend ignoring the options, costs the whole bucket and counts in `llmhop_unmetered_responses_total`, so a client can never evade the limit, while a failed response costs nothing.
 The limiters live in the memory of each instance, survive a reload and reset on a restart, so N instances behind a load balancer each enforce their own share, and a limit should be divided by N.
 
 `"clientCredentials": true` imports every credential named `llmhop.api-key.<client>` as the client `<client>`, read at startup and on every reload, which keeps keys required while there is none.
@@ -200,6 +211,9 @@ A listener with `metrics` serves `GET /llmhop/metrics` in the Prometheus text fo
 | Series                                         | Labels                     | What                                                                       |
 | ---------------------------------------------- | -------------------------- | -------------------------------------------------------------------------- |
 | `llmhop_requests_total`                        | `client`, `model`, `status` | answered requests, where a rate limit shows as `429`                      |
+| `llmhop_tokens_total`                          | `client`, `model`, `kind`  | `prompt` and `completion` tokens that the responses of a client with `tokensPerMinute` reported |
+| `llmhop_unmetered_responses_total`             | `client`, `model`          | successful responses of a client with `tokensPerMinute` that reported no usage |
+| `llmhop_slot_seconds_total`                    | `client`                   | seconds the requests of the client held their slots, up to the scrape      |
 | `llmhop_request_duration_seconds`              | `model`                    | histogram of the durations of the successful requests sent in full                    |
 | `llmhop_request_first_token_seconds`           | `model`                    | histogram of the times to the first byte of the event streams among them, their first token |
 | `llmhop_queued_requests`                       | `model`                    | requests waiting for a slot                                                |
@@ -208,6 +222,10 @@ A listener with `metrics` serves `GET /llmhop/metrics` in the Prometheus text fo
 | `llmhop_client_max_running_requests`           | `client`                   | the slots of the client, absent without a limit                            |
 | `llmhop_client_max_requests_per_minute`        | `client`                   | the requests per minute of the client, absent without a limit              |
 | `llmhop_client_remaining_requests`             | `client`                   | the requests that remain to the client in its minute                       |
+| `llmhop_client_max_tokens_per_minute`          | `client`                   | the tokens per minute of the client, absent without a limit                |
+| `llmhop_client_remaining_tokens`               | `client`                   | the tokens that remain to the client in its minute                         |
+| `llmhop_client_max_slot_seconds_per_minute`    | `client`                   | the slot seconds per minute of the client, absent without a limit          |
+| `llmhop_client_remaining_slot_seconds`         | `client`                   | the slot seconds that remain to the client in its minute                   |
 | `llmhop_server_up`                             | `model`, `server`          | whether the server passed its latest probe, absent without a `healthPath` |
 | `llmhop_engine_*`                              | `model`, `server`          | what the engine of the server reports, absent without a `metricsPath`     |
 | `process_*`, `go_*`                            |                            | the process of llmhop                                                      |
@@ -331,7 +349,7 @@ It polls the metrics of llmhop on the first unix socket listener with `metrics` 
 - the requests and tokens of the gateway over all models, and the CPUs, load, memory and swap of the host
 - the GPUs with their utilization, memory, temperature, power, clock and throttling, as far as their drivers report them: those of NVIDIA through `nvidia-smi`, with the systemd units using their memory, those of AMD and Intel through sysfs, and those of Apple silicon through the I/O registry
 - the models, with their ready servers, queued and running requests, the share of their slots in use, requests per second with the shares of them that its limits rejected with `429` or that failed with another client or a server error, the mean latency and time to the first token of their streams as clients see it, and from their engines the tokens per second, KV cache usage and prefix cache hits
-- the clients, with whether they are active, their running requests, the shares of their slots and of their requests per minute in use, their share of the requests, and their requests per second with the shares of them rejected or failed
+- the clients, with whether they are active, their running requests, the shares of their slots and of their requests, tokens and slot seconds per minute in use, their share of the requests, their requests per second with the shares of them rejected or failed, and the tokens per second of those with a token limit
 - the filesystems mounted from devices, with their space, and the busy share and bytes read and written per second of their devices
 - the network interfaces that are up with an address beyond their link, such as those of the networks and VPNs but not the members of bridges or the links of containers, with the bytes they receive and send per second
 
@@ -412,7 +430,7 @@ services.llmhop.llama-cpp.models = lib.genAttrs [ "gpu0" "gpu1" ] (gpu: {
 });
 ```
 
-Replicas must agree on what the gateway routes, their adapters, `dataParallelSize` and whether they are listed, which an assertion checks.
+Replicas must agree on what the gateway routes, their adapters, `dataParallelSize`, `metricsPath` and whether they are listed, which an assertion checks.
 
 Each workload runs as the unit `<engine>-<key>`, named by its attribute rather than its `name`.
 Native workers are hardened services running as the backend's `user`, which defaults to the engine name, while containers run rootful in user namespaces, see [containers](#containers-and-user-namespaces).
@@ -468,6 +486,8 @@ Only a socket or a loopback `host` can be isolated like this, so any other workl
 
 `settings`, over the backend's `modelSettings`, becomes the server's CLI flags beside those llmhop derives from the other options, such as the listener, the served name, `revision`, `loras` and `dataParallelSize`, which `settings` must not set.
 Every server serves its Prometheus metrics at `/metrics` by default, llama.cpp through the default `modelSettings.metrics = true` and SGLang through `modelSettings.enable-metrics = true`, which the backend's `modelSettings` or a model's `settings` may turn off, and the gateway collects them through the `metricsPath` of its models.
+The models of vLLM and SGLang set `streamUsage` to `continuous` and those of llama.cpp to `timings`, so token limits charge their streams while they run.
+Replicas of one name on different engines fall back to `final`, which every engine reports.
 Strings and paths are passed verbatim and everything else as JSON, so attribute sets work for options like `--speculative-config`.
 
 - `true` becomes `--<key>`, while `null` and empty lists are dropped.

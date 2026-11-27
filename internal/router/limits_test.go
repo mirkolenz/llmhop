@@ -141,3 +141,25 @@ func TestLimitsSharedAcrossRouters(t *testing.T) {
 	close(release)
 	<-done
 }
+
+// The seconds a request held its slot drain the bucket of its client, which
+// then rejects the next one.
+func TestSlotSecondsLimit(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+	}))
+	t.Cleanup(backend.Close)
+	h := newRouter(t, &config.Config{
+		Defaults: config.Policy{SlotSecondsPerMinute: new(uint32(1))},
+		Models:   map[string]config.Model{"m": {URLs: []string{backend.URL}}},
+	})
+
+	if rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, ""); rec.Code != http.StatusOK {
+		t.Fatalf("got status %d", rec.Code)
+	}
+
+	rec := send(t, h, http.MethodPost, "/", `{"model":"m"}`, "")
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("X-Ratelimit-Remaining-Slot-Seconds") != "0" {
+		t.Errorf("got status %d and headers %v", rec.Code, rec.Header())
+	}
+}

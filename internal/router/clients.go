@@ -61,6 +61,8 @@ type client struct {
 	// models are the models it may use, every one if nil.
 	models *matcher[struct{}]
 	weight float64
+	// metered is whether its tokens are, under a token limit.
+	metered bool
 }
 
 // newClient resolves the effective policy of a client of cfg against the
@@ -73,6 +75,7 @@ func newClient(cfg *config.Config, name string, cc config.Client, limits *Limits
 		expiresAt: cc.ExpiresAt,
 		limiters:  limits.limiters(name, p),
 		weight:    float64(cmp.Or(deref(p.Weight), 1)),
+		metered:   deref(p.TokensPerMinute) > 0,
 	}
 
 	if len(p.Models) > 0 {

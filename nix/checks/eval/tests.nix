@@ -327,6 +327,7 @@
           dataParallelSize = 2;
           healthPath = "/health";
           metricsPath = "/metrics";
+          streamUsage = "continuous";
         };
         llama = {
           urls = [ "http://127.0.0.1:24002" ];
@@ -335,17 +336,20 @@
           dataParallelSize = 4;
           healthPath = "/health";
           metricsPath = "/metrics";
+          streamUsage = "continuous";
         };
       };
       kernels = "1";
     };
   };
 
-  # Replicas sharing a name keep their units and caches, and the gateway
-  # balances them as one model, importing the client keys by their prefix.
+  # Replicas sharing a name, even on different engines, keep their units and
+  # caches, and the gateway balances them as one model with the final usage
+  # that both engines report, importing the client keys by their prefix.
   testReplicas = {
     expr = {
-      inherit (replicas.services.llmhop.gateway.settings.models.qwen) urls;
+      inherit (replicas.services.llmhop.gateway.settings.models.qwen) urls streamUsage;
+      mismatches = failing "differ in their" replicas;
       cache = replicas.systemd.services.llama-cpp-gpu1.environment.HF_HOME;
       inherit (replicas.systemd.services.llmhop.serviceConfig) ImportCredential;
     };
@@ -355,6 +359,8 @@
         "unix:///run/llmhop/llama-cpp-gpu1/http.sock"
         "http://127.0.0.1:27001"
       ];
+      streamUsage = "final";
+      mismatches = 0;
       cache = "/var/cache/llama-cpp/gpu1";
       ImportCredential = [ "llmhop.api-key.*" ];
     };

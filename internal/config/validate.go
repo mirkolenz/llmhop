@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 
 	"golang.org/x/net/http/httpguts"
@@ -169,6 +170,10 @@ func (m Model) validate(load bool) error {
 
 	if m.MetricsPath != "" && !validPath(m.MetricsPath) {
 		return fmt.Errorf("metricsPath: %q must be an absolute path", m.MetricsPath)
+	}
+
+	if !slices.Contains([]StreamUsage{FinalUsage, ContinuousUsage, TimingsUsage}, m.StreamUsage) {
+		return fmt.Errorf("streamUsage: %q must be final, continuous or timings", m.StreamUsage)
 	}
 
 	seen := make(map[string]bool, len(m.Headers))

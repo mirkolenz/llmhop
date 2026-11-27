@@ -103,17 +103,25 @@ func (x *metricsHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// scrape timeout.
 	var scrapes sync.WaitGroup
 
+	// limit reports the size of a bucket and what remains in it, if limited.
+	limit := func(labels, size, remaining string, lv level) {
+		if lv.limited {
+			gauge(size+labels, lv.size)
+			gauge(remaining+labels, math.Floor(max(0, lv.remaining)))
+		}
+	}
+
 	for client, c := range x.limits.clientLimits() {
 		labels := telemetry.Labels(telemetry.Client, client)
+		state.GetOrCreateFloatCounter(telemetry.SlotSeconds + labels).Set(c.held)
 
 		if c.slots > 0 {
 			gauge(telemetry.ClientMaxRunningRequests+labels, float64(c.slots))
 		}
 
-		if c.requests.limited {
-			gauge(telemetry.ClientMaxRequestsPerMinute+labels, c.requests.size)
-			gauge(telemetry.ClientRemainingRequests+labels, math.Floor(max(0, c.requests.remaining)))
-		}
+		limit(labels, telemetry.ClientMaxRequestsPerMinute, telemetry.ClientRemainingRequests, c.requests)
+		limit(labels, telemetry.ClientMaxTokensPerMinute, telemetry.ClientRemainingTokens, c.tokens)
+		limit(labels, telemetry.ClientMaxSlotSeconds, telemetry.ClientRemainingSlotSeconds, c.seconds)
 	}
 
 	for i, md := range x.models {

@@ -191,6 +191,15 @@ func (o *object) text(path ...string) string {
 	return s
 }
 
+// flag returns the boolean at a path of members, false without one.
+func (o *object) flag(path ...string) bool {
+	var b bool
+	value, _ := o.lookup(path)
+	_ = json.Unmarshal(value, &b)
+
+	return b
+}
+
 // patch returns the object with the values of set, replacing those of its
 // members and appending the others, in one pass that keeps everything else.
 func (o *object) patch(set map[string]jsontext.Value) []byte {

@@ -3,8 +3,8 @@
 # `description`, `port`, `host`, `socket`, `exposed`, `offline`,
 # `openFirewall`, `package`, `fetches`, `repositories`, `command`,
 # `settings`, `credentials`, `environment`, `environmentFile`, `mounts`,
-# `aliases`, `dataParallelSize`, `unlisted`, `gpu` and `metricsPath`, null
-# for a detector, and `assertions`.
+# `aliases`, `dataParallelSize`, `unlisted`, `gpu`, `metricsPath` and
+# `streamUsage`, null for a detector, and `assertions`.
 lib:
 let
   util = import ../../lib lib;
@@ -145,6 +145,7 @@ rec {
           unlisted = false;
           gpu = null;
           metricsPath = null;
+          streamUsage = null;
           assertions = [
             (util.firewallAssertion owner workload)
             {
@@ -243,7 +244,7 @@ rec {
                 )
                 ++ engine.positional workload;
               mounts = lib.optionals wrapped (scriptMounts script);
-              inherit (engine) metricsPath;
+              inherit (engine) metricsPath streamUsage;
               gpu = {
                 nativeDevices = workload.native.devices;
                 containerDevices = workload.container.devices;

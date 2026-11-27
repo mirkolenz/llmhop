@@ -41,17 +41,23 @@ type demoModel struct {
 	period float64
 }
 
+// demoPrompt and demoCompletion are the tokens of a request.
+const (
+	demoPrompt     = 900
+	demoCompletion = 260
+)
+
 var demoModels = []demoModel{
 	{"qwen3-8b", "unix:///run/llmhop/vllm-qwen3-8b/http.sock", "llmhop-vllm-qwen3-8b", 22 * gib, 64, 24, 2.1, 0.18, 40},
 	{"llama-3.3-70b", "unix:///run/llmhop/sglang-llama-3.3-70b/http.sock", "llmhop-sglang-llama-3.3-70b", 74 * gib, 48, 6, 7.5, 0.45, 70},
 }
 
 // demoClients are the clients of the demo by their share of the requests,
-// with their slots and requests per minute.
+// with their slots, and their requests, tokens and slot seconds per minute.
 var demoClients = []struct {
-	name                    string
-	share, slots, perMinute float64
-}{{"alice", 0.7, 96, 3000}, {"bob", 0.3, 32, 600}}
+	name                                                  string
+	share, slots, perMinute, tokensPerMinute, slotSeconds float64
+}{{"alice", 0.7, 96, 3000, 3_000_000, 4800}, {"bob", 0.3, 32, 600, 600_000, 1200}}
 
 const (
 	mib = 1 << 20
@@ -92,8 +98,9 @@ func (d *demo) collect(context.Context) *snapshot {
 
 	var gpus []sysstat.GPU
 
-	// perMinute sums the requests per minute of each client.
-	perMinute := make(map[string]float64)
+	// perMinute and slotSeconds sum the requests and slot seconds per minute
+	// of each client, whose tokens follow from its requests.
+	perMinute, slotSeconds := make(map[string]float64), make(map[string]float64)
 
 	for i, m := range demoModels {
 		load := 0.2 + 0.8*wave(m.period, float64(i))
@@ -102,7 +109,10 @@ func (d *demo) collect(context.Context) *snapshot {
 		for _, c := range demoClients {
 			perMinute[c.name] += 60 * rate * c.share
 			count(telemetry.Requests, rate*c.share*0.96, telemetry.Client, c.name, telemetry.Model, m.name, telemetry.Status, "200")
+			count(telemetry.Tokens, rate*c.share*demoPrompt, telemetry.Client, c.name, telemetry.Model, m.name, telemetry.Kind, telemetry.Prompt)
+			count(telemetry.Tokens, rate*c.share*demoCompletion, telemetry.Client, c.name, telemetry.Model, m.name, telemetry.Kind, telemetry.Completion)
 			gauge(telemetry.RunningRequests, math.Round(rate*c.share*m.latency), telemetry.Model, m.name, telemetry.Client, c.name)
+			slotSeconds[c.name] += 60 * rate * c.share * m.latency
 
 			// The limits reject bob at the peaks, and the engines fail rarely.
 			if c.name == "bob" {
@@ -123,9 +133,9 @@ func (d *demo) collect(context.Context) *snapshot {
 		gauge(telemetry.ServerUp, 1, kv...)
 		gauge(telemetry.EngineUp, 1, kv...)
 		gauge(telemetry.EngineKVCache, 0.25+0.7*load, kv...)
-		count(telemetry.EnginePromptTokens, rate*900, kv...)
-		count(telemetry.EngineCachedTokens, rate*900*(0.4+0.3*wave(30, 1)), kv...)
-		count(telemetry.EngineGeneratedTokens, rate*260, kv...)
+		count(telemetry.EnginePromptTokens, rate*demoPrompt, kv...)
+		count(telemetry.EngineCachedTokens, rate*demoPrompt*(0.4+0.3*wave(30, 1)), kv...)
+		count(telemetry.EngineGeneratedTokens, rate*demoCompletion, kv...)
 		gpus = append(gpus, demoGPU(i, load, m.memory, m.unit))
 	}
 
@@ -133,6 +143,11 @@ func (d *demo) collect(context.Context) *snapshot {
 		gauge(telemetry.ClientMaxRunningRequests, c.slots, telemetry.Client, c.name)
 		gauge(telemetry.ClientMaxRequestsPerMinute, c.perMinute, telemetry.Client, c.name)
 		gauge(telemetry.ClientRemainingRequests, max(0, c.perMinute-perMinute[c.name]), telemetry.Client, c.name)
+		gauge(telemetry.ClientMaxTokensPerMinute, c.tokensPerMinute, telemetry.Client, c.name)
+		gauge(telemetry.ClientRemainingTokens, max(0, c.tokensPerMinute-perMinute[c.name]*(demoPrompt+demoCompletion)), telemetry.Client, c.name)
+		gauge(telemetry.ClientMaxSlotSeconds, c.slotSeconds, telemetry.Client, c.name)
+		gauge(telemetry.ClientRemainingSlotSeconds, max(0, c.slotSeconds-slotSeconds[c.name]), telemetry.Client, c.name)
+		count(telemetry.SlotSeconds, slotSeconds[c.name]/60, telemetry.Client, c.name)
 	}
 
 	return &snapshot{

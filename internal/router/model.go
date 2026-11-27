@@ -33,6 +33,8 @@ type model struct {
 	health string
 	// metricsPath is the path of the Prometheus metrics of its servers.
 	metricsPath string
+	// streamUsage is how its servers report the usage of a stream.
+	streamUsage config.StreamUsage
 	// servers are the targets of keyless requests, one per URL without a rank.
 	servers []*target
 	// targets are the targets of requests with an affinity key, the ranks of
@@ -96,6 +98,7 @@ func newModel(name string, m config.Model, q *queue, p *pool, stripCORS bool) (*
 		host:         headers.Get("Host"),
 		health:       m.HealthPath,
 		metricsPath:  m.MetricsPath,
+		streamUsage:  m.StreamUsage,
 		queue:        q,
 		mu:           &p.mu,
 		queueTimeout: time.Duration(m.QueueTimeoutSeconds) * time.Second,
@@ -173,6 +176,8 @@ func newModel(name string, m config.Model, q *queue, p *pool, stripCORS bool) (*
 				return strings.HasPrefix(name, "X-Ratelimit-")
 			})
 
+			attemptOf(resp.Request).tokens.wrap(resp)
+
 			return nil
 		},
 		ErrorHandler: proxyError,
@@ -202,10 +207,20 @@ func (m *model) serve(w http.ResponseWriter, req *http.Request, a *attempt, t *t
 
 	defer t.release()
 
+	// Other requests of its client may have used up its buckets meanwhile.
+	if !take(w, t.client.limiters, 0) {
+		return
+	}
+
 	m.pick(a)
 	defer func() {
 		entryOf(req).server = a.target.up.Label
 		m.done(a)
+
+		// A client that left before a response may have cost tokens anyway.
+		if req.Context().Err() != nil {
+			a.tokens.finish()
+		}
 	}()
 
 	m.proxy.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), attemptKey{}, a)))

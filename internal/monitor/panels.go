@@ -209,8 +209,8 @@ func (t *top) modelSection(f frame) string {
 	return g.render(t.width)
 }
 
-// clientSection shows the clients and their requests, whose tokens no
-// engine reports.
+// clientSection shows the clients, their requests and the tokens that the
+// responses of those with a token limit report.
 func (t *top) clientSection(f frame) string {
 	g := grid{title: "Clients", cols: slices.Concat(
 		[]column{
@@ -219,10 +219,12 @@ func (t *top) clientSection(f frame) string {
 			{title: "RUN", keep: 9},
 			{title: "SLOTS", keep: 6, left: true},
 			{title: "RPM", keep: 7, left: true},
+			{title: "TPM", keep: 6, left: true},
+			{title: "SPM", keep: 6, left: true},
 			{title: "SHARE", keep: 5, left: true},
 		},
 		requestColumns,
-		[]column{trendColumn},
+		[]column{{title: "TOK/S", keep: 5}, trendColumn},
 	)}
 
 	total := f.value(telemetry.Requests, all)
@@ -239,17 +241,27 @@ func (t *top) clientSection(f frame) string {
 			active = 1
 		}
 
+		// used is the share of a bucket of the client in use.
+		used := func(remaining, size string) string {
+			return gauge(1 - f.value(remaining, is)/f.value(size, is))
+		}
+
 		g.rows = append(g.rows, slices.Concat(
 			[]string{
 				cmp.Or(client, dash),
 				dots([]float64{active}),
 				fmtCount(running),
 				gauge(running / f.value(telemetry.ClientMaxRunningRequests, is)),
-				gauge(1 - f.value(telemetry.ClientRemainingRequests, is)/f.value(telemetry.ClientMaxRequestsPerMinute, is)),
+				used(telemetry.ClientRemainingRequests, telemetry.ClientMaxRequestsPerMinute),
+				used(telemetry.ClientRemainingTokens, telemetry.ClientMaxTokensPerMinute),
+				used(telemetry.ClientRemainingSlotSeconds, telemetry.ClientMaxSlotSeconds),
 				gauge(f.value(telemetry.Requests, is) / total),
 			},
 			requestCells(f, is),
-			[]string{t.trend(trendKey{clientTrend, client, telemetry.Requests})},
+			[]string{
+				fmtRate(f.value(telemetry.Tokens, is)),
+				t.trend(trendKey{clientTrend, client, telemetry.Requests}),
+			},
 		))
 	}
 

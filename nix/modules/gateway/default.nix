@@ -69,6 +69,13 @@ let
       ;
     inherit (util) healthPath;
   };
+  # Replicas of different engines agree only on the final usage event.
+  streamUsage =
+    ws:
+    if lib.length (lib.unique (lib.catAttrs "streamUsage" ws)) == 1 then
+      (lib.head ws).streamUsage
+    else
+      "final";
   baseServiceConfig = util.accountServiceConfig cfg;
   # The image of the binary that validated `file`, unless `container.image`
   # replaces it.
@@ -100,7 +107,7 @@ in
         assertion = lib.length (lib.unique (map gatewayModel ws)) == 1;
         message = "services.llmhop: the replicas ${
           lib.concatMapStringsSep ", " (w: "`${w.owner}`") ws
-        } of `${name}` differ in their `aliases`, `dataParallelSize` or `unlisted`, which the gateway routes once per name.";
+        } of `${name}` differ in their `aliases`, `dataParallelSize`, `metricsPath` or `unlisted`, which the gateway routes once per name.";
       }) replicas;
 
       services.llmhop = {
@@ -111,7 +118,12 @@ in
           # Every served name is probed by readiness, pinned to its ranks
           # and balanced over its replicas.
           settings.models = lib.mapAttrs (
-            _: ws: gatewayModel (lib.head ws) // { urls = map util.probeUrl ws; }
+            _: ws:
+            gatewayModel (lib.head ws)
+            // {
+              urls = map util.probeUrl ws;
+              streamUsage = streamUsage ws;
+            }
           ) replicas;
         };
         claims = {

@@ -37,7 +37,7 @@ func TestMetrics(t *testing.T) {
 	t.Cleanup(backend.Close)
 	h := newRouter(t, &config.Config{
 		Listen:   map[string]config.Listener{"monitor": {Metrics: true}},
-		Policies: map[string]config.Policy{"p": {MaxConcurrentRequests: new(uint32(3)), RequestsPerMinute: new(uint32(60))}},
+		Policies: map[string]config.Policy{"p": {MaxConcurrentRequests: new(uint32(3)), RequestsPerMinute: new(uint32(60)), TokensPerMinute: new(uint32(60)), SlotSecondsPerMinute: new(uint32(60))}},
 		Clients:  map[string]config.Client{"a": {KeyHash: apikey.Of("llmhop_a-secret"), PolicyName: "p"}},
 		Models:   map[string]config.Model{"org/m": {URLs: []string{backend.URL}, HealthPath: "/health", MetricsPath: "/metrics", MaxConcurrentRequests: 4}},
 	})
@@ -81,6 +81,7 @@ func TestMetrics(t *testing.T) {
 	server := telemetry.Labels("model", "org/m", "server", backend.URL)
 	want := map[string]float64{
 		`llmhop_requests_total{client="a",model="org/m",status="200"}`: 1,
+		`llmhop_unmetered_responses_total{client="a",model="org/m"}`:   1,
 		`llmhop_request_duration_seconds_count{model="org/m"}`:         1,
 		`llmhop_queued_requests{model="org/m"}`:                        0,
 		`llmhop_running_requests{client="a",model="org/m"}`:            0,
@@ -92,6 +93,9 @@ func TestMetrics(t *testing.T) {
 		`llmhop_client_max_running_requests{client="a"}`:               3,
 		`llmhop_client_max_requests_per_minute{client="a"}`:            60,
 		`llmhop_client_remaining_requests{client="a"}`:                 59,
+		`llmhop_client_max_tokens_per_minute{client="a"}`:              60,
+		`llmhop_client_remaining_tokens{client="a"}`:                   0,
+		`llmhop_client_max_slot_seconds_per_minute{client="a"}`:        60,
 	}
 
 	for series, v := range want {
@@ -100,7 +104,7 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 
-	if got[`llmhop_request_duration_seconds_sum{model="org/m"}`] <= 0 {
+	if got[`llmhop_request_duration_seconds_sum{model="org/m"}`] <= 0 || got[`llmhop_slot_seconds_total{client="a"}`] <= 0 {
 		t.Error("the request took no time")
 	}
 

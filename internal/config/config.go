@@ -64,7 +64,25 @@ type Model struct {
 	// token counts of vLLM, SGLang or llama.cpp, which GET /llmhop/metrics
 	// collects from every URL. Empty skips the model.
 	MetricsPath string `json:"metricsPath,omitempty"`
+	// StreamUsage is how the servers report the usage of a stream, which
+	// token limits ask for, final by default.
+	StreamUsage StreamUsage `json:"streamUsage"`
 }
+
+// StreamUsage is how the servers of a model report the usage of a stream.
+type StreamUsage string
+
+const (
+	// FinalUsage reports it in the final event once asked by
+	// `stream_options.include_usage`, as every OpenAI API does.
+	FinalUsage StreamUsage = "final"
+	// ContinuousUsage reports it in every event once also asked by
+	// `stream_options.continuous_usage_stats`, as vLLM and SGLang do.
+	ContinuousUsage StreamUsage = "continuous"
+	// TimingsUsage reports its counts in the `timings` of every event once
+	// asked by `timings_per_token`, as llama.cpp does.
+	TimingsUsage StreamUsage = "timings"
+)
 
 // Alias is a further name of a model.
 type Alias struct {
@@ -183,6 +201,16 @@ type Policy struct {
 	MaxConcurrentRequests *uint32 `json:"maxConcurrentRequests,omitempty"`
 	// RequestsPerMinute refills a token bucket of requests.
 	RequestsPerMinute *uint32 `json:"requestsPerMinute,omitempty"`
+	// TokensPerMinute refills a token bucket of the prompt and completion
+	// tokens that the responses report, charged while they stream, so that
+	// a request is only admitted while the bucket is not in debt. It admits
+	// only the requests whose responses report their usage, and a response
+	// that reports none costs the whole bucket.
+	TokensPerMinute *uint32 `json:"tokensPerMinute,omitempty"`
+	// SlotSecondsPerMinute refills a token bucket of the seconds that the
+	// requests of a client hold their slots, drained while they run, so
+	// that a request is only admitted while the bucket is not in debt.
+	SlotSecondsPerMinute *uint32 `json:"slotSecondsPerMinute,omitempty"`
 	// Weight is the share of a client among those waiting for a saturated
 	// model, one by default.
 	Weight *uint32 `json:"weight,omitempty"`
@@ -196,6 +224,8 @@ func (p Policy) Over(base Policy) Policy {
 
 	p.MaxConcurrentRequests = cmp.Or(p.MaxConcurrentRequests, base.MaxConcurrentRequests)
 	p.RequestsPerMinute = cmp.Or(p.RequestsPerMinute, base.RequestsPerMinute)
+	p.TokensPerMinute = cmp.Or(p.TokensPerMinute, base.TokensPerMinute)
+	p.SlotSecondsPerMinute = cmp.Or(p.SlotSecondsPerMinute, base.SlotSecondsPerMinute)
 	p.Weight = cmp.Or(p.Weight, base.Weight)
 
 	return p
@@ -296,7 +326,7 @@ func Load(path string, expandSecrets bool) (*Config, error) {
 func (m *Model) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	type plain Model
 
-	p := plain{FailoverSeconds: 5, DataParallelSize: 1}
+	p := plain{FailoverSeconds: 5, DataParallelSize: 1, StreamUsage: FinalUsage}
 	if err := json.UnmarshalDecode(dec, &p); err != nil {
 		return err
 	}

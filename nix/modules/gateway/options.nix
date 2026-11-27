@@ -32,6 +32,14 @@ let
     '';
     maxConcurrentRequests = field types.ints.u32 "Requests in flight at once, beyond which a request waits in the model's queue.";
     requestsPerMinute = field types.ints.u32 "Requests per minute, refilled as a token bucket.";
+    tokensPerMinute = field types.ints.u32 ''
+      Prompt and completion tokens per minute that the responses report,
+      refilled as a token bucket that they drain while they stream. It
+      admits only JSON requests to `/v1/chat/completions`, `/v1/completions`
+      and `/v1/embeddings`, and a successful response without usage costs
+      the whole bucket.
+    '';
+    slotSecondsPerMinute = field types.ints.u32 "Seconds per minute that requests hold their slots, refilled as a token bucket that they drain while they run, so `60` allows one request running on average.";
     weight = field types.ints.u32 "Share of a client among those waiting for a saturated model, one by default.";
   };
   policy = types.submodule { options = policyOptions; };
@@ -83,6 +91,14 @@ let
       failoverSeconds = field types.ints.u32 "Seconds a server is avoided after it refused a connection or failed three requests in a row, `5` by default.";
       healthPath = field types.str "Path that readiness and the metrics probe on every URL, or `null` to skip the model.";
       metricsPath = field types.str "Path of the Prometheus metrics of every URL, such as `/metrics` of vLLM, SGLang or llama.cpp, whose engine metrics `/llmhop/metrics` adds, or `null` to skip the model.";
+      streamUsage =
+        field
+          (types.enum [
+            "final"
+            "continuous"
+            "timings"
+          ])
+          "How every URL reports the usage of a stream, which token limits ask for: `final` in its last event as every OpenAI API, `continuous` in every event as vLLM and SGLang, or `timings` in every event as llama.cpp, which the workloads of those engines set.";
     };
   };
 in

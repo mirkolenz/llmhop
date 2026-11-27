@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 )
 
 // apiError is the OpenAI error envelope:
@@ -90,4 +91,5 @@ var (
 	errMissingModel     = &apiErrorBody{Code: "missing_model", Message: "missing model"}
 	errInvalidMultipart = &apiErrorBody{Code: "invalid_multipart", Message: "invalid multipart request body or model field"}
 	errAliasRewrite     = &apiErrorBody{Code: "unsupported_alias_body", Message: "this alias rewrites the model of JSON bodies only"}
+	errUnmetered        = &apiErrorBody{Code: "usage_unmetered", Message: "the token limit of this client admits only JSON requests to " + strings.Join(meteredPaths, ", ")}
 )

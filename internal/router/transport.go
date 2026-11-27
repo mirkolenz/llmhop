@@ -26,6 +26,8 @@ type attempt struct {
 	// accept lets go of a buffered body once a response is accepted, unless
 	// nil.
 	accept func()
+	// tokens meters the usage of the response, unless nil.
+	tokens *tokenMeter
 }
 
 type attemptKey struct{}

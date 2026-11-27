@@ -18,7 +18,8 @@
 # a stop. `defaultModelSettings` are the defaults of the backend's
 # `modelSettings`, such as those serving its Prometheus metrics at
 # `metricsPath`, which the gateway collects, and which vLLM serves without
-# any.
+# any. `streamUsage` is how its servers report the usage of a stream in
+# every event, as the gateway's `streamUsage` of a model.
 # `reservedSettings` lists the aliases of the flags it renders or of
 # `positional`, which the `settings` of a model must not set either.
 # `fetch` renders the argv downloading one repository with its package into
@@ -73,6 +74,7 @@ in
 lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
   llama-cpp = {
     displayName = "llama.cpp";
+    streamUsage = "timings";
     negateBools = true;
     # Its list flags split their value at commas, while repeating some, such
     # as `--host` or `--tensor-split`, keeps only the last.
@@ -133,6 +135,7 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
 
   vllm = {
     displayName = "vLLM";
+    streamUsage = "continuous";
     negateBools = true;
     listStyle = "values";
     socketSettings = path: {
@@ -201,6 +204,7 @@ lib.mapAttrs (name: engine: defaults // engine // { inherit name; }) {
 
   sglang = {
     displayName = "SGLang";
+    streamUsage = "continuous";
     negateBools = false;
     listStyle = "values";
     socketSettings = null;

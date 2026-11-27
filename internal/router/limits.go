@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"golang.org/x/sync/semaphore"
-	"golang.org/x/time/rate"
 
 	"github.com/mirkolenz/llmhop/internal/config"
 )
@@ -105,6 +104,8 @@ func (l *Limits) limiters(client string, p config.Policy) *limiters {
 
 	now := time.Now()
 	lim.requests.resize(float64(deref(p.RequestsPerMinute)), now)
+	lim.tokens.resize(float64(deref(p.TokensPerMinute)), now)
+	lim.seconds.resize(float64(deref(p.SlotSecondsPerMinute)), now)
 
 	return lim
 }
@@ -170,31 +171,56 @@ func deref[T any](p *T) (v T) {
 	return v
 }
 
-// limiters bound the requests of a client. Limits guards its slots, and mu
-// its buckets.
+// limiters bound the requests of a client. Limits guards the size of its
+// slots, both locks their use, and mu its buckets and the slot seconds.
 type limiters struct {
-	slots    gauge
-	mu       sync.Mutex
-	requests bucket
+	slots                     gauge
+	mu                        sync.Mutex
+	requests, tokens, seconds bucket
+	// held is the slot seconds of its requests until settled.
+	held    float64
+	settled time.Time
 }
 
-// take admits a request to the request bucket of lim, taking a request if
-// limited, and sets the rate limit headers, or answers 429 and reports
-// false.
-func take(w http.ResponseWriter, lim *limiters) bool {
+// hold changes the slots in use by delta, which drain the slot seconds of
+// lim from now on. Limits.mu must be held.
+func (lim *limiters) hold(delta int64) {
+	lim.mu.Lock()
+	defer lim.mu.Unlock()
+
+	now := time.Now()
+	lim.settle(now)
+	lim.slots.used += delta
+	lim.seconds.setDrain(now, float64(lim.slots.used)*60)
+}
+
+// settle adds the slot seconds held until now. lim.mu must be held.
+func (lim *limiters) settle(now time.Time) {
+	lim.held += float64(lim.slots.used) * max(0, now.Sub(lim.settled).Seconds())
+	lim.settled = now
+}
+
+// take admits a request while each bucket of lim holds n, taking n requests,
+// and sets the rate limit headers, or answers 429 and reports false. The
+// tokens and slot seconds of the request are charged once they flow, so a
+// request takes one of each before it queues and none once admitted, when
+// only a bucket that fell into debt meanwhile rejects it.
+func take(w http.ResponseWriter, lim *limiters, n float64) bool {
 	lim.mu.Lock()
 	// Read under the lock, since a bucket never moves back in time.
 	now := time.Now()
-	wait := lim.requests.wait(now, 1)
+	wait := max(lim.requests.wait(now, n), lim.tokens.wait(now, n), lim.seconds.wait(now, n))
 
-	if wait == 0 && lim.requests.Limiter != nil {
-		lim.requests.AllowN(now, 1)
+	if wait == 0 {
+		lim.requests.take(now, n)
 	}
 
-	level := lim.requests.level(now)
+	requests, tokens, seconds := lim.requests.level(now), lim.tokens.level(now), lim.seconds.level(now)
 	lim.mu.Unlock()
 
-	level.header(w.Header(), "Requests")
+	requests.header(w.Header(), "Requests")
+	tokens.header(w.Header(), "Tokens")
+	seconds.header(w.Header(), "Slot-Seconds")
 
 	if wait == 0 {
 		return true
@@ -215,31 +241,78 @@ func (g *gauge) free() bool {
 	return g.size == 0 || g.used < g.size
 }
 
+// charge takes n tokens from the token bucket of lim, which may fall into
+// debt.
+func (lim *limiters) charge(n int64) {
+	lim.mu.Lock()
+	defer lim.mu.Unlock()
+
+	lim.tokens.take(time.Now(), float64(n))
+}
+
+// forfeit takes the whole size of the token bucket of lim.
+func (lim *limiters) forfeit() {
+	lim.mu.Lock()
+	defer lim.mu.Unlock()
+
+	lim.tokens.take(time.Now(), lim.tokens.size)
+}
+
 // bucket is a token bucket refilling its size per minute up to its size,
-// nil meaning unlimited.
-type bucket struct{ *rate.Limiter }
+// whose level falls below zero once it is charged more than it holds. A
+// zero size means unlimited.
+type bucket struct {
+	size, tokens float64
+	// drain empties it continuously by that much per minute.
+	drain float64
+	// at is when tokens was last set.
+	at time.Time
+}
 
 // resize keeps the level of a limited bucket, while one becoming limited
 // starts full.
 func (b *bucket) resize(size float64, now time.Time) {
-	switch {
-	case size == 0:
-		b.Limiter = nil
-	case b.Limiter == nil:
-		b.Limiter = rate.NewLimiter(rate.Limit(size/60), int(size))
-	default:
-		b.SetLimitAt(now, rate.Limit(size/60))
-		b.SetBurstAt(now, int(size))
+	tokens := size
+
+	if b.size > 0 {
+		tokens = min(b.tokensAt(now), size)
+	}
+
+	b.size, b.tokens, b.at = size, tokens, now
+}
+
+// tokensAt returns the level of b at now.
+func (b *bucket) tokensAt(now time.Time) float64 {
+	return min(b.size, b.tokens+max(0, now.Sub(b.at).Minutes())*(b.size-b.drain))
+}
+
+// setDrain sets the drain of b from now on, after the old one drained it.
+func (b *bucket) setDrain(now time.Time, drain float64) {
+	b.take(now, 0)
+	b.drain = drain
+}
+
+// take takes n from a limited bucket, bringing its level up to now.
+func (b *bucket) take(now time.Time, n float64) {
+	if b.size > 0 {
+		b.tokens, b.at = b.tokensAt(now)-n, now
 	}
 }
 
-// wait returns how long until b holds need, zero if unlimited or already.
+// wait returns how long until b holds need, zero if unlimited or already,
+// as if a drain at least as fast as the refill stopped.
 func (b *bucket) wait(now time.Time, need float64) time.Duration {
-	if b.Limiter == nil {
+	if b.size == 0 {
 		return 0
 	}
 
-	return time.Duration(max(0, need-b.TokensAt(now)) / float64(b.Limit()) * float64(time.Second))
+	refill := b.size - b.drain
+
+	if refill <= 0 {
+		refill = b.size
+	}
+
+	return time.Duration(max(0, need-b.tokensAt(now)) / refill * float64(time.Minute))
 }
 
 // level is what the rate limit headers report of a bucket.
@@ -250,13 +323,11 @@ type level struct {
 }
 
 func (b *bucket) level(now time.Time) level {
-	if b.Limiter == nil {
+	if b.size == 0 {
 		return level{}
 	}
 
-	size := float64(b.Burst())
-
-	return level{true, size, b.TokensAt(now), b.wait(now, size)}
+	return level{true, b.size, b.tokensAt(now), b.wait(now, b.size)}
 }
 
 // header sets the OpenAI rate limit headers of a kind for a limited bucket.
@@ -271,10 +342,11 @@ func (lv level) header(h http.Header, kind string) {
 }
 
 // clientLimits is the size of the slots of a client, zero meaning
-// unlimited, and the level of its request bucket.
+// unlimited, the levels of its buckets and the slot seconds it held.
 type clientLimits struct {
-	slots    int64
-	requests level
+	slots                     int64
+	requests, tokens, seconds level
+	held                      float64
 }
 
 // clientLimits returns the limits of each client.
@@ -287,7 +359,8 @@ func (l *Limits) clientLimits() map[string]clientLimits {
 
 	for name, lim := range l.clients {
 		lim.mu.Lock()
-		out[name] = clientLimits{lim.slots.size, lim.requests.level(now)}
+		lim.settle(now)
+		out[name] = clientLimits{lim.slots.size, lim.requests.level(now), lim.tokens.level(now), lim.seconds.level(now), lim.held}
 		lim.mu.Unlock()
 	}
 

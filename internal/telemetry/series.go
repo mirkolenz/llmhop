@@ -14,16 +14,29 @@ const (
 	Model  = "model"
 	Server = "server"
 	Status = "status"
+	Kind   = "kind"
+)
+
+// The kinds of tokens.
+const (
+	Prompt     = "prompt"
+	Completion = "completion"
 )
 
 // The series of the requests that llmhop answered, by client, model and
 // status, and the histograms of the successful ones sent in full by model,
 // of the time to the first byte of the event streams among them, their
-// first token.
+// first token, the seconds that the requests of a client held their slots,
+// and of the clients with a token limit by model the tokens that their
+// responses reported by kind and the successful responses that reported
+// none.
 const (
-	Requests          = "llmhop_requests_total"
-	RequestDuration   = "llmhop_request_duration_seconds"
-	RequestFirstToken = "llmhop_request_first_token_seconds"
+	Requests           = "llmhop_requests_total"
+	SlotSeconds        = "llmhop_slot_seconds_total"
+	Tokens             = "llmhop_tokens_total"
+	UnmeteredResponses = "llmhop_unmetered_responses_total"
+	RequestDuration    = "llmhop_request_duration_seconds"
+	RequestFirstToken  = "llmhop_request_first_token_seconds"
 )
 
 // The series of the present state of the models and their servers.
@@ -42,12 +55,16 @@ const (
 )
 
 // The series of the limits of the clients, each absent without the limit:
-// the size of their slots, and the size of their request bucket per minute
-// with the requests that remain in it.
+// the size of their slots, and the sizes of their buckets of requests,
+// tokens and slot seconds per minute with what remains in them.
 const (
 	ClientMaxRunningRequests   = "llmhop_client_max_running_requests"
 	ClientMaxRequestsPerMinute = "llmhop_client_max_requests_per_minute"
 	ClientRemainingRequests    = "llmhop_client_remaining_requests"
+	ClientMaxTokensPerMinute   = "llmhop_client_max_tokens_per_minute"
+	ClientRemainingTokens      = "llmhop_client_remaining_tokens"
+	ClientMaxSlotSeconds       = "llmhop_client_max_slot_seconds_per_minute"
+	ClientRemainingSlotSeconds = "llmhop_client_remaining_slot_seconds"
 )
 
 // enginePrefix starts the names of the series of the engines.

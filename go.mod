@@ -14,7 +14,6 @@ require (
 	golang.org/x/net v0.63.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
-	golang.org/x/time v0.16.0
 	howett.net/plist v1.0.1
 )
 

@@ -92,8 +92,11 @@ const (
 
 // fixed pads s on the left to width cells.
 func fixed(width int, s string) string {
-	return strings.Repeat(" ", max(0, width-lipgloss.Width(s))) + s
+	return lipgloss.PlaceHorizontal(width, lipgloss.Right, s)
 }
+
+// ellipsis ends a truncated text.
+const ellipsis = "…"
 
 // known shows v by show in width cells, or a dash for NaN.
 func known(v float64, width int, show func(float64) string) string {
@@ -173,7 +176,7 @@ func warn(s string, width int) string {
 		s = paint(yellow, s)
 	}
 
-	return s + strings.Repeat(" ", max(0, width-lipgloss.Width(s)))
+	return lipgloss.PlaceHorizontal(width, lipgloss.Left, s)
 }
 
 func fmtCount(v float64) string {

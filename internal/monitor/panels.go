@@ -7,17 +7,23 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/mirkolenz/llmhop/internal/sysstat"
 	"github.com/mirkolenz/llmhop/internal/telemetry"
 )
 
-// title names the source, and the time and how to quit at the right edge,
-// followed by why the latest poll failed.
+// title names the source, truncated to fit, and the time and how to quit at
+// the right edge, followed by why the latest poll failed.
 func (t *top) title(f frame) string {
-	left := titleStyle.Render("llmhop") + mutedStyle.Render(" · ") + t.source
 	right := mutedStyle.Render(f.now.at.Format(time.TimeOnly) + " · q quits")
-	line := left + strings.Repeat(" ", max(2, t.width-lipgloss.Width(left)-lipgloss.Width(right))) + right
+	left := titleStyle.Render("llmhop") + mutedStyle.Render(" · ") + t.source
+
+	if t.width > 0 {
+		left = ansi.Truncate(left, t.width-ansi.StringWidth(right)-2, ellipsis)
+	}
+
+	line := left + strings.Repeat(" ", max(2, t.width-ansi.StringWidth(left)-ansi.StringWidth(right))) + right
 
 	if f.now.err != nil {
 		line += "\n" + paint(red, "poll failed: "+f.now.err.Error())
@@ -88,7 +94,7 @@ func (t *top) hostSection(f frame) string {
 func (t *top) gpuSection(f frame) string {
 	g := grid{title: "GPUs", cols: []column{
 		{title: "GPU", keep: 10, left: true},
-		{title: "NAME", keep: 2, left: true},
+		{title: "NAME", keep: 2, left: true, shrink: true},
 		{title: "UTIL", keep: 9, left: true},
 		trendColumn,
 		{title: "MEMORY", keep: 9, left: true},
@@ -96,13 +102,16 @@ func (t *top) gpuSection(f frame) string {
 		{title: "POWER", keep: 5, left: true},
 		{title: "CLOCK", keep: 1},
 		{title: "LIMIT", keep: 4, left: true},
-		{title: "USED BY", keep: 4, left: true},
+		{title: "USED BY", keep: 4, left: true, shrink: true},
 	}}
 
 	for _, card := range f.now.gpus {
 		var users []string
 
-		for _, p := range card.Processes {
+		// The largest users lead, so that truncation hides the smallest.
+		for _, p := range slices.SortedStableFunc(slices.Values(card.Processes), func(a, b sysstat.Process) int {
+			return cmp.Compare(b.Mem, a.Mem)
+		}) {
 			users = append(users, p.Owner+" "+fmtBytes(p.Mem))
 		}
 
@@ -127,7 +136,7 @@ func (t *top) gpuSection(f frame) string {
 // devices.
 func (t *top) diskSection(f frame) string {
 	g := grid{title: "Disks", cols: []column{
-		{title: "MOUNT", keep: 10, left: true},
+		{title: "MOUNT", keep: 10, left: true, shrink: true},
 		{title: "SPACE", keep: 9, left: true},
 		{title: "BUSY", keep: 6, left: true},
 		trendColumn,
@@ -152,7 +161,7 @@ func (t *top) diskSection(f frame) string {
 // networkSection shows the network interfaces and their traffic.
 func (t *top) networkSection(f frame) string {
 	g := grid{title: "Network", cols: []column{
-		{title: "INTERFACE", keep: 10, left: true},
+		{title: "INTERFACE", keep: 10, left: true, shrink: true},
 		{title: "IN/S", keep: 9},
 		{title: "OUT/S", keep: 9},
 		trendColumn,
@@ -174,7 +183,7 @@ func (t *top) networkSection(f frame) string {
 func (t *top) modelSection(f frame) string {
 	g := grid{title: "Models", cols: slices.Concat(
 		[]column{
-			{title: "MODEL", keep: 10, left: true},
+			{title: "MODEL", keep: 10, left: true, shrink: true},
 			{title: "UP", keep: 9, left: true},
 			{title: "QUEUE", keep: 9},
 			{title: "RUN", keep: 9},
@@ -214,7 +223,7 @@ func (t *top) modelSection(f frame) string {
 func (t *top) clientSection(f frame) string {
 	g := grid{title: "Clients", cols: slices.Concat(
 		[]column{
-			{title: "CLIENT", keep: 10, left: true},
+			{title: "CLIENT", keep: 10, left: true, shrink: true},
 			{title: "ACTIVE", keep: 9, left: true},
 			{title: "RUN", keep: 9},
 			{title: "SLOTS", keep: 6, left: true},

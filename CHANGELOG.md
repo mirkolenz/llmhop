@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.3.3](https://github.com/mirkolenz/llmhop/compare/v4.3.2...v4.3.3) (2026-11-27)
+
+### Bug Fixes
+
+* **top:** show all sections with the first frame ([7e50a90](https://github.com/mirkolenz/llmhop/commit/7e50a90bcc020672db3ee1711bb0c4d8b27caa0d))
+
 ## [4.3.2](https://github.com/mirkolenz/llmhop/compare/v4.3.1...v4.3.2) (2026-11-27)
 
 ### Bug Fixes

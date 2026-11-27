@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.3.2](https://github.com/mirkolenz/llmhop/compare/v4.3.1...v4.3.2) (2026-11-27)
+
+### Bug Fixes
+
+* **top:** list all configured clients ([27f52d4](https://github.com/mirkolenz/llmhop/commit/27f52d4ae4a85461dde0c896d8b2c6b7c4948e55))
+* **top:** show all nvidia gpus of each poll iteration ([89eb8c9](https://github.com/mirkolenz/llmhop/commit/89eb8c9b51e08f42ea8bb0382cd7594db3b1f30b))
+* **top:** truncate free-text columns before dropping others ([f1b051e](https://github.com/mirkolenz/llmhop/commit/f1b051e2ed7de781f2f8f42f884a082d2b0f1358))
+
 ## [4.3.1](https://github.com/mirkolenz/llmhop/compare/v4.3.0...v4.3.1) (2026-11-27)
 
 ### Bug Fixes

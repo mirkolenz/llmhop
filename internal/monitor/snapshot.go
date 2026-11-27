@@ -127,17 +127,18 @@ func (s *snapshot) value(name string, m matcher) float64 {
 	return total
 }
 
-// labels returns the sorted values of a label over the series names.
-func (s *snapshot) labels(label string, names ...string) []string {
-	seen := make(map[string]bool)
+// labels returns the sorted distinct values of a label over the series
+// name.
+func (s *snapshot) labels(label, name string) []string {
+	var out []string
 
-	for _, name := range names {
-		for _, x := range s.series(name) {
-			seen[x.Labels[label]] = true
-		}
+	for _, x := range s.series(name) {
+		out = append(out, x.Labels[label])
 	}
 
-	return slices.Sorted(maps.Keys(seen))
+	slices.Sort(out)
+
+	return slices.Compact(out)
 }
 
 // frame is the latest snapshot and the one before.
@@ -245,9 +246,11 @@ func (f frame) models() []string {
 	return f.now.labels(telemetry.Model, telemetry.QueuedRequests)
 }
 
-// clients returns the names of the clients.
+// clients returns the names of the configured clients, or the anonymous
+// one without auth, whose slot seconds the gateway reports from the start,
+// unlike the requests, which also count those that no client sent.
 func (f frame) clients() []string {
-	return f.now.labels(telemetry.Client, telemetry.Requests, telemetry.RunningRequests)
+	return f.now.labels(telemetry.Client, telemetry.SlotSeconds)
 }
 
 // hostRow is a resource of the host with its used share and what details
